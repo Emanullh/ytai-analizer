@@ -36,7 +36,22 @@ describe("transcriptService", () => {
 
     expect(result).toEqual({
       transcript: "Hola mundo",
-      status: "ok"
+      status: "ok",
+      language: "es",
+      segments: [
+        {
+          startSec: null,
+          endSec: null,
+          text: "Hola",
+          confidence: null
+        },
+        {
+          startSec: null,
+          endSec: null,
+          text: "mundo",
+          confidence: null
+        }
+      ]
     });
     expect(fetchTranscriptMock).toHaveBeenCalledTimes(1);
     expect(fetchTranscriptMock).toHaveBeenCalledWith("video1234567", { lang: "es" });

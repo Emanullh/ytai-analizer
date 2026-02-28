@@ -6,7 +6,9 @@ import {
   YoutubeTranscriptTooManyRequestError,
   YoutubeTranscriptVideoUnavailableError
 } from "youtube-transcript";
+import type { TranscriptResponse } from "youtube-transcript";
 import { env } from "../config/env.js";
+import type { TranscriptSegment } from "./transcriptModels.js";
 import { SimpleCache } from "../utils/cache.js";
 
 export type TranscriptStatus = "ok" | "missing" | "error";
@@ -15,6 +17,8 @@ export interface TranscriptResult {
   transcript: string;
   status: TranscriptStatus;
   warning?: string;
+  language?: string;
+  segments?: TranscriptSegment[];
 }
 
 export interface TranscriptOptions {
@@ -136,6 +140,45 @@ async function fetchTranscriptLines(videoId: string, lang: string | undefined, t
   }
 }
 
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+  return value;
+}
+
+function buildTranscriptSegments(lines: TranscriptResponse[]): TranscriptSegment[] {
+  const segments: TranscriptSegment[] = [];
+
+  for (const line of lines) {
+    const text = line.text.trim();
+    if (!text) {
+      continue;
+    }
+
+    const startSec = toFiniteNumber(line.offset);
+    const durationSec = toFiniteNumber(line.duration);
+    segments.push({
+      startSec,
+      endSec: startSec !== null && durationSec !== null ? startSec + durationSec : null,
+      text,
+      confidence: null
+    });
+  }
+
+  return segments;
+}
+
+function resolveLanguage(lines: TranscriptResponse[], fallback?: string): string {
+  for (const line of lines) {
+    const maybeLanguage = line.lang?.trim();
+    if (maybeLanguage) {
+      return maybeLanguage;
+    }
+  }
+  return fallback ?? "auto";
+}
+
 export async function getTranscript(videoId: string, options: TranscriptOptions = {}): Promise<TranscriptResult> {
   const normalizedVideoId = videoId.trim();
   const lang = options.lang ?? env.transcriptLang;
@@ -159,17 +202,16 @@ export async function getTranscript(videoId: string, options: TranscriptOptions 
 
     try {
       const transcriptLines = await fetchTranscriptLines(normalizedVideoId, lang, timeoutMs);
-      const transcript = transcriptLines
-        .map((line) => line.text.trim())
-        .filter(Boolean)
-        .join(" ")
-        .trim();
+      const segments = buildTranscriptSegments(transcriptLines);
+      const transcript = segments.map((segment) => segment.text).join(" ").trim();
+      const language = resolveLanguage(transcriptLines, lang);
 
       if (!transcript) {
         const missingResult: TranscriptResult = {
           transcript: "",
           status: "missing",
-          warning: buildMissingWarning(normalizedVideoId, lang)
+          warning: buildMissingWarning(normalizedVideoId, lang),
+          language
         };
         transcriptCache.set(cacheKey, missingResult);
         logTranscriptEvent({
@@ -182,7 +224,9 @@ export async function getTranscript(videoId: string, options: TranscriptOptions 
 
       const okResult: TranscriptResult = {
         transcript,
-        status: "ok"
+        status: "ok",
+        language,
+        segments
       };
       transcriptCache.set(cacheKey, okResult);
       logTranscriptEvent({

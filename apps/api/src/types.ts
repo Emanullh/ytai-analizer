@@ -25,6 +25,8 @@ export interface ExportVideoRecord {
   thumbnailPath: string;
   transcript: string;
   transcriptStatus?: "ok" | "missing" | "error";
+  transcriptSource?: "captions" | "asr" | "none";
+  transcriptPath?: string;
 }
 
 export interface TimeframeResolved {

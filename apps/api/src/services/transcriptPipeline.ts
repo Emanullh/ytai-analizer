@@ -1,5 +1,8 @@
 import { isLocalAsrEnabled, LocalAsrStage, transcribeWithLocalAsr } from "./localAsrService.js";
-import { TranscriptResult, getTranscript } from "./transcriptService.js";
+import type { LocalAsrResult } from "./localAsrService.js";
+import { getTranscript } from "./transcriptService.js";
+import type { TranscriptResult } from "./transcriptService.js";
+import type { TranscriptAsrMeta, TranscriptSegment } from "./transcriptModels.js";
 
 export interface TranscriptPipelineOptions {
   outputMp3Path?: string;
@@ -14,7 +17,7 @@ export interface TranscriptPipelineDependencies {
     outputMp3Path: string;
     language?: string;
     onStage?: (stage: LocalAsrStage) => void;
-  }) => Promise<{ transcript: string; status: "ok" | "error"; warning?: string }>;
+  }) => Promise<LocalAsrResult>;
   localAsrEnabled: boolean | (() => boolean);
 }
 
@@ -23,6 +26,9 @@ export interface TranscriptPipelineResult {
   status: "ok" | "missing" | "error";
   source: "captions" | "asr" | "none";
   warning?: string;
+  language?: string;
+  asrMeta?: TranscriptAsrMeta;
+  segments?: TranscriptSegment[];
 }
 
 const defaultDependencies: TranscriptPipelineDependencies = {
@@ -61,12 +67,20 @@ export async function getTranscriptWithFallback(
     typeof dependencies.localAsrEnabled === "function" ? dependencies.localAsrEnabled() : dependencies.localAsrEnabled;
   const captions = await dependencies.captionsProvider(videoId);
   if (captions.status === "ok" && captions.transcript.trim()) {
-    return {
+    const result: TranscriptPipelineResult = {
       transcript: captions.transcript.trim(),
       status: "ok",
       source: "captions",
       warning: captions.warning
     };
+
+    if (captions.language) {
+      result.language = captions.language;
+    }
+    if (captions.segments?.length) {
+      result.segments = captions.segments;
+    }
+    return result;
   }
 
   if (!localAsrEnabled) {
@@ -95,11 +109,25 @@ export async function getTranscriptWithFallback(
   });
 
   if (localAsr.status === "ok" && localAsr.transcript.trim()) {
-    return {
+    const result: TranscriptPipelineResult = {
       transcript: localAsr.transcript.trim(),
       status: "ok",
       source: "asr"
     };
+
+    if (localAsr.language) {
+      result.language = localAsr.language;
+    }
+    if (localAsr.model || localAsr.computeType) {
+      result.asrMeta = {
+        ...(localAsr.model ? { model: localAsr.model } : {}),
+        ...(localAsr.computeType ? { computeType: localAsr.computeType } : {})
+      };
+    }
+    if (localAsr.segments?.length) {
+      result.segments = localAsr.segments;
+    }
+    return result;
   }
 
   return {

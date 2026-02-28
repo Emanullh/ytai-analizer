@@ -149,16 +149,40 @@ def download_audio(video_id: str, output_mp3_path: Path) -> Path:
     return output_mp3_path
 
 
-def transcribe_audio(mp3_path: Path, language: str) -> str:
+def transcribe_audio(mp3_path: Path, language: str) -> Dict[str, Any]:
     language_param: Optional[str] = None if language == "auto" else language
-    segments, _ = MODEL.transcribe(
+    segments, info = MODEL.transcribe(
         str(mp3_path),
         language=language_param,
         beam_size=BEAM_SIZE,
         vad_filter=True,
     )
-    parts = [segment.text.strip() for segment in segments if segment.text and segment.text.strip()]
-    return " ".join(parts).strip()
+    parts: list[str] = []
+    normalized_segments: list[Dict[str, Any]] = []
+
+    for segment in segments:
+        text = segment.text.strip() if segment.text else ""
+        if not text:
+            continue
+
+        parts.append(text)
+        start = float(segment.start) if segment.start is not None else None
+        end = float(segment.end) if segment.end is not None else None
+        normalized_segments.append(
+            {
+                "startSec": start,
+                "endSec": end,
+                "text": text,
+                "confidence": None,
+            }
+        )
+
+    detected_language = getattr(info, "language", None) if info is not None else None
+    return {
+        "transcript": " ".join(parts).strip(),
+        "segments": normalized_segments,
+        "language": detected_language if isinstance(detected_language, str) and detected_language.strip() else language,
+    }
 
 
 for raw_line in sys.stdin:
@@ -186,9 +210,19 @@ for raw_line in sys.stdin:
         mp3_path = download_audio(video_id, output_mp3_path)
 
         emit({"id": request_id, "event": "transcribing"})
-        transcript = transcribe_audio(mp3_path, language)
+        transcription = transcribe_audio(mp3_path, language)
 
-        emit({"id": request_id, "ok": True, "transcript": transcript})
+        emit(
+            {
+                "id": request_id,
+                "ok": True,
+                "transcript": transcription["transcript"],
+                "segments": transcription["segments"],
+                "language": transcription["language"],
+                "model": MODEL_NAME,
+                "computeType": ACTIVE_COMPUTE_TYPE,
+            }
+        )
     except Exception as error:  # pragma: no cover - exercised through process boundary
         message = str(error) if str(error) else "unknown worker error"
         log(f"request failed id={request_id or 'unknown'}: {message}")

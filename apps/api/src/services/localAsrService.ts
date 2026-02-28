@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { env } from "../config/env.js";
 import { resolveAsrPythonPath, runAsrImportHealthCheck } from "./asrRuntime.js";
+import type { TranscriptSegment } from "./transcriptModels.js";
 
 export type LocalAsrStage = "downloading_audio" | "transcribing";
 export type LocalAsrStatus = "ok" | "error";
@@ -21,6 +22,10 @@ export interface LocalAsrResult {
   transcript: string;
   status: LocalAsrStatus;
   warning?: string;
+  language?: string;
+  model?: string;
+  computeType?: string;
+  segments?: TranscriptSegment[];
 }
 
 interface WorkerTask extends LocalAsrRequest {
@@ -36,6 +41,15 @@ interface WorkerResponse {
   ok?: boolean;
   transcript?: string;
   error?: string;
+  language?: string;
+  model?: string;
+  computeType?: string;
+  segments?: Array<{
+    startSec?: unknown;
+    endSec?: unknown;
+    text?: unknown;
+    confidence?: unknown;
+  }>;
 }
 
 class WorkerCrashedError extends Error {
@@ -79,6 +93,37 @@ function normalizeLocalAsrWarning(videoId: string, error: unknown): string {
 
 export function isLocalAsrEnabled(): boolean {
   return runtimeLocalAsrEnabled;
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+  return value;
+}
+
+function normalizeWorkerSegments(segments: WorkerResponse["segments"]): TranscriptSegment[] | undefined {
+  if (!Array.isArray(segments)) {
+    return undefined;
+  }
+
+  const normalized = segments
+    .map((segment) => {
+      const text = typeof segment.text === "string" ? segment.text.trim() : "";
+      if (!text) {
+        return null;
+      }
+
+      return {
+        startSec: toFiniteNumber(segment.startSec),
+        endSec: toFiniteNumber(segment.endSec),
+        text,
+        confidence: toFiniteNumber(segment.confidence)
+      } satisfies TranscriptSegment;
+    })
+    .filter((segment): segment is TranscriptSegment => segment !== null);
+
+  return normalized.length ? normalized : undefined;
 }
 
 class LocalAsrWorkerClient {
@@ -335,9 +380,19 @@ class LocalAsrWorkerClient {
     }
 
     if (payload.ok) {
+      const language = typeof payload.language === "string" && payload.language.trim() ? payload.language.trim() : undefined;
+      const model = typeof payload.model === "string" && payload.model.trim() ? payload.model.trim() : undefined;
+      const computeType =
+        typeof payload.computeType === "string" && payload.computeType.trim() ? payload.computeType.trim() : undefined;
+      const segments = normalizeWorkerSegments(payload.segments);
+
       this.resolveTask(payload.id, {
         transcript: payload.transcript?.trim() ?? "",
-        status: "ok"
+        status: "ok",
+        ...(language ? { language } : {}),
+        ...(model ? { model } : {}),
+        ...(computeType ? { computeType } : {}),
+        ...(segments ? { segments } : {})
       });
       return;
     }

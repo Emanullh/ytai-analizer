@@ -1,59 +1,49 @@
-Tarea: Enriquecer Fase 1 — capturar metadatos crudos completos desde YouTube Data API v3 en raw/videos.jsonl y raw/channel.json
+Tarea: Fase 1 — guardar transcript como artefacto por video (raw/transcripts/<videoId>.jsonl) con segmentación mínima y provenance
 
 Contexto:
-- analyze devuelve lista de videos con campos mínimos.
-- export recibe selectedVideoIds y genera export con transcript y thumbnail.
+- channel.json actual guarda transcript como string gigante.
+- transcriptPipeline retorna { transcript, status, warning? } y el ASR worker puede emitir eventos.
+- Queremos que agentes posteriores puedan trabajar por segmentos y auditar calidad/fuente.
 
 Objetivo:
-Durante export, para cada video seleccionado, obtener y persistir metadatos crudos (YouTube API) que sirven para correlaciones futuras (pacing, duración, engagement proxy).
+Guardar, por cada video, un archivo transcript JSONL en raw/transcripts/ con estructura estable y provenance.
 
 Requisitos (Criterios de aceptación):
-1) raw/channel.json debe incluir “channelStats” (si disponible via channels.list):
-   - subscriberCount, viewCount, videoCount, country, publishedAt, customUrl/handle si aplica
-2) raw/videos.jsonl debe tener 1 JSON por línea con campos (por video):
-   - videoId
-   - title
-   - description (puede ser truncado opcional; pero guarda al menos 2–4k chars)
-   - publishedAt
-   - durationSec (convertir ISO8601 duration a segundos)
-   - categoryId
-   - tags[] (si viene)
-   - defaultLanguage, defaultAudioLanguage
-   - madeForKids, liveBroadcastContent
-   - statistics: viewCount, likeCount, commentCount
-   - thumbnails: { default, medium, high, standard, maxres } (url+width+height si viene)
-   - thumbnailLocalPath (relativo) + thumbnailOriginalUrl (elige best)
-   - transcriptRef:
-     - transcriptPath: raw/transcripts/<videoId>.jsonl
-     - transcriptSource: captions|asr|none
-     - transcriptStatus: ok|missing|error
-3) Performance proxies (derivados básicos pero deterministas) en raw/videos.jsonl:
-   - daysSincePublish (calculado en export time)
-   - viewsPerDay (viewCount/daysSincePublish, handle división por 0)
-   - likeRate, commentRate (si viewCount>0)
-4) Cuotas/eficiencia:
-   - videos.list debe agrupar IDs (batch) para minimizar requests.
-   - caching in-memory aceptable durante el job.
-5) Compatibilidad:
-   - No cambies el response de /analyze si no es necesario.
-   - No rompas channel.json actual (puedes mantenerlo “resumen” y dejar raw/videos.jsonl como el completo).
+1) Por cada video exportado, crear:
+   raw/transcripts/<videoId>.jsonl
+   con líneas JSON del tipo:
+   - header (primera línea):
+     { "type":"meta", "videoId":"...", "source":"captions|asr|none", "status":"ok|missing|error", "language":"auto|es|en|...", "model": "...", "computeType":"...", "createdAt":"ISO" }
+   - segmentos (una o más líneas):
+     { "type":"segment", "i":0, "startSec":null|number, "endSec":null|number, "text":"...", "confidence":null|number }
+2) Segmentación:
+   - Si ASR devuelve segmentos (si puedes obtenerlos del worker), persistir start/end reales.
+   - Si captions no trae timestamps, al menos escribir 1 segmento con start/end null y texto completo (o segmentar por párrafos/sentences SIN inventar timestamps).
+3) channel.json actual:
+   - seguir guardando transcript (string)
+   - agregar transcriptSource y transcriptPath (relativo) SIN romper consumidores:
+     - si temes compatibilidad estricta, agrega solo en raw/videos.jsonl y deja channel.json igual (pero recomendado añadir exportVersion y campos extra tolerantes).
+4) Limpieza:
+   - Quitar artefactos obvios del transcript (ej: “New thinking.”) con una función de “sanitizeTranscript” aplicada SOLO al string final si detecta patrones exactos.
+   - Guardar en meta si se aplicó cleaning: { transcriptCleaned: true|false }.
+5) Observabilidad:
+   - Si transcript missing/error, escribir el archivo JSONL igual con meta + warning (sin segments) para que agentes sepan que falta.
 6) Tests:
-   - Unit tests para el mapper ISO8601 duration -> seconds.
-   - Integration test de export: mock youtubeService para devolver payloads completos y verificar raw/videos.jsonl y raw/channel.json.
+   - Unit tests sanitizeTranscript (casos: no cambia normal, sí quita “New thinking.” exacto al final).
+   - Integration export: cuando transcript ok -> existe archivo y tiene meta+segment.
+   - Cuando transcript missing -> existe archivo y meta status missing y sin segments.
 
 Implementación sugerida:
-- apps/api/src/services/youtubeService.ts:
-  - Añadir getChannelDetails(channelId) -> channels.list snippet/statistics
-  - Añadir getVideoDetails(videoIds[]) -> videos.list snippet/contentDetails/statistics
-  - Reutilizar cliente HTTP y manejo de errores existente.
+- apps/api/src/services/transcriptPipeline.ts:
+  - Extender resultado a:
+    { transcript, status, warning?, source, language?, asrMeta?, segments? }
+  - Mantener compatibilidad con callers (si es breaking, crea función nueva getTranscriptWithArtifacts).
 - apps/api/src/services/exportService.ts:
-  - Antes de transcribir/descargar thumbnail, cargar detalles de videos en batch.
-  - Persistir raw/videos.jsonl de forma incremental para no perder progreso si falla un video.
-- Sanitización:
-  - description puede traer saltos de línea; ok en JSONL.
+  - Luego de obtener transcript, escribir raw/transcripts/<id>.jsonl.
+  - Guardar transcriptPath relativo en raw/videos.jsonl.
+- No inventar timestamps para captions.
 
 Entrega:
-- raw/videos.jsonl con metadatos completos reales
-- raw/channel.json con stats del canal
-- tests verdes
-- docs actualizados (DATA_CONTRACTS.md)
+- raw/transcripts JSONL estable
+- channel.json se mantiene compatible
+- tests verdes y docs actualizados

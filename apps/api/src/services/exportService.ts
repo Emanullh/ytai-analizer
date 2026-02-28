@@ -14,7 +14,10 @@ import {
 import { HttpError } from "../utils/errors.js";
 import { downloadToBuffer } from "../utils/http.js";
 import { sanitizeFolderName } from "../utils/sanitize.js";
-import { getTranscriptWithFallback, TranscriptPipelineResult } from "./transcriptPipeline.js";
+import { sanitizeTranscript } from "../utils/transcript.js";
+import { getTranscriptWithFallback } from "./transcriptPipeline.js";
+import type { TranscriptPipelineResult } from "./transcriptPipeline.js";
+import type { TranscriptSegment } from "./transcriptModels.js";
 import { resolveTimeframeRange } from "../utils/timeframe.js";
 
 export type ExportVideoStage =
@@ -53,7 +56,6 @@ interface ExportDependencies {
 
 type ProcessedVideo = ExportPayload["videos"][number] & {
   warnings: string[];
-  transcriptSource: TranscriptPipelineResult["source"];
   rawTranscriptArtifactPath: string;
 };
 
@@ -109,13 +111,29 @@ interface RawVideoRecordV1 {
   warnings: string[];
 }
 
-interface RawTranscriptRecordV1 {
+interface RawTranscriptMetaRecordV1 {
+  type: "meta";
   videoId: string;
-  transcript: string;
-  transcriptStatus: "ok" | "missing" | "error";
-  exportedAt: string;
-  warnings: string[];
+  source: TranscriptPipelineResult["source"];
+  status: "ok" | "missing" | "error";
+  language: string;
+  model: string | null;
+  computeType: string | null;
+  createdAt: string;
+  transcriptCleaned: boolean;
+  warning?: string;
 }
+
+interface RawTranscriptSegmentRecordV1 {
+  type: "segment";
+  i: number;
+  startSec: number | null;
+  endSec: number | null;
+  text: string;
+  confidence: number | null;
+}
+
+type RawTranscriptRecordV1 = RawTranscriptMetaRecordV1 | RawTranscriptSegmentRecordV1;
 
 interface ExportManifestV1 {
   jobId: string;
@@ -262,6 +280,93 @@ function toTranscriptStatus(value: ProcessedVideo["transcriptStatus"]): "ok" | "
     return value;
   }
   return "missing";
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+  return value;
+}
+
+function normalizeTranscriptSegments(segments: TranscriptSegment[] | undefined): TranscriptSegment[] {
+  if (!Array.isArray(segments)) {
+    return [];
+  }
+
+  return segments
+    .map((segment) => {
+      const text = segment.text.trim();
+      if (!text) {
+        return null;
+      }
+
+      return {
+        startSec: toFiniteNumber(segment.startSec),
+        endSec: toFiniteNumber(segment.endSec),
+        text,
+        confidence: toFiniteNumber(segment.confidence)
+      } satisfies TranscriptSegment;
+    })
+    .filter((segment): segment is TranscriptSegment => segment !== null);
+}
+
+function resolveTranscriptLanguage(result: TranscriptPipelineResult): string {
+  if (result.language?.trim()) {
+    return result.language.trim();
+  }
+  if (result.source === "asr") {
+    return env.localAsrLanguage || "auto";
+  }
+  return env.transcriptLang ?? "auto";
+}
+
+function buildTranscriptArtifactRecords(input: {
+  videoId: string;
+  result: TranscriptPipelineResult;
+  transcriptStatus: "ok" | "missing" | "error";
+  transcriptText: string;
+  transcriptCleaned: boolean;
+  createdAt: string;
+}): RawTranscriptRecordV1[] {
+  const meta: RawTranscriptMetaRecordV1 = {
+    type: "meta",
+    videoId: input.videoId,
+    source: input.result.source,
+    status: input.transcriptStatus,
+    language: resolveTranscriptLanguage(input.result),
+    model: input.result.asrMeta?.model ?? null,
+    computeType: input.result.asrMeta?.computeType ?? null,
+    createdAt: input.createdAt,
+    transcriptCleaned: input.transcriptCleaned,
+    ...(input.result.warning ? { warning: input.result.warning } : {})
+  };
+
+  const segments = normalizeTranscriptSegments(input.result.segments);
+  const effectiveSegments =
+    segments.length > 0
+      ? segments
+      : input.transcriptStatus === "ok" && input.transcriptText.trim()
+        ? [
+            {
+              startSec: null,
+              endSec: null,
+              text: input.transcriptText,
+              confidence: null
+            } satisfies TranscriptSegment
+          ]
+        : [];
+
+  const segmentRecords: RawTranscriptSegmentRecordV1[] = effectiveSegments.map((segment, index) => ({
+    type: "segment",
+    i: index,
+    startSec: segment.startSec,
+    endSec: segment.endSec,
+    text: segment.text,
+    confidence: segment.confidence
+  }));
+
+  return [meta, ...segmentRecords];
 }
 
 async function collectThumbnailAvailability(
@@ -579,14 +684,16 @@ export async function exportSelectedVideos(
         }
 
         const transcriptStatus = toTranscriptStatus(transcriptResult.status);
-        const transcriptRecord: RawTranscriptRecordV1 = {
+        const sanitizedTranscriptResult = sanitizeTranscript(transcriptResult.transcript);
+        const transcriptArtifactRecords = buildTranscriptArtifactRecords({
           videoId: video.videoId,
-          transcript: transcriptResult.transcript,
+          result: transcriptResult,
           transcriptStatus,
-          exportedAt,
-          warnings: [...videoWarnings]
-        };
-        await writeJsonLines(transcriptAbsolutePath, [transcriptRecord]);
+          transcriptText: sanitizedTranscriptResult.transcript,
+          transcriptCleaned: sanitizedTranscriptResult.cleaned,
+          createdAt: exportedAt
+        });
+        await writeJsonLines(transcriptAbsolutePath, transcriptArtifactRecords);
 
         const transcriptRef: RawVideoRecordV1["transcriptRef"] = {
           transcriptPath: transcriptRelativePath,
@@ -602,17 +709,18 @@ export async function exportSelectedVideos(
           viewCount: video.viewCount,
           publishedAt: video.publishedAt,
           thumbnailPath: thumbnailRelativePath,
-          transcript: transcriptResult.transcript,
+          transcript: sanitizedTranscriptResult.transcript,
           transcriptStatus: transcriptStatus,
-          warnings: videoWarnings,
           transcriptSource: transcriptResult.source,
+          transcriptPath: transcriptRelativePath,
+          warnings: videoWarnings,
           rawTranscriptArtifactPath: transcriptAbsolutePath
         };
       }
     );
 
     const exportVideos: ExportPayload["videos"] = processedVideos.map(
-      ({ warnings: _, transcriptSource: __, rawTranscriptArtifactPath: ___, ...video }) => video
+      ({ warnings: _, rawTranscriptArtifactPath: __, ...video }) => video
     );
     const thumbnailAvailability = await collectThumbnailAvailability(exportsRoot, channelFolderPath, processedVideos);
     for (const item of processedVideos) {

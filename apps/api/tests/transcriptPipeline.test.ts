@@ -63,6 +63,57 @@ describe("transcriptPipeline", () => {
     });
   });
 
+  it("propagates ASR segments and provenance when available", async () => {
+    const captionsProvider = vi.fn().mockResolvedValue({
+      transcript: "",
+      status: "missing"
+    });
+    const localAsrProvider = vi.fn().mockResolvedValue({
+      transcript: "texto local",
+      status: "ok",
+      language: "es",
+      model: "large-v3-turbo",
+      computeType: "int8",
+      segments: [
+        {
+          startSec: 0,
+          endSec: 2.5,
+          text: "texto local",
+          confidence: null
+        }
+      ]
+    });
+
+    const result = await getTranscriptWithFallback(
+      "video-2b",
+      { outputMp3Path: "/tmp/video-2b.mp3", language: "es" },
+      {
+        captionsProvider,
+        localAsrProvider,
+        localAsrEnabled: true
+      }
+    );
+
+    expect(result).toEqual({
+      transcript: "texto local",
+      status: "ok",
+      source: "asr",
+      language: "es",
+      asrMeta: {
+        model: "large-v3-turbo",
+        computeType: "int8"
+      },
+      segments: [
+        {
+          startSec: 0,
+          endSec: 2.5,
+          text: "texto local",
+          confidence: null
+        }
+      ]
+    });
+  });
+
   it("returns empty transcript and warning when local ASR fails", async () => {
     const captionsProvider = vi.fn().mockResolvedValue({
       transcript: "",

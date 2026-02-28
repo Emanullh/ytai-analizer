@@ -10,6 +10,8 @@
   - transcript es best effort;
   - el export nunca falla por transcript ausente o error recuperable;
   - `transcript` siempre string en JSON (si falla, `""`);
+  - `channel.json` agrega `transcriptSource` y `transcriptPath` por video (campos opcionales);
+  - `raw/transcripts/<videoId>.jsonl` siempre existe con una primera línea `meta`;
   - warning visible en UI vía `warnings` de la respuesta de `/export`.
 
 ## ARCH
@@ -31,4 +33,5 @@ Servicio dedicado: `apps/api/src/services/transcriptService.ts`
 - Integración en export:
   - concurrencia limitada (3 workers);
   - warnings agregados por video cuando `status !== "ok"`;
-  - `channel.json` mantiene `transcript` (string) y agrega `transcriptStatus` opcional para diagnóstico.
+  - `channel.json` mantiene `transcript` (string) y agrega `transcriptStatus`, `transcriptSource`, `transcriptPath` (opcionales);
+  - el artefacto transcript usa JSONL con `meta` + `segment[]`, sin inventar timestamps para captions sin timing.

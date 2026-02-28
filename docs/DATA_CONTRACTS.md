@@ -250,7 +250,9 @@ Ruta final:
       "publishedAt": "2025-01-01T00:00:00.000Z",
       "thumbnailPath": "thumbnails/video1.jpg",
       "transcript": "texto completo",
-      "transcriptStatus": "ok"
+      "transcriptStatus": "ok",
+      "transcriptSource": "captions",
+      "transcriptPath": "raw/transcripts/video1.jsonl"
     }
   ]
 }
@@ -261,6 +263,7 @@ Ruta final:
 - `channel.json` se mantiene en la misma ruta (`exports/<channel>/channel.json`).
 - Se conservan todos los campos consumidos actualmente (`channelName`, `channelId`, `sourceInput`, `timeframe`, `videos[*]`).
 - Se agregan campos no rompientes: `exportVersion`, `exportedAt`, `timeframeResolved`.
+- En `videos[*]` se mantienen los campos previos y se agregan `transcriptSource` y `transcriptPath` como opcionales.
 - Recomendación para consumidores tolerantes: ignorar campos desconocidos.
 
 ### 3.3 `manifest.json` (orquestación offline)
@@ -368,12 +371,26 @@ Campos:
 
 #### 3.4.3 `raw/transcripts/<videoId>.jsonl`
 
-- Un JSON por línea con transcript raw y trazabilidad:
-  - `videoId`
-  - `transcript`
-  - `transcriptStatus`
-  - `exportedAt`
-  - `warnings[]`
+- JSONL multi-línea estable por video:
+  - primera línea `meta`:
+    - `type: "meta"`
+    - `videoId`
+    - `source` (`captions|asr|none`)
+    - `status` (`ok|missing|error`)
+    - `language` (`auto|es|en|...`)
+    - `model` (`string|null`)
+    - `computeType` (`string|null`)
+    - `createdAt` (ISO)
+    - `transcriptCleaned` (`boolean`)
+    - `warning` (opcional)
+  - líneas siguientes `segment` (0..n):
+    - `type: "segment"`
+    - `i`
+    - `startSec` (`number|null`)
+    - `endSec` (`number|null`)
+    - `text`
+    - `confidence` (`number|null`)
+- Si transcript está `missing|error`, se escribe igualmente el archivo con la línea `meta` y sin segmentos.
 
 ## 4) Contratos internos de pipeline
 
@@ -387,6 +404,14 @@ getTranscriptWithFallback(videoId, options?) => {
   status: "ok" | "missing" | "error";
   source: "captions" | "asr" | "none";
   warning?: string;
+  language?: string;
+  asrMeta?: { model?: string; computeType?: string };
+  segments?: Array<{
+    startSec: number | null;
+    endSec: number | null;
+    text: string;
+    confidence: number | null;
+  }>;
 }
 ```
 
@@ -429,7 +454,17 @@ Worker output (stdout JSON lines):
 - resultado ok:
 
 ```json
-{ "id": "uuid", "ok": true, "transcript": "..." }
+{
+  "id": "uuid",
+  "ok": true,
+  "transcript": "...",
+  "language": "es",
+  "model": "large-v3-turbo",
+  "computeType": "int8",
+  "segments": [
+    { "startSec": 0.0, "endSec": 4.2, "text": "hola", "confidence": null }
+  ]
+}
 ```
 
 - resultado error:

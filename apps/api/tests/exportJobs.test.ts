@@ -263,7 +263,12 @@ describe("export jobs + SSE progress", () => {
       exportVersion: string;
       exportedAt: string;
       timeframeResolved: { publishedAfter: string; publishedBefore: string };
-      videos: Array<{ videoId: string; transcript: string }>;
+      videos: Array<{
+        videoId: string;
+        transcript: string;
+        transcriptSource?: "captions" | "asr" | "none";
+        transcriptPath?: string;
+      }>;
     };
 
     expect(exportedJson.exportVersion).toBe("1.1");
@@ -277,6 +282,10 @@ describe("export jobs + SSE progress", () => {
     expect(exportedJson.videos).toHaveLength(2);
     expect(exportedJson.videos[0]?.transcript).toBe("transcript captions video uno");
     expect(exportedJson.videos[1]?.transcript).toBe("");
+    expect(exportedJson.videos[0]?.transcriptSource).toBe("captions");
+    expect(exportedJson.videos[0]?.transcriptPath).toBe("raw/transcripts/video0000011.jsonl");
+    expect(exportedJson.videos[1]?.transcriptSource).toBe("none");
+    expect(exportedJson.videos[1]?.transcriptPath).toBe("raw/transcripts/video0000022.jsonl");
 
     const manifestRaw = await fs.readFile(path.join(statusBody.exportPath as string, "manifest.json"), "utf-8");
     const manifest = JSON.parse(manifestRaw) as {
@@ -380,9 +389,147 @@ describe("export jobs + SSE progress", () => {
       path.join(statusBody.exportPath as string, "raw", "transcripts", "video0000011.jsonl"),
       "utf-8"
     );
-    const transcriptVideoOne = JSON.parse(transcriptVideoOneRaw.trim()) as { transcriptStatus: string; transcript: string };
-    expect(transcriptVideoOne.transcriptStatus).toBe("ok");
-    expect(transcriptVideoOne.transcript).toBe("transcript captions video uno");
+    const transcriptVideoOneLines = transcriptVideoOneRaw
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(transcriptVideoOneLines.length).toBeGreaterThanOrEqual(2);
+
+    const transcriptMeta = transcriptVideoOneLines[0] as {
+      type: "meta";
+      status: string;
+      source: string;
+      language: string;
+      transcriptCleaned: boolean;
+      model: string | null;
+      computeType: string | null;
+    };
+    expect(transcriptMeta.type).toBe("meta");
+    expect(transcriptMeta.status).toBe("ok");
+    expect(transcriptMeta.source).toBe("captions");
+    expect(typeof transcriptMeta.language).toBe("string");
+    expect(transcriptMeta.transcriptCleaned).toBe(false);
+    expect(transcriptMeta.model).toBe(null);
+    expect(transcriptMeta.computeType).toBe(null);
+
+    const transcriptSegments = transcriptVideoOneLines.filter((line) => line.type === "segment");
+    expect(transcriptSegments).toHaveLength(1);
+    expect(transcriptSegments[0]).toMatchObject({
+      type: "segment",
+      i: 0,
+      startSec: null,
+      endSec: null,
+      text: "transcript captions video uno",
+      confidence: null
+    });
+  });
+
+  it("writes transcript artifact with meta only when transcript is missing", async () => {
+    getSelectedVideoDetailsMock.mockResolvedValue({
+      warnings: [],
+      videos: [
+        {
+          videoId: "video0000088",
+          title: "Video Missing Transcript",
+          publishedAt: "2025-01-04T00:00:00.000Z",
+          viewCount: 40,
+          thumbnailUrl: "https://img.example/video88.jpg"
+        }
+      ]
+    });
+    getVideoDetailsMock.mockResolvedValue({
+      warnings: [],
+      videos: [
+        {
+          videoId: "video0000088",
+          title: "Video Missing Transcript",
+          description: "Descripcion 88",
+          publishedAt: "2025-01-04T00:00:00.000Z",
+          durationSec: 180,
+          categoryId: "22",
+          tags: [],
+          madeForKids: false,
+          liveBroadcastContent: "none",
+          statistics: {
+            viewCount: 40,
+            likeCount: 0,
+            commentCount: 0
+          },
+          thumbnails: {
+            high: { url: "https://img.example/video88.jpg", width: 480, height: 360 }
+          },
+          thumbnailOriginalUrl: "https://img.example/video88.jpg"
+        }
+      ]
+    });
+    getChannelDetailsMock.mockResolvedValue({
+      channelId: "UC1234567890123456789012",
+      channelName: "Canal Demo Jobs",
+      channelStats: {
+        subscriberCount: 1000
+      },
+      warnings: []
+    });
+    downloadToBufferMock.mockResolvedValue(Buffer.from("thumbnail"));
+    getTranscriptWithFallbackMock.mockResolvedValue({
+      transcript: "",
+      status: "missing",
+      source: "none",
+      warning: "Transcript unavailable for video video0000088 (captions missing/disabled)"
+    });
+
+    const createJobResponse = await app.inject({
+      method: "POST",
+      url: "/export/jobs",
+      payload: {
+        channelId: "UC1234567890123456789012",
+        channelName: "Canal Demo Jobs",
+        sourceInput: "https://www.youtube.com/@demo",
+        timeframe: "6m",
+        selectedVideoIds: ["video0000088"]
+      }
+    });
+    expect(createJobResponse.statusCode).toBe(200);
+
+    const { jobId } = createJobResponse.json() as { jobId: string };
+    const eventsResponse = await app.inject({
+      method: "GET",
+      url: `/export/jobs/${jobId}/events`
+    });
+    expect(eventsResponse.statusCode).toBe(200);
+    const events = parseSsePayload(eventsResponse.body);
+    expect(events.at(-1)?.event).toBe("job_done");
+
+    const jobStatusResponse = await app.inject({
+      method: "GET",
+      url: `/export/jobs/${jobId}`
+    });
+    expect(jobStatusResponse.statusCode).toBe(200);
+    const statusBody = jobStatusResponse.json() as {
+      status: string;
+      exportPath?: string;
+    };
+    expect(statusBody.status).toBe("done");
+
+    const transcriptArtifactRaw = await fs.readFile(
+      path.join(statusBody.exportPath as string, "raw", "transcripts", "video0000088.jsonl"),
+      "utf-8"
+    );
+    const transcriptArtifactLines = transcriptArtifactRaw
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+    expect(transcriptArtifactLines).toHaveLength(1);
+    expect(transcriptArtifactLines[0]).toMatchObject({
+      type: "meta",
+      videoId: "video0000088",
+      source: "none",
+      status: "missing"
+    });
+    expect(typeof transcriptArtifactLines[0]?.warning).toBe("string");
   });
 
   it("continues export with warning when transcript pipeline throws (ASR health-check failure)", async () => {
