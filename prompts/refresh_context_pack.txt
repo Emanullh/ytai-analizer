@@ -1,0 +1,41 @@
+Tarea: Generar/actualizar "Context Pack" del repo (para otras IAs) + guardar resumen en memoria claude-flow
+
+Reglas:
+- Produce documentación práctica, no marketing.
+- Referencia archivos reales (paths) y menciona comandos exactos.
+- Mantén AI_CONTEXT.md <= ~800 líneas. El resto va en DATA_CONTRACTS y REPO_MAP.
+
+STEP 1 — LEARN (MCP):
+- Usa memory_search namespace="project" query="ytai-analizer context pack architecture endpoints export schema ASR worker"
+- Si encuentras un resumen existente, úsalo como base y actualízalo.
+
+STEP 2 — COORD (MCP):
+- swarm_init topology="hierarchical" maxAgents=4 strategy="specialized"
+- agent_spawn:
+  1) "mapper": mapear repo y entry points
+  2) "api-analyst": endpoints + export job + SSE + filesystem
+  3) "web-analyst": flujo UI + modal de progreso + estados
+  4) "doc-writer": consolidar docs y limpiar redundancias
+
+STEP 3 — EXECUTE (real):
+1) Inspecciona: AGENTS.md, pnpm-workspace.yaml, package.json root,
+   apps/api (server, routes, services export/transcript/asr),
+   apps/web (pages/components/export modal),
+   scripts/setup_asr.*, requirements-asr.txt, README.
+2) Genera/actualiza estos archivos:
+   - docs/AI_CONTEXT.md
+   - docs/DATA_CONTRACTS.md
+   - docs/REPO_MAP.md
+   - (opcional) docs/AI_CONTEXT.json (estructura: system, flows, endpoints, schemas, runbook)
+3) Asegura que docs mencionen:
+   - cómo correr: pnpm install, pnpm dev, pnpm test
+   - env vars requeridas y opcionales (YouTube key, ASR venv, ffmpeg)
+   - export format (exportVersion + schema)
+   - Windows notes (paths del venv, ffmpeg, python exe)
+4) Verifica que los docs apunten a archivos que existan (no inventes rutas).
+
+STEP 4 — REMEMBER (MCP):
+- memory_store namespace="project" upsert=true:
+  - key="project/overview" value=contenido resumido de docs/AI_CONTEXT.md (compacto, 1–2 pantallas)
+  - key="project/contracts" value=resumen de endpoints + schema export
+  - key="project/runbook" value=comandos + env vars + troubleshooting

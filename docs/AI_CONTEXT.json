@@ -1,0 +1,163 @@
+{
+  "system": {
+    "name": "ytai-analizer",
+    "type": "pnpm monorepo",
+    "workspace": "apps/*",
+    "apps": [
+      {
+        "name": "api",
+        "path": "apps/api",
+        "entry": "apps/api/src/server.ts",
+        "stack": ["node", "typescript", "fastify", "zod"]
+      },
+      {
+        "name": "web",
+        "path": "apps/web",
+        "entry": "apps/web/src/main.tsx",
+        "stack": ["react", "vite", "typescript"]
+      }
+    ],
+    "asr": {
+      "worker": "apps/api/scripts/asr_worker.py",
+      "requirements": "apps/api/scripts/requirements-asr.txt",
+      "setupScripts": [
+        "scripts/setup_asr.mjs",
+        "scripts/setup_asr.sh",
+        "scripts/setup_asr.ps1"
+      ],
+      "checkScript": "scripts/check_asr.mjs"
+    }
+  },
+  "flows": [
+    {
+      "name": "analyze-channel",
+      "frontend": "apps/web/src/App.tsx",
+      "backend": [
+        "apps/api/src/server.ts",
+        "apps/api/src/services/youtubeService.ts"
+      ],
+      "request": "POST /analyze",
+      "response": "AnalyzeResult"
+    },
+    {
+      "name": "export-job-sse",
+      "frontend": [
+        "apps/web/src/App.tsx",
+        "apps/web/src/exportJobState.ts"
+      ],
+      "backend": [
+        "apps/api/src/server.ts",
+        "apps/api/src/services/exportJobService.ts",
+        "apps/api/src/services/exportService.ts"
+      ],
+      "steps": [
+        "POST /export/jobs",
+        "GET /export/jobs/:jobId/events",
+        "SSE events -> reducer",
+        "channel.json write"
+      ]
+    },
+    {
+      "name": "transcript-fallback",
+      "backend": [
+        "apps/api/src/services/transcriptPipeline.ts",
+        "apps/api/src/services/transcriptService.ts",
+        "apps/api/src/services/localAsrService.ts",
+        "apps/api/src/services/asrRuntime.ts",
+        "apps/api/scripts/asr_worker.py"
+      ],
+      "policy": "captions first, local ASR fallback, never fail full export for transcript-only errors"
+    }
+  ],
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/health",
+      "response": { "ok": true }
+    },
+    {
+      "method": "POST",
+      "path": "/analyze",
+      "body": { "sourceInput": "string", "timeframe": "1m|6m|1y" },
+      "responseType": "AnalyzeResult"
+    },
+    {
+      "method": "POST",
+      "path": "/export",
+      "bodyType": "ExportRequest",
+      "responseType": "{folderPath,warnings,exportedCount}"
+    },
+    {
+      "method": "POST",
+      "path": "/export/jobs",
+      "bodyType": "ExportRequest",
+      "response": { "jobId": "uuid" }
+    },
+    {
+      "method": "GET",
+      "path": "/export/jobs/:jobId",
+      "responseType": "ExportJobState"
+    },
+    {
+      "method": "GET",
+      "path": "/export/jobs/:jobId/events",
+      "responseType": "SSE<ExportJobEvent>"
+    }
+  ],
+  "schemas": {
+    "exportPayloadRuntime": {
+      "source": "apps/api/src/types.ts",
+      "fields": ["channelName", "channelId", "sourceInput", "timeframe", "videos[]"]
+    },
+    "exportVersioning": {
+      "runtimeFieldPresent": false,
+      "implicitVersion": "1.0",
+      "recommendedField": "exportVersion"
+    },
+    "videoRecord": {
+      "fields": [
+        "videoId",
+        "title",
+        "viewCount",
+        "publishedAt",
+        "thumbnailPath",
+        "transcript",
+        "transcriptStatus?"
+      ]
+    },
+    "sseEvents": [
+      "job_started",
+      "video_progress",
+      "job_progress",
+      "warning",
+      "job_done",
+      "job_failed"
+    ]
+  },
+  "runbook": {
+    "install": ["pnpm install"],
+    "dev": ["pnpm dev"],
+    "test": ["pnpm test"],
+    "asrSetup": ["pnpm asr:setup", "pnpm asr:check"],
+    "requiredEnv": ["YOUTUBE_API_KEY"],
+    "optionalEnv": [
+      "PORT",
+      "TRANSCRIPT_LANG",
+      "LOCAL_ASR_ENABLED",
+      "LOCAL_ASR_MODEL",
+      "LOCAL_ASR_COMPUTE_TYPE",
+      "LOCAL_ASR_LANGUAGE",
+      "LOCAL_ASR_BEAM_SIZE",
+      "LOCAL_ASR_MAX_CONCURRENCY",
+      "LOCAL_ASR_TIMEOUT_SEC",
+      "YOUTUBE_AUDIO_DOWNLOAD_TIMEOUT_SEC",
+      "ASR_PYTHON_PATH"
+    ],
+    "windowsNotes": {
+      "venvPython": ".venv-asr\\\\Scripts\\\\python.exe",
+      "activate": ".\\\\.venv-asr\\\\Scripts\\\\Activate.ps1",
+      "asrPythonPathExample": "C:\\\\path\\\\to\\\\ytai-analizer\\\\.venv-asr\\\\Scripts\\\\python.exe",
+      "ffmpeg": "ffmpeg.exe must be in PATH"
+    }
+  }
+}

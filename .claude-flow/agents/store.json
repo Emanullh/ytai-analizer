@@ -1,0 +1,49 @@
+{
+  "agents": {
+    "mapper": {
+      "agentId": "mapper",
+      "agentType": "researcher",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {},
+      "createdAt": "2026-02-28T21:02:48.032Z",
+      "model": "haiku",
+      "modelRoutedBy": "router"
+    },
+    "api-analyst": {
+      "agentId": "api-analyst",
+      "agentType": "architect",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {},
+      "createdAt": "2026-02-28T21:02:48.077Z",
+      "model": "sonnet",
+      "modelRoutedBy": "router"
+    },
+    "web-analyst": {
+      "agentId": "web-analyst",
+      "agentType": "coder",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {},
+      "createdAt": "2026-02-28T21:02:48.077Z",
+      "model": "sonnet",
+      "modelRoutedBy": "router"
+    },
+    "doc-writer": {
+      "agentId": "doc-writer",
+      "agentType": "reviewer",
+      "status": "idle",
+      "health": 1,
+      "taskCount": 0,
+      "config": {},
+      "createdAt": "2026-02-28T21:02:48.078Z",
+      "model": "haiku",
+      "modelRoutedBy": "router"
+    }
+  },
+  "version": "3.0.0"
+}
