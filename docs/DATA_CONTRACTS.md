@@ -228,14 +228,20 @@ Ruta final:
 
 - `exports/<channel_folder>/channel.json`
 
-### 3.1 Formato actual en runtime
+### 3.1 Formato actual en runtime (`exportVersion: "1.1"`)
 
 ```json
 {
+  "exportVersion": "1.1",
+  "exportedAt": "2026-02-28T16:00:00.000Z",
   "channelName": "Canal Demo",
   "channelId": "UC1234567890123456789012",
   "sourceInput": "https://www.youtube.com/@demo",
   "timeframe": "6m",
+  "timeframeResolved": {
+    "publishedAfter": "2025-08-28T16:00:00.000Z",
+    "publishedBefore": "2026-02-28T16:00:00.000Z"
+  },
   "videos": [
     {
       "videoId": "video1",
@@ -250,82 +256,99 @@ Ruta final:
 }
 ```
 
-### 3.2 Versionado (`exportVersion`) y compatibilidad
+### 3.2 Compatibilidad hacia atrás
 
-Estado actual:
+- `channel.json` se mantiene en la misma ruta (`exports/<channel>/channel.json`).
+- Se conservan todos los campos consumidos actualmente (`channelName`, `channelId`, `sourceInput`, `timeframe`, `videos[*]`).
+- Se agregan campos no rompientes: `exportVersion`, `exportedAt`, `timeframeResolved`.
+- Recomendación para consumidores tolerantes: ignorar campos desconocidos.
 
-- El JSON generado hoy **no** incluye campo `exportVersion`.
+### 3.3 `manifest.json` (orquestación offline)
 
-Contrato recomendado para consumidores:
+Ruta:
 
-- Tratar el payload actual como versión implícita `1.0`.
-- A nivel de parser, usar:
-  - `exportVersion ?? "1.0"`
-  - tolerancia a campos extra
+- `exports/<channel_folder>/manifest.json`
 
-Propuesta forward-compatible para próximos cambios:
-
-```json
-{
-  "exportVersion": "1.0",
-  "channelName": "...",
-  "channelId": "...",
-  "sourceInput": "...",
-  "timeframe": "6m",
-  "videos": []
-}
-```
-
-### 3.3 JSON Schema sugerido (compatible con runtime actual)
+Formato:
 
 ```json
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://ytai.local/schemas/channel-export-v1.json",
-  "title": "YTAI Channel Export",
-  "type": "object",
-  "additionalProperties": false,
-  "properties": {
-    "exportVersion": {
-      "type": "string",
-      "const": "1.0",
-      "description": "Opcional en runtime actual; si falta, asumir 1.0"
-    },
-    "channelName": { "type": "string", "minLength": 1 },
-    "channelId": { "type": "string", "pattern": "^UC[\\w-]{22}$" },
-    "sourceInput": { "type": "string", "minLength": 1 },
-    "timeframe": { "type": "string", "enum": ["1m", "6m", "1y"] },
-    "videos": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "videoId": { "type": "string", "minLength": 1 },
-          "title": { "type": "string", "minLength": 1 },
-          "viewCount": { "type": "integer", "minimum": 0 },
-          "publishedAt": { "type": "string", "format": "date-time" },
-          "thumbnailPath": { "type": "string", "minLength": 1 },
-          "transcript": { "type": "string" },
-          "transcriptStatus": {
-            "type": "string",
-            "enum": ["ok", "missing", "error"]
-          }
-        },
-        "required": [
-          "videoId",
-          "title",
-          "viewCount",
-          "publishedAt",
-          "thumbnailPath",
-          "transcript"
-        ]
-      }
-    }
+  "jobId": "uuid",
+  "channelId": "UC1234567890123456789012",
+  "channelFolder": "Canal_Demo",
+  "exportVersion": "1.1",
+  "exportedAt": "2026-02-28T16:00:00.000Z",
+  "counts": {
+    "totalVideosSelected": 2,
+    "transcriptsOk": 1,
+    "transcriptsMissing": 0,
+    "transcriptsError": 1,
+    "thumbnailsOk": 2,
+    "thumbnailsFailed": 0
   },
-  "required": ["channelName", "channelId", "sourceInput", "timeframe", "videos"]
+  "warnings": ["..."],
+  "artifacts": [
+    "channel.json",
+    "manifest.json",
+    "raw/channel.json",
+    "raw/videos.jsonl",
+    "raw/transcripts/video1.jsonl",
+    "raw/thumbnails/video1.jpg"
+  ]
 }
 ```
+
+Reglas:
+
+- `artifacts` contiene rutas **relativas** a `exports/<channel_folder>/`.
+- No se permiten paths absolutos ni traversal (`..`).
+
+### 3.4 Raw Pack v1
+
+Estructura:
+
+```text
+exports/<channel_folder>/
+  channel.json
+  manifest.json
+  thumbnails/
+    <videoId>.jpg
+  raw/
+    channel.json
+    videos.jsonl
+    transcripts/
+      <videoId>.jsonl
+    thumbnails/ -> ../thumbnails (symlink; fallback: copia)
+```
+
+#### 3.4.1 `raw/channel.json`
+
+Campos:
+
+- `channelId`, `channelName`, `sourceInput`, `timeframe`
+- `timeframeResolved`
+- `exportedAt`, `exportVersion`, `jobId`
+- `provenance`:
+  - `dataSources[]`
+  - `warnings[]`
+  - `env`: snapshot mínimo (`LOCAL_ASR_ENABLED`, `TRANSCRIPT_LANG`)
+
+#### 3.4.2 `raw/videos.jsonl`
+
+- Un JSON por línea con metadata del video + referencias:
+  - `transcriptPath` (`raw/transcripts/<videoId>.jsonl`)
+  - `thumbnailPath` (`raw/thumbnails/<videoId>.jpg`)
+  - `transcriptStatus`
+  - `warnings[]`
+
+#### 3.4.3 `raw/transcripts/<videoId>.jsonl`
+
+- Un JSON por línea con transcript raw y trazabilidad:
+  - `videoId`
+  - `transcript`
+  - `transcriptStatus`
+  - `exportedAt`
+  - `warnings[]`
 
 ## 4) Contratos internos de pipeline
 
@@ -396,6 +419,11 @@ Desde `apps/api/src/services/exportService.ts`:
 - crea `exports/`
 - crea thumbnails en `exports/<canal>/thumbnails/`
 - escribe `exports/<canal>/channel.json`
+- escribe `exports/<canal>/manifest.json`
+- escribe `exports/<canal>/raw/channel.json`
+- escribe `exports/<canal>/raw/videos.jsonl`
+- escribe `exports/<canal>/raw/transcripts/<videoId>.jsonl`
+- crea `exports/<canal>/raw/thumbnails` (symlink a `../thumbnails`, con fallback a copia)
 - usa temporal `exports/.tmp/<jobId>/audio`
 - limpia temporal al finalizar (success/error)
 
@@ -405,7 +433,7 @@ Sanitización de folder de canal:
 
 ## 6) Cobertura de tests ligada a contratos
 
-- `apps/api/tests/exportJobs.test.ts`: valida flujo jobs + SSE + JSON exportado
+- `apps/api/tests/exportJobs.test.ts`: valida flujo jobs + SSE + `channel.json` + `manifest.json` + `raw/*`
 - `apps/api/tests/transcriptPipeline.test.ts`: captions vs fallback ASR
 - `apps/api/tests/transcriptService.test.ts`: retry/missing/error de captions
 - `apps/api/tests/asrRuntime.test.ts`: resolución de python path (`ASR_PYTHON_PATH`, venv, fallback)

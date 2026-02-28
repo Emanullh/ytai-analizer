@@ -1,0 +1,67 @@
+Tarea: Implementar Fase 1 de extracción — “Raw Pack v1” en export (sin romper compatibilidad)
+
+Contexto del repo:
+- Export actual escribe:
+  - exports/<channel>/channel.json
+  - exports/<channel>/thumbnails/<videoId>.jpg
+- Export asíncrono con SSE via exportJobService/exportService.
+- Contratos actuales están documentados en docs/DATA_CONTRACTS.md y usados en tests.
+
+Objetivo:
+Además del export actual, escribir un paquete “raw” completo para que agentes posteriores puedan enriquecer sin re-scraping.
+
+Requisitos (Criterios de aceptación):
+1) Mantener compatibilidad:
+   - channel.json actual debe seguir existiendo y ser parseable por consumidores actuales.
+2) Crear estructura adicional por export:
+   exports/<channel>/
+     manifest.json
+     raw/
+       channel.json
+       videos.jsonl
+       transcripts/
+         <videoId>.jsonl
+       thumbnails/
+         <videoId>.jpg   (reusar el mismo archivo existente o mantener symlink/copia; preferible reusar path actual)
+3) Agregar versionado y trazabilidad:
+   - channel.json (actual) debe incluir:
+     - exportVersion: "1.1" (nuevo; si prefieres, "1.0" + compat, pero define uno y documenta)
+     - exportedAt (ISO)
+     - timeframeResolved: { publishedAfter, publishedBefore } (ISO)
+   - raw/channel.json debe incluir:
+     - channelId, channelName, sourceInput, timeframe, exportedAt, exportVersion
+     - jobId
+     - y un bloque provenance (dataSources, warnings, env snapshot mínimo: LOCAL_ASR_ENABLED, TRANSCRIPT_LANG)
+4) manifest.json debe permitir orquestación offline:
+   - jobId, channelId, channelFolder
+   - exportVersion, exportedAt
+   - counts: totalVideosSelected, transcriptsOk/missing/error, thumbnailsOk/failed
+   - warnings[]
+   - artifacts: rutas relativas creadas (raw/channel.json, raw/videos.jsonl, etc.)
+5) No introducir nuevos endpoints; todo ocurre dentro del flujo export existente.
+6) SSE/UI:
+   - No rompas el enum de stages en frontend.
+   - Si agregas nueva etapa, actualiza enum + reducer + tests web. Si no es necesario, mantén stages actuales.
+7) Tests:
+   - Actualizar/crear tests en apps/api/tests para validar:
+     - channel.json sigue el contrato y ahora incluye exportVersion/exportedAt.
+     - se crean manifest.json y raw/channel.json y raw/videos.jsonl.
+     - los paths son relativos dentro de exports (sin path traversal).
+   - Mantener pnpm test verde.
+
+Implementación sugerida (sin obligarte, pero recomendado):
+- ExportService:
+  - Añadir “writer” pequeño: writeRawPack({ jobId, channelMeta, selectedVideos, transcripts, thumbnails })
+  - writeManifest(...)
+- Tipos:
+  - Introducir tipos internos: RawChannelExportV1, RawVideoRecordV1, ExportManifestV1
+- Rutas:
+  - Asegurar ensureInsideRoot(...) para raw/ y manifest también.
+- docs:
+  - Actualiza docs/DATA_CONTRACTS.md con:
+    - exportVersion/exportedAt/timeframeResolved en channel.json
+    - definición de manifest.json y raw/*
+
+Entrega:
+- Código + docs + tests listos para commit.
+- Runbook: pnpm dev -> export job -> verificar archivos generados.

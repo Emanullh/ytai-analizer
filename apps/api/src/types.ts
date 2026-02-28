@@ -27,10 +27,18 @@ export interface ExportVideoRecord {
   transcriptStatus?: "ok" | "missing" | "error";
 }
 
+export interface TimeframeResolved {
+  publishedAfter: string;
+  publishedBefore: string;
+}
+
 export interface ExportPayload {
+  exportVersion: string;
+  exportedAt: string;
   channelName: string;
   channelId: string;
   sourceInput: string;
   timeframe: Timeframe;
+  timeframeResolved: TimeframeResolved;
   videos: ExportVideoRecord[];
 }

@@ -1,16 +1,23 @@
-import { Timeframe } from "../types.js";
+import { Timeframe, TimeframeResolved } from "../types.js";
 
-export function getPublishedAfter(timeframe: Timeframe): string {
-  const now = new Date();
-  const targetDate = new Date(now);
+export function resolveTimeframeRange(timeframe: Timeframe, referenceDate = new Date()): TimeframeResolved {
+  const publishedBeforeDate = new Date(referenceDate);
+  const publishedAfterDate = new Date(referenceDate);
 
   if (timeframe === "1m") {
-    targetDate.setMonth(targetDate.getMonth() - 1);
+    publishedAfterDate.setMonth(publishedAfterDate.getMonth() - 1);
   } else if (timeframe === "6m") {
-    targetDate.setMonth(targetDate.getMonth() - 6);
+    publishedAfterDate.setMonth(publishedAfterDate.getMonth() - 6);
   } else {
-    targetDate.setFullYear(targetDate.getFullYear() - 1);
+    publishedAfterDate.setFullYear(publishedAfterDate.getFullYear() - 1);
   }
 
-  return targetDate.toISOString();
+  return {
+    publishedAfter: publishedAfterDate.toISOString(),
+    publishedBefore: publishedBeforeDate.toISOString()
+  };
+}
+
+export function getPublishedAfter(timeframe: Timeframe): string {
+  return resolveTimeframeRange(timeframe).publishedAfter;
 }

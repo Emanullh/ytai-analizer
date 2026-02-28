@@ -51,6 +51,19 @@ function parseSsePayload(payload: string): SseEvent[] {
   });
 }
 
+function isSafeRelativeArtifact(artifactPath: string): boolean {
+  if (!artifactPath || path.isAbsolute(artifactPath)) {
+    return false;
+  }
+
+  const normalized = artifactPath.replace(/\\/g, "/");
+  if (normalized.startsWith("../") || normalized.includes("/../") || normalized === "..") {
+    return false;
+  }
+
+  return true;
+}
+
 describe("export jobs + SSE progress", () => {
   let app: FastifyInstance;
   let originalCwd = process.cwd();
@@ -177,12 +190,93 @@ describe("export jobs + SSE progress", () => {
 
     const exportedJsonRaw = await fs.readFile(path.join(statusBody.exportPath as string, "channel.json"), "utf-8");
     const exportedJson = JSON.parse(exportedJsonRaw) as {
+      exportVersion: string;
+      exportedAt: string;
+      timeframeResolved: { publishedAfter: string; publishedBefore: string };
       videos: Array<{ videoId: string; transcript: string }>;
     };
 
+    expect(exportedJson.exportVersion).toBe("1.1");
+    expect(new Date(exportedJson.exportedAt).toISOString()).toBe(exportedJson.exportedAt);
+    expect(new Date(exportedJson.timeframeResolved.publishedAfter).toISOString()).toBe(
+      exportedJson.timeframeResolved.publishedAfter
+    );
+    expect(new Date(exportedJson.timeframeResolved.publishedBefore).toISOString()).toBe(
+      exportedJson.timeframeResolved.publishedBefore
+    );
     expect(exportedJson.videos).toHaveLength(2);
     expect(exportedJson.videos[0]?.transcript).toBe("transcript captions video uno");
     expect(exportedJson.videos[1]?.transcript).toBe("");
+
+    const manifestRaw = await fs.readFile(path.join(statusBody.exportPath as string, "manifest.json"), "utf-8");
+    const manifest = JSON.parse(manifestRaw) as {
+      jobId: string;
+      channelFolder: string;
+      exportVersion: string;
+      counts: {
+        totalVideosSelected: number;
+        transcriptsOk: number;
+        transcriptsMissing: number;
+        transcriptsError: number;
+        thumbnailsOk: number;
+        thumbnailsFailed: number;
+      };
+      artifacts: string[];
+    };
+    expect(manifest.jobId).toBe(createJobPayload.jobId);
+    expect(manifest.channelFolder).toBe(path.basename(statusBody.exportPath as string));
+    expect(manifest.exportVersion).toBe("1.1");
+    expect(manifest.counts).toMatchObject({
+      totalVideosSelected: 2,
+      transcriptsOk: 1,
+      transcriptsMissing: 0,
+      transcriptsError: 1,
+      thumbnailsOk: 2,
+      thumbnailsFailed: 0
+    });
+    expect(manifest.artifacts).toEqual(expect.arrayContaining(["raw/channel.json", "raw/videos.jsonl", "manifest.json"]));
+    for (const artifact of manifest.artifacts) {
+      expect(isSafeRelativeArtifact(artifact)).toBe(true);
+      const resolvedArtifactPath = path.resolve(statusBody.exportPath as string, artifact);
+      const exportPathRoot = path.resolve(statusBody.exportPath as string);
+      expect(resolvedArtifactPath === exportPathRoot || resolvedArtifactPath.startsWith(`${exportPathRoot}${path.sep}`)).toBe(true);
+    }
+
+    const rawChannelRaw = await fs.readFile(path.join(statusBody.exportPath as string, "raw", "channel.json"), "utf-8");
+    const rawChannel = JSON.parse(rawChannelRaw) as {
+      exportVersion: string;
+      jobId: string;
+      provenance: {
+        dataSources: string[];
+        env: {
+          LOCAL_ASR_ENABLED: boolean;
+          TRANSCRIPT_LANG: string | null;
+        };
+      };
+    };
+    expect(rawChannel.exportVersion).toBe("1.1");
+    expect(rawChannel.jobId).toBe(createJobPayload.jobId);
+    expect(rawChannel.provenance.dataSources.length).toBeGreaterThan(0);
+    expect(typeof rawChannel.provenance.env.LOCAL_ASR_ENABLED).toBe("boolean");
+    expect(rawChannel.provenance.env.TRANSCRIPT_LANG === null || typeof rawChannel.provenance.env.TRANSCRIPT_LANG === "string").toBe(true);
+
+    const rawVideosRaw = await fs.readFile(path.join(statusBody.exportPath as string, "raw", "videos.jsonl"), "utf-8");
+    const rawVideos = rawVideosRaw
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { videoId: string; transcriptPath: string });
+    expect(rawVideos).toHaveLength(2);
+    expect(rawVideos.map((entry) => entry.videoId)).toEqual(["video0000011", "video0000022"]);
+    expect(rawVideos[0]?.transcriptPath).toBe("raw/transcripts/video0000011.jsonl");
+
+    const transcriptVideoOneRaw = await fs.readFile(
+      path.join(statusBody.exportPath as string, "raw", "transcripts", "video0000011.jsonl"),
+      "utf-8"
+    );
+    const transcriptVideoOne = JSON.parse(transcriptVideoOneRaw.trim()) as { transcriptStatus: string; transcript: string };
+    expect(transcriptVideoOne.transcriptStatus).toBe("ok");
+    expect(transcriptVideoOne.transcript).toBe("transcript captions video uno");
   });
 
   it("continues export with warning when transcript pipeline throws (ASR health-check failure)", async () => {
