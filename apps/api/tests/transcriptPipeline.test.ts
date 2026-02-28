@@ -22,6 +22,7 @@ describe("transcriptPipeline", () => {
     expect(result).toEqual({
       transcript: "hola desde captions",
       status: "ok",
+      source: "captions",
       warning: undefined
     });
     expect(localAsrProvider).not.toHaveBeenCalled();
@@ -57,7 +58,8 @@ describe("transcriptPipeline", () => {
     });
     expect(result).toEqual({
       transcript: "texto local",
-      status: "ok"
+      status: "ok",
+      source: "asr"
     });
   });
 
@@ -86,6 +88,7 @@ describe("transcriptPipeline", () => {
     expect(localAsrProvider).toHaveBeenCalledTimes(1);
     expect(result.transcript).toBe("");
     expect(result.status).toBe("error");
+    expect(result.source).toBe("none");
     expect(result.warning).toContain("captions missing");
     expect(result.warning).toContain("gpu unavailable");
   });
@@ -111,6 +114,7 @@ describe("transcriptPipeline", () => {
     expect(localAsrProvider).not.toHaveBeenCalled();
     expect(result.transcript).toBe("");
     expect(result.status).toBe("missing");
+    expect(result.source).toBe("none");
     expect(result.warning).toContain("captions missing");
     expect(result.warning).toContain("Local ASR disabled");
   });

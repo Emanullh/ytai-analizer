@@ -328,6 +328,10 @@ Campos:
 - `channelId`, `channelName`, `sourceInput`, `timeframe`
 - `timeframeResolved`
 - `exportedAt`, `exportVersion`, `jobId`
+- `channelStats` (si está disponible vía YouTube `channels.list`):
+  - `subscriberCount`, `viewCount`, `videoCount`
+  - `country`, `publishedAt`
+  - `customUrl`, `handle` (si aplica)
 - `provenance`:
   - `dataSources[]`
   - `warnings[]`
@@ -335,10 +339,31 @@ Campos:
 
 #### 3.4.2 `raw/videos.jsonl`
 
-- Un JSON por línea con metadata del video + referencias:
-  - `transcriptPath` (`raw/transcripts/<videoId>.jsonl`)
-  - `thumbnailPath` (`raw/thumbnails/<videoId>.jpg`)
-  - `transcriptStatus`
+- Un JSON por línea con metadata cruda enriquecida por video (`videos.list` + pipeline local):
+  - `videoId`
+  - `title`
+  - `description` (texto completo de YouTube; no truncado agresivo)
+  - `publishedAt`
+  - `durationSec` (derivado de `contentDetails.duration` ISO8601)
+  - `categoryId`
+  - `tags[]`
+  - `defaultLanguage`, `defaultAudioLanguage`
+  - `madeForKids`, `liveBroadcastContent`
+  - `statistics`:
+    - `viewCount`, `likeCount`, `commentCount`
+  - `thumbnails`:
+    - objeto por calidad (`default|medium|high|standard|maxres`) con `url`, `width`, `height` si viene
+  - `thumbnailLocalPath` (`raw/thumbnails/<videoId>.jpg`)
+  - `thumbnailOriginalUrl` (best thumbnail disponible)
+  - `transcriptRef`:
+    - `transcriptPath` (`raw/transcripts/<videoId>.jsonl`)
+    - `transcriptSource` (`captions|asr|none`)
+    - `transcriptStatus` (`ok|missing|error`)
+  - Performance proxies deterministas:
+    - `daysSincePublish` (calculado en export)
+    - `viewsPerDay`
+    - `likeRate`
+    - `commentRate`
   - `warnings[]`
 
 #### 3.4.3 `raw/transcripts/<videoId>.jsonl`
@@ -360,6 +385,7 @@ Campos:
 getTranscriptWithFallback(videoId, options?) => {
   transcript: string;
   status: "ok" | "missing" | "error";
+  source: "captions" | "asr" | "none";
   warning?: string;
 }
 ```

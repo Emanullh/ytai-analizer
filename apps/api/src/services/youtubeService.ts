@@ -7,9 +7,59 @@ import { getPublishedAfter } from "../utils/timeframe.js";
 
 const YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3";
 const MAX_VIDEOS_PER_ANALYSIS = 500;
+const MAX_VIDEO_IDS_PER_REQUEST = 50;
+const THUMBNAIL_KEYS = ["default", "medium", "high", "standard", "maxres"] as const;
 
 const resolutionCache = new SimpleCache<string, ResolvedChannel>(15 * 60 * 1000);
 const videoListCache = new SimpleCache<string, { videos: VideoSummary[]; warnings: string[] }>(8 * 60 * 1000);
+const channelDetailsCache = new SimpleCache<string, YoutubeChannelDetails>(10 * 60 * 1000);
+const videoDetailsCache = new SimpleCache<string, YoutubeVideoDetails>(8 * 60 * 1000);
+
+type ThumbnailKey = (typeof THUMBNAIL_KEYS)[number];
+
+export interface YoutubeThumbnail {
+  url: string;
+  width?: number;
+  height?: number;
+}
+
+export interface YoutubeVideoDetails {
+  videoId: string;
+  title: string;
+  description: string;
+  publishedAt: string;
+  durationSec: number;
+  categoryId: string;
+  tags: string[];
+  defaultLanguage?: string;
+  defaultAudioLanguage?: string;
+  madeForKids: boolean;
+  liveBroadcastContent: string;
+  statistics: {
+    viewCount: number;
+    likeCount: number;
+    commentCount: number;
+  };
+  thumbnails: Partial<Record<ThumbnailKey, YoutubeThumbnail>>;
+  thumbnailOriginalUrl: string;
+}
+
+export interface YoutubeChannelStats {
+  subscriberCount?: number;
+  viewCount?: number;
+  videoCount?: number;
+  country?: string;
+  publishedAt?: string;
+  customUrl?: string;
+  handle?: string;
+}
+
+export interface YoutubeChannelDetails {
+  channelId: string;
+  channelName: string;
+  channelStats?: YoutubeChannelStats;
+  warnings: string[];
+}
 
 interface YoutubeSearchVideoItem {
   id?: { videoId?: string; channelId?: string };
@@ -30,11 +80,25 @@ interface YoutubeVideoItem {
   id?: string;
   snippet?: {
     title?: string;
+    description?: string;
     publishedAt?: string;
-    thumbnails?: Record<string, { url: string }>;
+    categoryId?: string;
+    tags?: string[];
+    defaultLanguage?: string;
+    defaultAudioLanguage?: string;
+    liveBroadcastContent?: string;
+    thumbnails?: Record<string, YoutubeThumbnail>;
+  };
+  contentDetails?: {
+    duration?: string;
+  };
+  status?: {
+    madeForKids?: boolean;
   };
   statistics?: {
     viewCount?: string;
+    likeCount?: string;
+    commentCount?: string;
   };
 }
 
@@ -46,6 +110,14 @@ interface YoutubeChannelItem {
   id?: string;
   snippet?: {
     title?: string;
+    country?: string;
+    publishedAt?: string;
+    customUrl?: string;
+  };
+  statistics?: {
+    subscriberCount?: string;
+    viewCount?: string;
+    videoCount?: string;
   };
 }
 
@@ -80,12 +152,40 @@ async function youtubeGet<T>(endpoint: string, params: Record<string, string | u
   return fetchJson<T>(url, { timeoutMs: 12_000 });
 }
 
-function pickBestThumbnail(thumbnails: Record<string, { url: string }> | undefined): string {
+function parseCount(rawValue: string | undefined): number {
+  const value = Number.parseInt(rawValue ?? "0", 10);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function normalizeThumbnails(
+  thumbnails: Record<string, YoutubeThumbnail> | undefined
+): Partial<Record<ThumbnailKey, YoutubeThumbnail>> {
+  const normalized: Partial<Record<ThumbnailKey, YoutubeThumbnail>> = {};
+  if (!thumbnails) {
+    return normalized;
+  }
+
+  for (const key of THUMBNAIL_KEYS) {
+    const candidate = thumbnails[key];
+    if (!candidate?.url) {
+      continue;
+    }
+    normalized[key] = {
+      url: candidate.url,
+      width: candidate.width,
+      height: candidate.height
+    };
+  }
+
+  return normalized;
+}
+
+function pickBestThumbnail(thumbnails: Partial<Record<ThumbnailKey, YoutubeThumbnail>> | undefined): string {
   if (!thumbnails) {
     return "";
   }
 
-  const preferred = ["maxres", "standard", "high", "medium", "default"];
+  const preferred = ["maxres", "standard", "high", "medium", "default"] as const;
   for (const key of preferred) {
     const candidate = thumbnails[key];
     if (candidate?.url) {
@@ -95,6 +195,40 @@ function pickBestThumbnail(thumbnails: Record<string, { url: string }> | undefin
 
   const fallback = Object.values(thumbnails)[0];
   return fallback?.url ?? "";
+}
+
+function toHandle(customUrl: string | undefined): string | undefined {
+  if (!customUrl) {
+    return undefined;
+  }
+  if (customUrl.startsWith("@")) {
+    return customUrl;
+  }
+  return `@${customUrl}`;
+}
+
+export function iso8601DurationToSeconds(duration: string | undefined): number {
+  if (!duration) {
+    return 0;
+  }
+
+  const trimmed = duration.trim();
+  if (!trimmed) {
+    return 0;
+  }
+
+  const match = trimmed.match(/^P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/i);
+  if (!match) {
+    return 0;
+  }
+
+  const weeks = Number.parseInt(match[1] ?? "0", 10) || 0;
+  const days = Number.parseInt(match[2] ?? "0", 10) || 0;
+  const hours = Number.parseInt(match[3] ?? "0", 10) || 0;
+  const minutes = Number.parseInt(match[4] ?? "0", 10) || 0;
+  const seconds = Number.parseFloat(match[5] ?? "0") || 0;
+
+  return Math.floor(weeks * 604_800 + days * 86_400 + hours * 3_600 + minutes * 60 + seconds);
 }
 
 async function fetchChannelById(channelId: string): Promise<ResolvedChannel | null> {
@@ -347,15 +481,44 @@ function toVideoSummary(item: YoutubeVideoItem): VideoSummary | null {
     videoId: item.id,
     title: item.snippet?.title ?? item.id,
     publishedAt: item.snippet?.publishedAt ?? "",
-    viewCount: Number.parseInt(item.statistics?.viewCount ?? "0", 10) || 0,
-    thumbnailUrl: pickBestThumbnail(item.snippet?.thumbnails)
+    viewCount: parseCount(item.statistics?.viewCount),
+    thumbnailUrl: pickBestThumbnail(normalizeThumbnails(item.snippet?.thumbnails))
+  };
+}
+
+function toYoutubeVideoDetails(item: YoutubeVideoItem): YoutubeVideoDetails | null {
+  if (!item.id) {
+    return null;
+  }
+
+  const normalizedThumbnails = normalizeThumbnails(item.snippet?.thumbnails);
+
+  return {
+    videoId: item.id,
+    title: item.snippet?.title ?? item.id,
+    description: item.snippet?.description ?? "",
+    publishedAt: item.snippet?.publishedAt ?? "",
+    durationSec: iso8601DurationToSeconds(item.contentDetails?.duration),
+    categoryId: item.snippet?.categoryId ?? "",
+    tags: Array.isArray(item.snippet?.tags) ? item.snippet.tags : [],
+    defaultLanguage: item.snippet?.defaultLanguage,
+    defaultAudioLanguage: item.snippet?.defaultAudioLanguage,
+    madeForKids: Boolean(item.status?.madeForKids),
+    liveBroadcastContent: item.snippet?.liveBroadcastContent ?? "none",
+    statistics: {
+      viewCount: parseCount(item.statistics?.viewCount),
+      likeCount: parseCount(item.statistics?.likeCount),
+      commentCount: parseCount(item.statistics?.commentCount)
+    },
+    thumbnails: normalizedThumbnails,
+    thumbnailOriginalUrl: pickBestThumbnail(normalizedThumbnails)
   };
 }
 
 async function fetchVideosByIds(videoIds: string[]): Promise<VideoSummary[]> {
   const chunks: string[][] = [];
-  for (let index = 0; index < videoIds.length; index += 50) {
-    chunks.push(videoIds.slice(index, index + 50));
+  for (let index = 0; index < videoIds.length; index += MAX_VIDEO_IDS_PER_REQUEST) {
+    chunks.push(videoIds.slice(index, index + MAX_VIDEO_IDS_PER_REQUEST));
   }
 
   const videos: VideoSummary[] = [];
@@ -363,7 +526,7 @@ async function fetchVideosByIds(videoIds: string[]): Promise<VideoSummary[]> {
     const response = await youtubeGet<YoutubeVideosResponse>("videos", {
       part: "snippet,statistics",
       id: chunk.join(","),
-      maxResults: "50"
+      maxResults: String(MAX_VIDEO_IDS_PER_REQUEST)
     });
 
     for (const item of response.items ?? []) {
@@ -452,6 +615,93 @@ export async function analyzeChannel(sourceInput: string, timeframe: Timeframe):
     warnings: [...resolved.warnings, ...listResult.warnings],
     videos: listResult.videos
   };
+}
+
+export async function getChannelDetails(channelId: string): Promise<YoutubeChannelDetails> {
+  const normalizedChannelId = channelId.trim();
+  if (!normalizedChannelId) {
+    throw new HttpError(400, "channelId is required");
+  }
+
+  const cached = channelDetailsCache.get(normalizedChannelId);
+  if (cached) {
+    return cached;
+  }
+
+  const response = await youtubeGet<YoutubeChannelsResponse>("channels", {
+    part: "snippet,statistics",
+    id: normalizedChannelId,
+    maxResults: "1"
+  });
+
+  const item = response.items?.[0];
+  const result: YoutubeChannelDetails = {
+    channelId: normalizedChannelId,
+    channelName: item?.snippet?.title ?? normalizedChannelId,
+    channelStats: item
+      ? {
+          subscriberCount: parseCount(item.statistics?.subscriberCount),
+          viewCount: parseCount(item.statistics?.viewCount),
+          videoCount: parseCount(item.statistics?.videoCount),
+          country: item.snippet?.country,
+          publishedAt: item.snippet?.publishedAt,
+          customUrl: item.snippet?.customUrl,
+          handle: toHandle(item.snippet?.customUrl)
+        }
+      : undefined,
+    warnings: item ? [] : [`Channel details not found for ${normalizedChannelId}`]
+  };
+
+  channelDetailsCache.set(normalizedChannelId, result);
+  return result;
+}
+
+export async function getVideoDetails(videoIds: string[]): Promise<{ videos: YoutubeVideoDetails[]; warnings: string[] }> {
+  const warnings: string[] = [];
+  const uniqueIds = Array.from(new Set(videoIds.map((videoId) => videoId.trim()).filter(Boolean)));
+  if (!uniqueIds.length) {
+    return { videos: [], warnings };
+  }
+
+  const videosById = new Map<string, YoutubeVideoDetails>();
+  const uncachedIds: string[] = [];
+
+  for (const videoId of uniqueIds) {
+    const cached = videoDetailsCache.get(videoId);
+    if (cached) {
+      videosById.set(videoId, cached);
+      continue;
+    }
+    uncachedIds.push(videoId);
+  }
+
+  for (let index = 0; index < uncachedIds.length; index += MAX_VIDEO_IDS_PER_REQUEST) {
+    const chunk = uncachedIds.slice(index, index + MAX_VIDEO_IDS_PER_REQUEST);
+    const response = await youtubeGet<YoutubeVideosResponse>("videos", {
+      part: "snippet,contentDetails,statistics,status",
+      id: chunk.join(","),
+      maxResults: String(MAX_VIDEO_IDS_PER_REQUEST)
+    });
+
+    for (const item of response.items ?? []) {
+      const mapped = toYoutubeVideoDetails(item);
+      if (!mapped) {
+        continue;
+      }
+      videosById.set(mapped.videoId, mapped);
+      videoDetailsCache.set(mapped.videoId, mapped);
+    }
+  }
+
+  const ordered = uniqueIds
+    .map((videoId) => videosById.get(videoId))
+    .filter((video): video is YoutubeVideoDetails => Boolean(video));
+
+  if (ordered.length !== uniqueIds.length) {
+    warnings.push("Some selected videos could not be enriched with YouTube metadata");
+  }
+
+  return { videos: ordered, warnings };
 }
 
 export async function getSelectedVideoDetails(

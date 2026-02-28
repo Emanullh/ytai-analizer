@@ -3,7 +3,14 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { env } from "../config/env.js";
 import { ExportPayload, Timeframe, TimeframeResolved } from "../types.js";
-import { getSelectedVideoDetails } from "./youtubeService.js";
+import {
+  getChannelDetails,
+  getSelectedVideoDetails,
+  getVideoDetails,
+  YoutubeChannelStats,
+  YoutubeThumbnail,
+  YoutubeVideoDetails
+} from "./youtubeService.js";
 import { HttpError } from "../utils/errors.js";
 import { downloadToBuffer } from "../utils/http.js";
 import { sanitizeFolderName } from "../utils/sanitize.js";
@@ -37,13 +44,17 @@ export interface ExportProgressCallbacks {
 }
 
 interface ExportDependencies {
+  getChannelDetails: typeof getChannelDetails;
   getSelectedVideoDetails: typeof getSelectedVideoDetails;
+  getVideoDetails: typeof getVideoDetails;
   downloadToBuffer: typeof downloadToBuffer;
   getTranscriptWithFallback: typeof getTranscriptWithFallback;
 }
 
 type ProcessedVideo = ExportPayload["videos"][number] & {
   warnings: string[];
+  transcriptSource: TranscriptPipelineResult["source"];
+  rawTranscriptArtifactPath: string;
 };
 
 interface RawChannelExportV1 {
@@ -55,6 +66,7 @@ interface RawChannelExportV1 {
   sourceInput: string;
   timeframe: Timeframe;
   timeframeResolved: TimeframeResolved;
+  channelStats?: YoutubeChannelStats;
   provenance: {
     dataSources: string[];
     warnings: string[];
@@ -68,11 +80,32 @@ interface RawChannelExportV1 {
 interface RawVideoRecordV1 {
   videoId: string;
   title: string;
-  viewCount: number;
+  description: string;
   publishedAt: string;
-  transcriptStatus: "ok" | "missing" | "error";
-  transcriptPath: string;
-  thumbnailPath: string;
+  durationSec: number;
+  categoryId: string;
+  tags: string[];
+  defaultLanguage?: string;
+  defaultAudioLanguage?: string;
+  madeForKids: boolean;
+  liveBroadcastContent: string;
+  statistics: {
+    viewCount: number;
+    likeCount: number;
+    commentCount: number;
+  };
+  thumbnails: Partial<Record<"default" | "medium" | "high" | "standard" | "maxres", YoutubeThumbnail>>;
+  thumbnailLocalPath: string;
+  thumbnailOriginalUrl: string;
+  transcriptRef: {
+    transcriptPath: string;
+    transcriptSource: TranscriptPipelineResult["source"];
+    transcriptStatus: "ok" | "missing" | "error";
+  };
+  daysSincePublish: number;
+  viewsPerDay: number;
+  likeRate: number;
+  commentRate: number;
   warnings: string[];
 }
 
@@ -108,9 +141,17 @@ interface ThumbnailAvailability {
   existingVideoIds: Set<string>;
 }
 
+interface RawPaths {
+  rawFolderPath: string;
+  rawChannelFilePath: string;
+  rawVideosFilePath: string;
+  rawTranscriptsFolderPath: string;
+}
+
 interface RawPackInput {
   exportsRoot: string;
   channelFolderPath: string;
+  rawPaths: RawPaths;
   thumbnailsFolderPath: string;
   processedVideos: ProcessedVideo[];
   request: ExportRequest;
@@ -119,6 +160,8 @@ interface RawPackInput {
   exportedAt: string;
   timeframeResolved: TimeframeResolved;
   warnings: string[];
+  channelStats?: YoutubeChannelStats;
+  transcriptArtifactPaths: string[];
   existingThumbnailVideoIds: Set<string>;
 }
 
@@ -130,7 +173,9 @@ const EXPORT_VERSION = "1.1";
 const TRANSCRIPT_CONCURRENCY = 4;
 
 const defaultDependencies: ExportDependencies = {
+  getChannelDetails,
   getSelectedVideoDetails,
+  getVideoDetails,
   downloadToBuffer,
   getTranscriptWithFallback
 };
@@ -158,9 +203,58 @@ function toSafeRelativePath(rootPath: string, targetPath: string): string {
   return normalized;
 }
 
+function createRawPaths(channelFolderPath: string): RawPaths {
+  const rawFolderPath = path.resolve(channelFolderPath, "raw");
+  return {
+    rawFolderPath,
+    rawChannelFilePath: path.resolve(rawFolderPath, "channel.json"),
+    rawVideosFilePath: path.resolve(rawFolderPath, "videos.jsonl"),
+    rawTranscriptsFolderPath: path.resolve(rawFolderPath, "transcripts")
+  };
+}
+
+async function initializeRawPaths(exportsRoot: string, rawPaths: RawPaths): Promise<void> {
+  ensureInsideRoot(exportsRoot, rawPaths.rawFolderPath);
+  ensureInsideRoot(exportsRoot, rawPaths.rawChannelFilePath);
+  ensureInsideRoot(exportsRoot, rawPaths.rawVideosFilePath);
+  ensureInsideRoot(exportsRoot, rawPaths.rawTranscriptsFolderPath);
+
+  await fs.mkdir(rawPaths.rawTranscriptsFolderPath, { recursive: true });
+  await fs.writeFile(rawPaths.rawVideosFilePath, "", "utf-8");
+}
+
 async function writeJsonLines(filePath: string, records: unknown[]): Promise<void> {
   const content = records.map((record) => JSON.stringify(record)).join("\n");
   await fs.writeFile(filePath, `${content}\n`, "utf-8");
+}
+
+function createJsonLineAppender(filePath: string): (record: unknown) => Promise<void> {
+  let chain = Promise.resolve();
+  return async (record: unknown) => {
+    chain = chain.then(async () => {
+      await fs.appendFile(filePath, `${JSON.stringify(record)}\n`, "utf-8");
+    });
+    await chain;
+  };
+}
+
+function daysBetweenDates(fromIsoDate: string, toDate: Date): number {
+  const fromTime = new Date(fromIsoDate).getTime();
+  if (!Number.isFinite(fromTime)) {
+    return 0;
+  }
+  const deltaMs = toDate.getTime() - fromTime;
+  if (!Number.isFinite(deltaMs) || deltaMs <= 0) {
+    return 0;
+  }
+  return Math.floor(deltaMs / 86_400_000);
+}
+
+function safeRatio(numerator: number, denominator: number): number {
+  if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0) {
+    return 0;
+  }
+  return Number((numerator / denominator).toFixed(6));
 }
 
 function toTranscriptStatus(value: ProcessedVideo["transcriptStatus"]): "ok" | "missing" | "error" {
@@ -193,6 +287,46 @@ async function collectThumbnailAvailability(
     okCount: existingVideoIds.size,
     failedCount: entries.length - existingVideoIds.size,
     existingVideoIds
+  };
+}
+
+function buildRawVideoRecord(
+  sourceVideo: { videoId: string; title: string; publishedAt: string; viewCount: number; thumbnailUrl: string },
+  videoDetails: YoutubeVideoDetails | undefined,
+  transcriptRef: RawVideoRecordV1["transcriptRef"],
+  exportTimestamp: Date,
+  warnings: string[]
+): RawVideoRecordV1 {
+  const publishedAt = videoDetails?.publishedAt || sourceVideo.publishedAt || "";
+  const statistics = {
+    viewCount: videoDetails?.statistics.viewCount ?? sourceVideo.viewCount,
+    likeCount: videoDetails?.statistics.likeCount ?? 0,
+    commentCount: videoDetails?.statistics.commentCount ?? 0
+  };
+  const daysSincePublish = daysBetweenDates(publishedAt, exportTimestamp);
+
+  return {
+    videoId: sourceVideo.videoId,
+    title: videoDetails?.title || sourceVideo.title,
+    description: videoDetails?.description ?? "",
+    publishedAt,
+    durationSec: videoDetails?.durationSec ?? 0,
+    categoryId: videoDetails?.categoryId ?? "",
+    tags: videoDetails?.tags ?? [],
+    defaultLanguage: videoDetails?.defaultLanguage,
+    defaultAudioLanguage: videoDetails?.defaultAudioLanguage,
+    madeForKids: videoDetails?.madeForKids ?? false,
+    liveBroadcastContent: videoDetails?.liveBroadcastContent ?? "none",
+    statistics,
+    thumbnails: videoDetails?.thumbnails ?? {},
+    thumbnailLocalPath: path.posix.join("raw", "thumbnails", `${sourceVideo.videoId}.jpg`),
+    thumbnailOriginalUrl: videoDetails?.thumbnailOriginalUrl || sourceVideo.thumbnailUrl || "",
+    transcriptRef,
+    daysSincePublish,
+    viewsPerDay: safeRatio(statistics.viewCount, Math.max(daysSincePublish, 1)),
+    likeRate: safeRatio(statistics.likeCount, statistics.viewCount),
+    commentRate: safeRatio(statistics.commentCount, statistics.viewCount),
+    warnings: [...warnings]
   };
 }
 
@@ -233,20 +367,13 @@ async function ensureRawThumbnailsPath(
 }
 
 async function writeRawPack(input: RawPackInput): Promise<RawPackOutput> {
-  const rawFolderPath = path.resolve(input.channelFolderPath, "raw");
-  const rawChannelFilePath = path.resolve(rawFolderPath, "channel.json");
-  const rawVideosFilePath = path.resolve(rawFolderPath, "videos.jsonl");
-  const rawTranscriptsFolderPath = path.resolve(rawFolderPath, "transcripts");
-
-  ensureInsideRoot(input.exportsRoot, rawFolderPath);
-  ensureInsideRoot(input.exportsRoot, rawChannelFilePath);
-  ensureInsideRoot(input.exportsRoot, rawVideosFilePath);
-  ensureInsideRoot(input.exportsRoot, rawTranscriptsFolderPath);
-
-  await fs.mkdir(rawTranscriptsFolderPath, { recursive: true });
+  ensureInsideRoot(input.exportsRoot, input.rawPaths.rawFolderPath);
+  ensureInsideRoot(input.exportsRoot, input.rawPaths.rawChannelFilePath);
+  ensureInsideRoot(input.exportsRoot, input.rawPaths.rawVideosFilePath);
+  ensureInsideRoot(input.exportsRoot, input.rawPaths.rawTranscriptsFolderPath);
   await ensureRawThumbnailsPath(
     input.exportsRoot,
-    rawFolderPath,
+    input.rawPaths.rawFolderPath,
     input.thumbnailsFolderPath,
     input.channelFolderPath,
     input.processedVideos
@@ -261,6 +388,7 @@ async function writeRawPack(input: RawPackInput): Promise<RawPackOutput> {
     sourceInput: input.request.sourceInput,
     timeframe: input.request.timeframe,
     timeframeResolved: input.timeframeResolved,
+    channelStats: input.channelStats,
     provenance: {
       dataSources: ["youtube-data-api-v3", "youtube-transcript", "local-asr-fallback"],
       warnings: [...input.warnings],
@@ -271,45 +399,19 @@ async function writeRawPack(input: RawPackInput): Promise<RawPackOutput> {
     }
   };
 
-  await fs.writeFile(rawChannelFilePath, JSON.stringify(rawChannel, null, 2), "utf-8");
-
-  const rawVideoRecords: RawVideoRecordV1[] = [];
-  const rawTranscriptArtifacts: string[] = [];
-  for (const video of input.processedVideos) {
-    const transcriptPath = path.resolve(rawTranscriptsFolderPath, `${video.videoId}.jsonl`);
-    ensureInsideRoot(input.exportsRoot, transcriptPath);
-    const transcriptStatus = toTranscriptStatus(video.transcriptStatus);
-
-    const transcriptRecord: RawTranscriptRecordV1 = {
-      videoId: video.videoId,
-      transcript: video.transcript,
-      transcriptStatus,
-      exportedAt: input.exportedAt,
-      warnings: [...video.warnings]
-    };
-    await writeJsonLines(transcriptPath, [transcriptRecord]);
-    rawTranscriptArtifacts.push(transcriptPath);
-
-    rawVideoRecords.push({
-      videoId: video.videoId,
-      title: video.title,
-      viewCount: video.viewCount,
-      publishedAt: video.publishedAt,
-      transcriptStatus,
-      transcriptPath: path.posix.join("raw", "transcripts", `${video.videoId}.jsonl`),
-      thumbnailPath: path.posix.join("raw", "thumbnails", `${video.videoId}.jpg`),
-      warnings: [...video.warnings]
-    });
-  }
-
-  await writeJsonLines(rawVideosFilePath, rawVideoRecords);
+  await fs.writeFile(input.rawPaths.rawChannelFilePath, JSON.stringify(rawChannel, null, 2), "utf-8");
 
   const rawThumbnailArtifacts = Array.from(input.existingThumbnailVideoIds, (videoId) =>
-    path.resolve(rawFolderPath, "thumbnails", `${videoId}.jpg`)
+    path.resolve(input.rawPaths.rawFolderPath, "thumbnails", `${videoId}.jpg`)
   );
 
   return {
-    artifactPaths: [rawChannelFilePath, rawVideosFilePath, ...rawTranscriptArtifacts, ...rawThumbnailArtifacts]
+    artifactPaths: [
+      input.rawPaths.rawChannelFilePath,
+      input.rawPaths.rawVideosFilePath,
+      ...input.transcriptArtifactPaths,
+      ...rawThumbnailArtifacts
+    ]
   };
 }
 
@@ -342,6 +444,7 @@ function fallbackTranscriptResult(videoId: string, error: unknown): TranscriptPi
   return {
     transcript: "",
     status: "error",
+    source: "none",
     warning: `Transcript pipeline failed for video ${videoId}: ${error instanceof Error ? error.message : "unknown error"}`
   };
 }
@@ -369,12 +472,14 @@ export async function exportSelectedVideos(
   const exportsRoot = path.resolve(process.cwd(), "exports");
   const jobId = request.jobId ?? randomUUID();
   const exportedAt = new Date().toISOString();
+  const exportedAtDate = new Date(exportedAt);
   const timeframeResolved = resolveTimeframeRange(request.timeframe);
   const folderName = sanitizeFolderName(request.channelName);
   const channelFolderPath = path.resolve(exportsRoot, folderName);
   const thumbnailsFolderPath = path.resolve(channelFolderPath, "thumbnails");
   const tempRootPath = path.resolve(exportsRoot, ".tmp", jobId);
   const tempAudioPath = path.resolve(tempRootPath, "audio");
+  const rawPaths = createRawPaths(channelFolderPath);
 
   ensureInsideRoot(exportsRoot, channelFolderPath);
   ensureInsideRoot(exportsRoot, thumbnailsFolderPath);
@@ -383,6 +488,20 @@ export async function exportSelectedVideos(
 
   await fs.mkdir(thumbnailsFolderPath, { recursive: true });
   await fs.mkdir(tempAudioPath, { recursive: true });
+  await initializeRawPaths(exportsRoot, rawPaths);
+
+  const [videoDetailsResult, channelDetailsResult] = await Promise.all([
+    dependencies.getVideoDetails(details.videos.map((video) => video.videoId)),
+    dependencies.getChannelDetails(request.channelId)
+  ]);
+  for (const warning of videoDetailsResult.warnings) {
+    addWarning(warning);
+  }
+  for (const warning of channelDetailsResult.warnings) {
+    addWarning(warning);
+  }
+  const videoDetailsById = new Map(videoDetailsResult.videos.map((video) => [video.videoId, video]));
+  const appendRawVideoRecord = createJsonLineAppender(rawPaths.rawVideosFilePath);
 
   callbacks.onJobStarted?.({ total: details.videos.length });
   for (const video of details.videos) {
@@ -398,11 +517,22 @@ export async function exportSelectedVideos(
       TRANSCRIPT_CONCURRENCY,
       async (video): Promise<ProcessedVideo> => {
         const videoWarnings: string[] = [];
+        const enrichedVideo = videoDetailsById.get(video.videoId);
+        if (!enrichedVideo) {
+          const warning = `Metadata enrichment missing for ${video.videoId}`;
+          videoWarnings.push(warning);
+          addWarning(warning, video.videoId);
+        }
+
         const thumbnailRelativePath = path.posix.join("thumbnails", `${video.videoId}.jpg`);
         const thumbnailAbsolutePath = path.resolve(channelFolderPath, thumbnailRelativePath);
         const outputMp3Path = path.resolve(tempAudioPath, `${video.videoId}.mp3`);
+        const transcriptAbsolutePath = path.resolve(rawPaths.rawTranscriptsFolderPath, `${video.videoId}.jsonl`);
+        const transcriptRelativePath = path.posix.join("raw", "transcripts", `${video.videoId}.jsonl`);
+
         ensureInsideRoot(exportsRoot, thumbnailAbsolutePath);
         ensureInsideRoot(exportsRoot, outputMp3Path);
+        ensureInsideRoot(exportsRoot, transcriptAbsolutePath);
 
         let transcriptResult: TranscriptPipelineResult;
         try {
@@ -430,9 +560,10 @@ export async function exportSelectedVideos(
           stage: "downloading_thumbnail"
         });
 
-        if (video.thumbnailUrl) {
+        const thumbnailOriginalUrl = enrichedVideo?.thumbnailOriginalUrl || video.thumbnailUrl;
+        if (thumbnailOriginalUrl) {
           try {
-            const image = await dependencies.downloadToBuffer(video.thumbnailUrl, 12_000);
+            const image = await dependencies.downloadToBuffer(thumbnailOriginalUrl, 12_000);
             await fs.writeFile(thumbnailAbsolutePath, image);
           } catch (error) {
             const warning = `Thumbnail download failed for ${video.videoId}: ${
@@ -447,6 +578,24 @@ export async function exportSelectedVideos(
           addWarning(warning, video.videoId);
         }
 
+        const transcriptStatus = toTranscriptStatus(transcriptResult.status);
+        const transcriptRecord: RawTranscriptRecordV1 = {
+          videoId: video.videoId,
+          transcript: transcriptResult.transcript,
+          transcriptStatus,
+          exportedAt,
+          warnings: [...videoWarnings]
+        };
+        await writeJsonLines(transcriptAbsolutePath, [transcriptRecord]);
+
+        const transcriptRef: RawVideoRecordV1["transcriptRef"] = {
+          transcriptPath: transcriptRelativePath,
+          transcriptSource: transcriptResult.source,
+          transcriptStatus
+        };
+        const rawVideoRecord = buildRawVideoRecord(video, enrichedVideo, transcriptRef, exportedAtDate, videoWarnings);
+        await appendRawVideoRecord(rawVideoRecord);
+
         return {
           videoId: video.videoId,
           title: video.title,
@@ -454,13 +603,17 @@ export async function exportSelectedVideos(
           publishedAt: video.publishedAt,
           thumbnailPath: thumbnailRelativePath,
           transcript: transcriptResult.transcript,
-          transcriptStatus: transcriptResult.status,
-          warnings: videoWarnings
+          transcriptStatus: transcriptStatus,
+          warnings: videoWarnings,
+          transcriptSource: transcriptResult.source,
+          rawTranscriptArtifactPath: transcriptAbsolutePath
         };
       }
     );
 
-    const exportVideos: ExportPayload["videos"] = processedVideos.map(({ warnings: _, ...video }) => video);
+    const exportVideos: ExportPayload["videos"] = processedVideos.map(
+      ({ warnings: _, transcriptSource: __, rawTranscriptArtifactPath: ___, ...video }) => video
+    );
     const thumbnailAvailability = await collectThumbnailAvailability(exportsRoot, channelFolderPath, processedVideos);
     for (const item of processedVideos) {
       callbacks.onVideoProgress?.({
@@ -487,6 +640,7 @@ export async function exportSelectedVideos(
     const rawPack = await writeRawPack({
       exportsRoot,
       channelFolderPath,
+      rawPaths,
       thumbnailsFolderPath,
       processedVideos,
       request,
@@ -495,6 +649,8 @@ export async function exportSelectedVideos(
       exportedAt,
       timeframeResolved,
       warnings,
+      channelStats: channelDetailsResult.channelStats,
+      transcriptArtifactPaths: processedVideos.map((video) => video.rawTranscriptArtifactPath),
       existingThumbnailVideoIds: thumbnailAvailability.existingVideoIds
     });
 

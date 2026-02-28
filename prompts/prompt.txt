@@ -1,67 +1,59 @@
-Tarea: Implementar Fase 1 de extracción — “Raw Pack v1” en export (sin romper compatibilidad)
+Tarea: Enriquecer Fase 1 — capturar metadatos crudos completos desde YouTube Data API v3 en raw/videos.jsonl y raw/channel.json
 
-Contexto del repo:
-- Export actual escribe:
-  - exports/<channel>/channel.json
-  - exports/<channel>/thumbnails/<videoId>.jpg
-- Export asíncrono con SSE via exportJobService/exportService.
-- Contratos actuales están documentados en docs/DATA_CONTRACTS.md y usados en tests.
+Contexto:
+- analyze devuelve lista de videos con campos mínimos.
+- export recibe selectedVideoIds y genera export con transcript y thumbnail.
 
 Objetivo:
-Además del export actual, escribir un paquete “raw” completo para que agentes posteriores puedan enriquecer sin re-scraping.
+Durante export, para cada video seleccionado, obtener y persistir metadatos crudos (YouTube API) que sirven para correlaciones futuras (pacing, duración, engagement proxy).
 
 Requisitos (Criterios de aceptación):
-1) Mantener compatibilidad:
-   - channel.json actual debe seguir existiendo y ser parseable por consumidores actuales.
-2) Crear estructura adicional por export:
-   exports/<channel>/
-     manifest.json
-     raw/
-       channel.json
-       videos.jsonl
-       transcripts/
-         <videoId>.jsonl
-       thumbnails/
-         <videoId>.jpg   (reusar el mismo archivo existente o mantener symlink/copia; preferible reusar path actual)
-3) Agregar versionado y trazabilidad:
-   - channel.json (actual) debe incluir:
-     - exportVersion: "1.1" (nuevo; si prefieres, "1.0" + compat, pero define uno y documenta)
-     - exportedAt (ISO)
-     - timeframeResolved: { publishedAfter, publishedBefore } (ISO)
-   - raw/channel.json debe incluir:
-     - channelId, channelName, sourceInput, timeframe, exportedAt, exportVersion
-     - jobId
-     - y un bloque provenance (dataSources, warnings, env snapshot mínimo: LOCAL_ASR_ENABLED, TRANSCRIPT_LANG)
-4) manifest.json debe permitir orquestación offline:
-   - jobId, channelId, channelFolder
-   - exportVersion, exportedAt
-   - counts: totalVideosSelected, transcriptsOk/missing/error, thumbnailsOk/failed
-   - warnings[]
-   - artifacts: rutas relativas creadas (raw/channel.json, raw/videos.jsonl, etc.)
-5) No introducir nuevos endpoints; todo ocurre dentro del flujo export existente.
-6) SSE/UI:
-   - No rompas el enum de stages en frontend.
-   - Si agregas nueva etapa, actualiza enum + reducer + tests web. Si no es necesario, mantén stages actuales.
-7) Tests:
-   - Actualizar/crear tests en apps/api/tests para validar:
-     - channel.json sigue el contrato y ahora incluye exportVersion/exportedAt.
-     - se crean manifest.json y raw/channel.json y raw/videos.jsonl.
-     - los paths son relativos dentro de exports (sin path traversal).
-   - Mantener pnpm test verde.
+1) raw/channel.json debe incluir “channelStats” (si disponible via channels.list):
+   - subscriberCount, viewCount, videoCount, country, publishedAt, customUrl/handle si aplica
+2) raw/videos.jsonl debe tener 1 JSON por línea con campos (por video):
+   - videoId
+   - title
+   - description (puede ser truncado opcional; pero guarda al menos 2–4k chars)
+   - publishedAt
+   - durationSec (convertir ISO8601 duration a segundos)
+   - categoryId
+   - tags[] (si viene)
+   - defaultLanguage, defaultAudioLanguage
+   - madeForKids, liveBroadcastContent
+   - statistics: viewCount, likeCount, commentCount
+   - thumbnails: { default, medium, high, standard, maxres } (url+width+height si viene)
+   - thumbnailLocalPath (relativo) + thumbnailOriginalUrl (elige best)
+   - transcriptRef:
+     - transcriptPath: raw/transcripts/<videoId>.jsonl
+     - transcriptSource: captions|asr|none
+     - transcriptStatus: ok|missing|error
+3) Performance proxies (derivados básicos pero deterministas) en raw/videos.jsonl:
+   - daysSincePublish (calculado en export time)
+   - viewsPerDay (viewCount/daysSincePublish, handle división por 0)
+   - likeRate, commentRate (si viewCount>0)
+4) Cuotas/eficiencia:
+   - videos.list debe agrupar IDs (batch) para minimizar requests.
+   - caching in-memory aceptable durante el job.
+5) Compatibilidad:
+   - No cambies el response de /analyze si no es necesario.
+   - No rompas channel.json actual (puedes mantenerlo “resumen” y dejar raw/videos.jsonl como el completo).
+6) Tests:
+   - Unit tests para el mapper ISO8601 duration -> seconds.
+   - Integration test de export: mock youtubeService para devolver payloads completos y verificar raw/videos.jsonl y raw/channel.json.
 
-Implementación sugerida (sin obligarte, pero recomendado):
-- ExportService:
-  - Añadir “writer” pequeño: writeRawPack({ jobId, channelMeta, selectedVideos, transcripts, thumbnails })
-  - writeManifest(...)
-- Tipos:
-  - Introducir tipos internos: RawChannelExportV1, RawVideoRecordV1, ExportManifestV1
-- Rutas:
-  - Asegurar ensureInsideRoot(...) para raw/ y manifest también.
-- docs:
-  - Actualiza docs/DATA_CONTRACTS.md con:
-    - exportVersion/exportedAt/timeframeResolved en channel.json
-    - definición de manifest.json y raw/*
+Implementación sugerida:
+- apps/api/src/services/youtubeService.ts:
+  - Añadir getChannelDetails(channelId) -> channels.list snippet/statistics
+  - Añadir getVideoDetails(videoIds[]) -> videos.list snippet/contentDetails/statistics
+  - Reutilizar cliente HTTP y manejo de errores existente.
+- apps/api/src/services/exportService.ts:
+  - Antes de transcribir/descargar thumbnail, cargar detalles de videos en batch.
+  - Persistir raw/videos.jsonl de forma incremental para no perder progreso si falla un video.
+- Sanitización:
+  - description puede traer saltos de línea; ok en JSONL.
 
 Entrega:
-- Código + docs + tests listos para commit.
-- Runbook: pnpm dev -> export job -> verificar archivos generados.
+- raw/videos.jsonl con metadatos completos reales
+- raw/channel.json con stats del canal
+- tests verdes
+- docs actualizados (DATA_CONTRACTS.md)

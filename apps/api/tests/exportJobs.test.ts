@@ -5,12 +5,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 
 const getSelectedVideoDetailsMock = vi.fn();
+const getVideoDetailsMock = vi.fn();
+const getChannelDetailsMock = vi.fn();
 const analyzeChannelMock = vi.fn();
 const downloadToBufferMock = vi.fn();
 const getTranscriptWithFallbackMock = vi.fn();
 
 vi.mock("../src/services/youtubeService.js", () => ({
   getSelectedVideoDetails: getSelectedVideoDetailsMock,
+  getVideoDetails: getVideoDetailsMock,
+  getChannelDetails: getChannelDetailsMock,
   analyzeChannel: analyzeChannelMock
 }));
 
@@ -75,6 +79,8 @@ describe("export jobs + SSE progress", () => {
     process.chdir(tempDir);
 
     getSelectedVideoDetailsMock.mockReset();
+    getVideoDetailsMock.mockReset();
+    getChannelDetailsMock.mockReset();
     analyzeChannelMock.mockReset();
     downloadToBufferMock.mockReset();
     getTranscriptWithFallbackMock.mockReset();
@@ -109,6 +115,68 @@ describe("export jobs + SSE progress", () => {
         }
       ]
     });
+    getVideoDetailsMock.mockResolvedValue({
+      warnings: [],
+      videos: [
+        {
+          videoId: "video0000011",
+          title: "Video 1",
+          description: "Descripcion completa video 1",
+          publishedAt: "2025-01-01T00:00:00.000Z",
+          durationSec: 125,
+          categoryId: "22",
+          tags: ["tag-1", "tag-2"],
+          defaultLanguage: "es",
+          defaultAudioLanguage: "es",
+          madeForKids: false,
+          liveBroadcastContent: "none",
+          statistics: {
+            viewCount: 10,
+            likeCount: 2,
+            commentCount: 1
+          },
+          thumbnails: {
+            default: { url: "https://img.example/video1-default.jpg", width: 120, height: 90 },
+            high: { url: "https://img.example/video1.jpg", width: 480, height: 360 }
+          },
+          thumbnailOriginalUrl: "https://img.example/video1.jpg"
+        },
+        {
+          videoId: "video0000022",
+          title: "Video 2",
+          description: "Descripcion completa video 2",
+          publishedAt: "2025-01-02T00:00:00.000Z",
+          durationSec: 245,
+          categoryId: "24",
+          tags: [],
+          madeForKids: false,
+          liveBroadcastContent: "none",
+          statistics: {
+            viewCount: 20,
+            likeCount: 4,
+            commentCount: 2
+          },
+          thumbnails: {
+            high: { url: "https://img.example/video2.jpg", width: 480, height: 360 }
+          },
+          thumbnailOriginalUrl: "https://img.example/video2.jpg"
+        }
+      ]
+    });
+    getChannelDetailsMock.mockResolvedValue({
+      channelId: "UC1234567890123456789012",
+      channelName: "Canal Demo Jobs",
+      channelStats: {
+        subscriberCount: 999,
+        viewCount: 123456,
+        videoCount: 321,
+        country: "US",
+        publishedAt: "2020-01-01T00:00:00.000Z",
+        customUrl: "@demo",
+        handle: "@demo"
+      },
+      warnings: []
+    });
     downloadToBufferMock.mockResolvedValue(Buffer.from("thumbnail"));
     getTranscriptWithFallbackMock.mockImplementation(
       async (
@@ -121,13 +189,15 @@ describe("export jobs + SSE progress", () => {
           return {
             transcript: "",
             status: "error",
+            source: "none",
             warning: "Local ASR fallback failed for video video0000022: mock error"
           };
         }
 
         return {
           transcript: "transcript captions video uno",
-          status: "ok"
+          status: "ok",
+          source: "captions"
         };
       }
     );
@@ -246,6 +316,10 @@ describe("export jobs + SSE progress", () => {
     const rawChannel = JSON.parse(rawChannelRaw) as {
       exportVersion: string;
       jobId: string;
+      channelStats?: {
+        subscriberCount?: number;
+        handle?: string;
+      };
       provenance: {
         dataSources: string[];
         env: {
@@ -256,6 +330,8 @@ describe("export jobs + SSE progress", () => {
     };
     expect(rawChannel.exportVersion).toBe("1.1");
     expect(rawChannel.jobId).toBe(createJobPayload.jobId);
+    expect(rawChannel.channelStats?.subscriberCount).toBe(999);
+    expect(rawChannel.channelStats?.handle).toBe("@demo");
     expect(rawChannel.provenance.dataSources.length).toBeGreaterThan(0);
     expect(typeof rawChannel.provenance.env.LOCAL_ASR_ENABLED).toBe("boolean");
     expect(rawChannel.provenance.env.TRANSCRIPT_LANG === null || typeof rawChannel.provenance.env.TRANSCRIPT_LANG === "string").toBe(true);
@@ -265,10 +341,40 @@ describe("export jobs + SSE progress", () => {
       .trim()
       .split("\n")
       .filter(Boolean)
-      .map((line) => JSON.parse(line) as { videoId: string; transcriptPath: string });
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            videoId: string;
+            description: string;
+            durationSec: number;
+            statistics: { viewCount: number; likeCount: number; commentCount: number };
+            transcriptRef: {
+              transcriptPath: string;
+              transcriptSource: "captions" | "asr" | "none";
+              transcriptStatus: "ok" | "missing" | "error";
+            };
+            thumbnailLocalPath: string;
+            thumbnailOriginalUrl: string;
+            daysSincePublish: number;
+            viewsPerDay: number;
+            likeRate: number;
+            commentRate: number;
+          }
+      );
     expect(rawVideos).toHaveLength(2);
-    expect(rawVideos.map((entry) => entry.videoId)).toEqual(["video0000011", "video0000022"]);
-    expect(rawVideos[0]?.transcriptPath).toBe("raw/transcripts/video0000011.jsonl");
+    expect(new Set(rawVideos.map((entry) => entry.videoId))).toEqual(new Set(["video0000011", "video0000022"]));
+    const firstVideo = rawVideos.find((entry) => entry.videoId === "video0000011");
+    expect(firstVideo?.description).toBe("Descripcion completa video 1");
+    expect(firstVideo?.durationSec).toBe(125);
+    expect(firstVideo?.statistics.viewCount).toBe(10);
+    expect(firstVideo?.transcriptRef.transcriptPath).toBe("raw/transcripts/video0000011.jsonl");
+    expect(firstVideo?.transcriptRef.transcriptSource).toBe("captions");
+    expect(firstVideo?.thumbnailLocalPath).toBe("raw/thumbnails/video0000011.jpg");
+    expect(firstVideo?.thumbnailOriginalUrl).toBe("https://img.example/video1.jpg");
+    expect(typeof firstVideo?.daysSincePublish).toBe("number");
+    expect(typeof firstVideo?.viewsPerDay).toBe("number");
+    expect(typeof firstVideo?.likeRate).toBe("number");
+    expect(typeof firstVideo?.commentRate).toBe("number");
 
     const transcriptVideoOneRaw = await fs.readFile(
       path.join(statusBody.exportPath as string, "raw", "transcripts", "video0000011.jsonl"),
@@ -291,6 +397,39 @@ describe("export jobs + SSE progress", () => {
           thumbnailUrl: "https://img.example/video99.jpg"
         }
       ]
+    });
+    getVideoDetailsMock.mockResolvedValue({
+      warnings: [],
+      videos: [
+        {
+          videoId: "video0000099",
+          title: "Video Health Fail",
+          description: "Descripcion 99",
+          publishedAt: "2025-01-03T00:00:00.000Z",
+          durationSec: 180,
+          categoryId: "22",
+          tags: [],
+          madeForKids: false,
+          liveBroadcastContent: "none",
+          statistics: {
+            viewCount: 30,
+            likeCount: 0,
+            commentCount: 0
+          },
+          thumbnails: {
+            high: { url: "https://img.example/video99.jpg", width: 480, height: 360 }
+          },
+          thumbnailOriginalUrl: "https://img.example/video99.jpg"
+        }
+      ]
+    });
+    getChannelDetailsMock.mockResolvedValue({
+      channelId: "UC1234567890123456789012",
+      channelName: "Canal Demo Jobs",
+      channelStats: {
+        subscriberCount: 1000
+      },
+      warnings: []
     });
     downloadToBufferMock.mockResolvedValue(Buffer.from("thumbnail"));
     getTranscriptWithFallbackMock.mockRejectedValue(new Error("Local ASR disabled: unable to import faster_whisper"));

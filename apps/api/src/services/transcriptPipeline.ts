@@ -21,6 +21,7 @@ export interface TranscriptPipelineDependencies {
 export interface TranscriptPipelineResult {
   transcript: string;
   status: "ok" | "missing" | "error";
+  source: "captions" | "asr" | "none";
   warning?: string;
 }
 
@@ -63,6 +64,7 @@ export async function getTranscriptWithFallback(
     return {
       transcript: captions.transcript.trim(),
       status: "ok",
+      source: "captions",
       warning: captions.warning
     };
   }
@@ -71,6 +73,7 @@ export async function getTranscriptWithFallback(
     return {
       transcript: "",
       status: captions.status === "missing" ? "missing" : "error",
+      source: "none",
       warning: mergeWarnings([captions.warning, `Local ASR disabled for video ${videoId}`])
     };
   }
@@ -79,6 +82,7 @@ export async function getTranscriptWithFallback(
     return {
       transcript: "",
       status: "error",
+      source: "none",
       warning: mergeWarnings([captions.warning, `Local ASR output path missing for video ${videoId}`])
     };
   }
@@ -93,13 +97,15 @@ export async function getTranscriptWithFallback(
   if (localAsr.status === "ok" && localAsr.transcript.trim()) {
     return {
       transcript: localAsr.transcript.trim(),
-      status: "ok"
+      status: "ok",
+      source: "asr"
     };
   }
 
   return {
     transcript: "",
     status: "error",
+    source: "none",
     warning: mergeWarnings([
       captions.warning,
       localAsr.warning ?? `Local ASR returned empty transcript for video ${videoId}`
