@@ -1,0 +1,286 @@
+:root {
+  color-scheme: light;
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  line-height: 1.4;
+  font-weight: 400;
+  --bg: #f4f6f8;
+  --surface: #ffffff;
+  --text: #131722;
+  --muted: #5f6676;
+  --accent: #0d9488;
+  --accent-soft: #e3f6f4;
+  --error-bg: #ffebee;
+  --error: #b71c1c;
+  --warning-bg: #fff8e1;
+  --warning: #946200;
+  --border: #dde3eb;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: radial-gradient(circle at top right, #dff2ef 0%, var(--bg) 40%);
+  color: var(--text);
+}
+
+.page {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px;
+  display: grid;
+  gap: 18px;
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 20px;
+  box-shadow: 0 10px 26px rgba(16, 24, 40, 0.05);
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 1.8rem;
+  margin-bottom: 6px;
+}
+
+.subtitle {
+  color: var(--muted);
+  margin-bottom: 20px;
+}
+
+.controls {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(0, 1fr) 220px 180px;
+  align-items: end;
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+  font-size: 0.95rem;
+}
+
+input,
+select,
+button {
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  padding: 10px 12px;
+  font: inherit;
+}
+
+button {
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.2s ease;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+button.secondary {
+  background: #5f6676;
+}
+
+.summary {
+  margin-top: 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.summary p {
+  color: var(--muted);
+}
+
+.alert {
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 10px;
+}
+
+.alert ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+.error {
+  background: var(--error-bg);
+  color: var(--error);
+}
+
+.warning {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.export-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+}
+
+.card {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--surface);
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+}
+
+.card.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(13, 148, 136, 0.3);
+  background: var(--accent-soft);
+}
+
+.card img {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  display: block;
+}
+
+.card-content {
+  padding: 10px;
+  display: grid;
+  gap: 6px;
+}
+
+.checkbox-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.card h3 {
+  font-size: 0.95rem;
+}
+
+.card p {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.card small {
+  color: var(--muted);
+}
+
+.export-modal-wrap {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  width: min(480px, calc(100vw - 36px));
+  z-index: 50;
+}
+
+.export-modal {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: 0 20px 40px rgba(15, 23, 42, 0.2);
+  padding: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.export-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.export-modal-header h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.progress-track {
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  background: #e5e7eb;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #0d9488, #14b8a6);
+  transition: width 0.2s ease;
+}
+
+.export-video-list {
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.export-video-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.88rem;
+}
+
+.export-video-row span {
+  max-width: 70%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.export-video-row strong {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+@media (max-width: 900px) {
+  .controls {
+    grid-template-columns: 1fr;
+  }
+
+  .export-modal-wrap {
+    right: 12px;
+    left: 12px;
+    width: auto;
+    bottom: 12px;
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "ytai-analizer",
+  "private": true,
+  "version": "1.0.0",
+  "description": "YouTube analyzer monorepo (web + api)",
+  "packageManager": "pnpm@10.8.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "concurrently -n api,web -c yellow,cyan \"pnpm -C apps/api dev\" \"pnpm -C apps/web dev\"",
+    "build": "pnpm -r --filter './apps/*' run build",
+    "test": "pnpm -r --filter './apps/*' --if-present run test",
+    "asr:setup": "node scripts/setup_asr.mjs",
+    "asr:check": "node scripts/check_asr.mjs"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
