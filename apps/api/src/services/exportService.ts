@@ -20,6 +20,7 @@ import type { TranscriptPipelineResult } from "./transcriptPipeline.js";
 import type { TranscriptSegment } from "./transcriptModels.js";
 import { resolveTimeframeRange } from "../utils/timeframe.js";
 import { persistTitleFeaturesArtifact } from "../derived/titleFeaturesAgent.js";
+import { persistDescriptionFeaturesArtifact } from "../derived/descriptionFeaturesAgent.js";
 
 export type ExportVideoStage =
   | "queue"
@@ -718,6 +719,7 @@ export async function exportSelectedVideos(
 
         let derivedVideoFeaturesArtifactPath: string | undefined;
         const titleForFeatures = enrichedVideo?.title || video.title;
+        const descriptionForFeatures = enrichedVideo?.description ?? "";
         try {
           const derived = await persistTitleFeaturesArtifact({
             exportsRoot,
@@ -744,7 +746,35 @@ export async function exportSelectedVideos(
         callbacks.onVideoProgress?.({
           videoId: video.videoId,
           stage: "writing_json",
-          percent: 90
+          percent: 82
+        });
+
+        try {
+          const derived = await persistDescriptionFeaturesArtifact({
+            exportsRoot,
+            channelFolderPath,
+            videoId: video.videoId,
+            title: titleForFeatures,
+            description: descriptionForFeatures,
+            languageHint: toLanguageHint(resolveTranscriptLanguage(transcriptResult))
+          });
+          derivedVideoFeaturesArtifactPath = derived.artifactAbsolutePath;
+
+          for (const warning of derived.warnings) {
+            videoWarnings.push(warning);
+            addWarning(warning, video.videoId);
+          }
+        } catch (error) {
+          const warning = `Description features generation failed for ${video.videoId}: ${
+            error instanceof Error ? error.message : "unknown error"
+          }`;
+          videoWarnings.push(warning);
+          addWarning(warning, video.videoId);
+        }
+        callbacks.onVideoProgress?.({
+          videoId: video.videoId,
+          stage: "writing_json",
+          percent: 95
         });
 
         const transcriptRef: RawVideoRecordV1["transcriptRef"] = {

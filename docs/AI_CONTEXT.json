@@ -30,7 +30,8 @@
     "autogen": {
       "worker": "apps/api/scripts/autogen_worker.py",
       "requirements": "apps/api/scripts/requirements-autogen.txt",
-      "runtime": "apps/api/src/services/autogenRuntime.ts"
+      "runtime": "apps/api/src/services/autogenRuntime.ts",
+      "tasks": ["title_classifier_v1", "description_classifier_v1"]
     }
   },
   "flows": [
@@ -131,10 +132,19 @@
         "transcriptStatus?"
       ]
     },
-    "derivedTitleFeatures": {
+    "derivedVideoFeatures": {
       "path": "exports/<channel>/derived/video_features/<videoId>.json",
       "schemaVersion": "derived.video_features.v1",
-      "fields": ["schemaVersion", "videoId", "computedAt", "titleFeatures.deterministic", "titleFeatures.llm"]
+      "fields": [
+        "schemaVersion",
+        "videoId",
+        "computedAt",
+        "titleFeatures.deterministic",
+        "titleFeatures.llm",
+        "descriptionFeatures.deterministic",
+        "descriptionFeatures.llm",
+        "descriptionFeatures.warnings"
+      ]
     },
     "sseEvents": [
       "job_started",
@@ -166,6 +176,7 @@
       "OPENAI_API_KEY",
       "AUTO_GEN_ENABLED",
       "AUTO_GEN_MODEL_TITLE",
+      "AUTO_GEN_MODEL_DESCRIPTION",
       "AUTO_GEN_REASONING_EFFORT",
       "AUTO_GEN_TIMEOUT_SEC"
     ],

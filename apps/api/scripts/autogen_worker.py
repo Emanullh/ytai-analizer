@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 from autogen_agentchat.agents import AssistantAgent
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 
-SYSTEM_PROMPT = """TitleIntentClassifierAgent v1
+TITLE_SYSTEM_PROMPT = """TitleIntentClassifierAgent v1
 
 You are a strict classification agent. You must output ONLY valid JSON (no markdown, no prose).
 Task: classify a YouTube video title into closed taxonomies with confidence and evidence spans.
@@ -59,6 +59,58 @@ RULES:
 Now wait for the JSON input and respond with ONLY the JSON output.
 """
 
+DESCRIPTION_SYSTEM_PROMPT = """DescriptionClassifierAgent v1
+
+You are a strict classification agent. You must output ONLY valid JSON (no markdown, no prose).
+Task: classify URL purpose, sponsor brand mentions, and primary CTA from a YouTube description.
+
+INPUT:
+You will receive a JSON payload with:
+- videoId (string)
+- title (string)
+- description (string)
+- urlsWithSpans (array of {url,domain,charStart,charEnd,isShortener})
+- languageHint ("auto"|"en"|"es")
+
+OUTPUT (MUST match this schema exactly):
+{
+  "schemaVersion": "derived.description_llm.v1",
+  "linkPurpose": [
+    {
+      "url": "string",
+      "label": "sponsor|affiliate|sources|social|merch|newsletter|community|other",
+      "confidence": 0.0,
+      "evidence": {"charStart": 0, "charEnd": 0, "snippet": "string"}
+    }
+  ],
+  "sponsorBrandMentions": [
+    {
+      "brand": "string",
+      "confidence": 0.0,
+      "evidence": [{"charStart": 0, "charEnd": 0, "snippet": "string"}]
+    }
+  ],
+  "primaryCTA": {
+    "label": "subscribe|like|comment|link|follow|none",
+    "confidence": 0.0,
+    "evidence": [{"charStart": 0, "charEnd": 0, "snippet": "string"}]
+  }
+}
+
+RULES:
+1) Use ONLY labels from the enums above.
+2) linkPurpose should be returned for provided urlsWithSpans (up to 10 urls).
+3) Evidence spans MUST point to exact substrings from the original description.
+   - charStart/charEnd are zero-based indices, charEnd exclusive.
+   - snippet must equal description[charStart:charEnd].
+4) Do not infer claims unsupported by the description text.
+5) If no sponsor brands are present, return empty sponsorBrandMentions.
+6) If no CTA is clear, return primaryCTA.label="none" with low confidence.
+7) Return strict JSON only.
+
+Now wait for the JSON input and respond with ONLY the JSON output.
+"""
+
 PROMISE_LABELS = {
     "howto/tutorial",
     "review",
@@ -85,6 +137,17 @@ CURIOSITY_LABELS = {
 }
 
 CLAIM_STRENGTH_LABELS = {"low", "medium", "high"}
+LINK_PURPOSE_LABELS = {
+    "sponsor",
+    "affiliate",
+    "sources",
+    "social",
+    "merch",
+    "newsletter",
+    "community",
+    "other",
+}
+PRIMARY_CTA_LABELS = {"subscribe", "like", "comment", "link", "follow", "none"}
 
 
 def log(message: str) -> None:
@@ -106,12 +169,12 @@ def clamp_01(value: Any) -> float:
     return round(float(value), 6)
 
 
-def normalize_evidence(raw: Any, title: str) -> List[Dict[str, Any]]:
+def normalize_evidence(raw: Any, source_text: str) -> List[Dict[str, Any]]:
     if not isinstance(raw, list):
         return []
 
     normalized: List[Dict[str, Any]] = []
-    title_len = len(title)
+    source_len = len(source_text)
     for item in raw:
         if not isinstance(item, dict):
             continue
@@ -125,15 +188,22 @@ def normalize_evidence(raw: Any, title: str) -> List[Dict[str, Any]]:
         if not isinstance(end, int):
             end = start
 
-        start = max(0, min(start, title_len))
-        end = max(start, min(end, title_len))
+        start = max(0, min(start, source_len))
+        end = max(start, min(end, source_len))
 
         if not isinstance(snippet, str) or not snippet.strip():
-            snippet = title[start:end]
+            snippet = source_text[start:end]
 
         normalized.append({"charStart": start, "charEnd": end, "snippet": snippet})
 
     return normalized
+
+
+def normalize_single_evidence(raw: Any, source_text: str) -> Dict[str, Any]:
+    normalized = normalize_evidence([raw], source_text)
+    if normalized:
+        return normalized[0]
+    return {"charStart": 0, "charEnd": 0, "snippet": ""}
 
 
 def normalize_multi_label(raw: Any, title: str, allowed_labels: set[str]) -> List[Dict[str, Any]]:
@@ -177,13 +247,75 @@ def normalize_claim_strength(raw: Any, title: str) -> Dict[str, Any] | None:
     }
 
 
-def coerce_result(raw: Any, title: str) -> Dict[str, Any]:
+def coerce_title_result(raw: Any, title: str) -> Dict[str, Any]:
     source = raw if isinstance(raw, dict) else {}
     return {
         "schemaVersion": "derived.title_llm.v1",
         "promise_type": normalize_multi_label(source.get("promise_type", []), title, PROMISE_LABELS),
         "curiosity_gap_type": normalize_multi_label(source.get("curiosity_gap_type", []), title, CURIOSITY_LABELS),
         "headline_claim_strength": normalize_claim_strength(source.get("headline_claim_strength"), title),
+    }
+
+
+def coerce_description_result(raw: Any, description: str) -> Dict[str, Any]:
+    source = raw if isinstance(raw, dict) else {}
+
+    link_purpose: List[Dict[str, Any]] = []
+    if isinstance(source.get("linkPurpose"), list):
+        for item in source.get("linkPurpose", []):
+            if not isinstance(item, dict):
+                continue
+
+            url = item.get("url")
+            label = item.get("label")
+            if not isinstance(url, str) or not url.strip():
+                continue
+            if not isinstance(label, str) or label not in LINK_PURPOSE_LABELS:
+                continue
+
+            link_purpose.append(
+                {
+                    "url": url.strip(),
+                    "label": label,
+                    "confidence": clamp_01(item.get("confidence", 0.0)),
+                    "evidence": normalize_single_evidence(item.get("evidence"), description),
+                }
+            )
+
+    sponsor_brand_mentions: List[Dict[str, Any]] = []
+    if isinstance(source.get("sponsorBrandMentions"), list):
+        for item in source.get("sponsorBrandMentions", []):
+            if not isinstance(item, dict):
+                continue
+
+            brand = item.get("brand")
+            if not isinstance(brand, str) or not brand.strip():
+                continue
+
+            sponsor_brand_mentions.append(
+                {
+                    "brand": brand.strip(),
+                    "confidence": clamp_01(item.get("confidence", 0.0)),
+                    "evidence": normalize_evidence(item.get("evidence", []), description),
+                }
+            )
+
+    primary_cta = None
+    raw_primary = source.get("primaryCTA")
+    if isinstance(raw_primary, dict):
+        label = raw_primary.get("label")
+        if isinstance(label, str) and label in PRIMARY_CTA_LABELS:
+            primary_cta = {
+                "label": label,
+                "confidence": clamp_01(raw_primary.get("confidence", 0.0)),
+                "evidence": normalize_evidence(raw_primary.get("evidence", []), description),
+            }
+
+    return {
+        "schemaVersion": "derived.description_llm.v1",
+        "linkPurpose": link_purpose,
+        "sponsorBrandMentions": sponsor_brand_mentions,
+        "primaryCTA": primary_cta,
     }
 
 
@@ -215,24 +347,12 @@ def parse_agent_json(content: str) -> Any:
     return json.loads(stripped)
 
 
-async def classify_title(request: Dict[str, Any]) -> Dict[str, Any]:
-    task = request.get("task")
-    if task != "title_classifier_v1":
-        raise ValueError(f"unsupported task '{task}'")
-
+def build_model_client(request: Dict[str, Any], env_model_var: str) -> OpenAIChatCompletionClient:
     provider = str(request.get("provider", "openai")).strip().lower() or "openai"
     if provider != "openai":
         raise ValueError(f"unsupported provider '{provider}'")
 
-    payload = request.get("payload")
-    if not isinstance(payload, dict):
-        raise ValueError("missing payload")
-
-    title = str(payload.get("title", "")).strip()
-    if not title:
-        raise ValueError("payload.title is required")
-
-    model = str(request.get("model", os.environ.get("AUTO_GEN_MODEL_TITLE", "gpt-5.2"))).strip() or "gpt-5.2"
+    model = str(request.get("model", os.environ.get(env_model_var, "gpt-5.2"))).strip() or "gpt-5.2"
     reasoning_effort = str(request.get("reasoningEffort", "low")).strip().lower() or "low"
     if reasoning_effort not in {"low", "medium", "high"}:
         reasoning_effort = "low"
@@ -246,15 +366,26 @@ async def classify_title(request: Dict[str, Any]) -> Dict[str, Any]:
         client_kwargs["reasoning_effort"] = reasoning_effort
 
     try:
-        model_client = OpenAIChatCompletionClient(**client_kwargs)
+        return OpenAIChatCompletionClient(**client_kwargs)
     except TypeError:
         client_kwargs.pop("reasoning_effort", None)
-        model_client = OpenAIChatCompletionClient(**client_kwargs)
+        return OpenAIChatCompletionClient(**client_kwargs)
 
+
+async def classify_title(request: Dict[str, Any]) -> Dict[str, Any]:
+    payload = request.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("missing payload")
+
+    title = str(payload.get("title", "")).strip()
+    if not title:
+        raise ValueError("payload.title is required")
+
+    model_client = build_model_client(request, "AUTO_GEN_MODEL_TITLE")
     agent = AssistantAgent(
         name="TitleIntentClassifierAgent",
         model_client=model_client,
-        system_message=SYSTEM_PROMPT,
+        system_message=TITLE_SYSTEM_PROMPT,
     )
 
     user_prompt = json.dumps(
@@ -283,7 +414,68 @@ async def classify_title(request: Dict[str, Any]) -> Dict[str, Any]:
             if asyncio.iscoroutine(maybe_coroutine):
                 await maybe_coroutine
 
-    return coerce_result(parsed, title)
+    return coerce_title_result(parsed, title)
+
+
+async def classify_description(request: Dict[str, Any]) -> Dict[str, Any]:
+    payload = request.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("missing payload")
+
+    description = str(payload.get("description", ""))
+    if not description.strip():
+        raise ValueError("payload.description is required")
+
+    model_client = build_model_client(request, "AUTO_GEN_MODEL_DESCRIPTION")
+    agent = AssistantAgent(
+        name="DescriptionClassifierAgent",
+        model_client=model_client,
+        system_message=DESCRIPTION_SYSTEM_PROMPT,
+    )
+
+    urls_with_spans = payload.get("urlsWithSpans")
+    if not isinstance(urls_with_spans, list):
+        urls_with_spans = []
+
+    user_prompt = json.dumps(
+        {
+            "task": "description_classifier_v1",
+            "videoId": str(payload.get("videoId", "")).strip(),
+            "title": str(payload.get("title", "")).strip(),
+            "description": description,
+            "urlsWithSpans": urls_with_spans[:10],
+            "languageHint": str(payload.get("languageHint", "auto")).strip() or "auto",
+            "requiredOutput": {
+                "schemaVersion": "derived.description_llm.v1",
+                "linkPurpose": "array(url,label,confidence,evidence)",
+                "sponsorBrandMentions": "array(brand,confidence,evidence[])",
+                "primaryCTA": "object(label,confidence,evidence[]) or null",
+            },
+        },
+        ensure_ascii=False,
+    )
+
+    try:
+        run_result = await agent.run(task=user_prompt)
+        content = extract_text_from_agent_result(run_result)
+        parsed = parse_agent_json(content)
+    finally:
+        close_method = getattr(model_client, "close", None)
+        if callable(close_method):
+            maybe_coroutine = close_method()
+            if asyncio.iscoroutine(maybe_coroutine):
+                await maybe_coroutine
+
+    return coerce_description_result(parsed, description)
+
+
+async def classify_request(request: Dict[str, Any]) -> Dict[str, Any]:
+    task = request.get("task")
+    if task == "title_classifier_v1":
+        return await classify_title(request)
+    if task == "description_classifier_v1":
+        return await classify_description(request)
+    raise ValueError(f"unsupported task '{task}'")
 
 
 for raw_line in sys.stdin:
@@ -298,7 +490,7 @@ for raw_line in sys.stdin:
         if not request_id:
             raise ValueError("missing request id")
 
-        result = asyncio.run(classify_title(payload))
+        result = asyncio.run(classify_request(payload))
         emit({"id": request_id, "ok": True, "result": result})
     except Exception as error:
         message = str(error) if str(error) else "unknown worker error"

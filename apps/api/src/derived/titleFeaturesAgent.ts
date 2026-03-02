@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { env } from "../config/env.js";
 import type { TranscriptSegment } from "../services/transcriptModels.js";
 import { requestAutoGenTask } from "../services/autogenRuntime.js";
@@ -188,6 +189,28 @@ async function fetchEmbedding(input: string): Promise<number[]> {
   }
 
   return embedding;
+}
+
+async function readExistingArtifact(artifactPath: string): Promise<Record<string, unknown> | null> {
+  try {
+    const raw = await fs.readFile(artifactPath, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    return parsed as Record<string, unknown>;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function writeJsonAtomic(targetPath: string, value: unknown): Promise<void> {
+  const tempPath = `${targetPath}.${randomUUID()}.tmp`;
+  await fs.writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
+  await fs.rename(tempPath, targetPath);
 }
 
 export async function maybeComputeEmbeddingsSimilarity(
@@ -430,7 +453,15 @@ export async function persistTitleFeaturesArtifact(args: PersistTitleFeaturesArg
   ensureInsideRoot(args.exportsRoot, artifactAbsolutePath);
 
   await fs.mkdir(derivedFolderPath, { recursive: true });
-  await fs.writeFile(artifactAbsolutePath, `${JSON.stringify(result.bundle, null, 2)}\n`, "utf-8");
+  const existing = await readExistingArtifact(artifactAbsolutePath);
+  const mergedBundle = {
+    ...(existing ?? {}),
+    schemaVersion: "derived.video_features.v1",
+    videoId: args.videoId,
+    computedAt: result.bundle.computedAt,
+    titleFeatures: result.bundle.titleFeatures
+  };
+  await writeJsonAtomic(artifactAbsolutePath, mergedBundle);
 
   return {
     ...result,

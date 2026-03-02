@@ -1,159 +1,133 @@
-Tarea: Implementar Title Features Agent + bootstrap inicial AutoGen (LLM) integrado al flujo actual de export (sin pasos extra fuera del frontend)
+Tarea: Implementar Description Features Agent (determinista + LLM via AutoGen) integrado al flujo actual de export (sin pasos extra en frontend)
 
-Contexto (repo actual):
-- Export flow: POST /api/export/jobs + SSE; backend exportJobService/exportService
-- Export produce exports/<channel>/channel.json + thumbnails/<videoId>.jpg
-- Transcript pipeline ya existe (captions + fallback ASR).
-- Docs: AI Context Pack + DATA_CONTRACTS.md (ya presentes).
-- Requisito: todo debe ejecutarse dentro del flujo actual de “Exportar” (sin comandos manuales extra en UI).
+Contexto:
+- Ya existe AutoGen runtime del primer agente:
+  - apps/api/scripts/autogen_worker.py
+  - apps/api/src/services/autogenRuntime.ts
+  - env vars AUTO_GEN_ENABLED, AUTO_GEN_MODEL_*, etc.
+- Export flow asíncrono con SSE:
+  - exportJobService -> exportService
+- Artefactos derivados:
+  - exports/<channel>/derived/video_features/<videoId>.json (ya creado por Title agent)
 
-Objetivo (Title Features Agent):
-Generar features derivadas del título para cada video exportado y guardarlas como artefacto reusable por cualquier canal/video.
+Objetivo:
+Agregar descripción (description) como fuente de features derivadas por video y persistir en el MISMO template de salida reusable.
 
-Salida (template fijo):
-Por cada video exportado, escribir:
-exports/<channel>/derived/video_features/<videoId>.json
-con este template mínimo estable (v1):
+Salida (template fijo, extendiendo sin romper lo existente):
+exports/<channel>/derived/video_features/<videoId>.json debe incluir además:
 {
   "schemaVersion": "derived.video_features.v1",
   "videoId": "...",
   "computedAt": "ISO",
-  "titleFeatures": {
+  "titleFeatures": { ... },            // existente
+  "descriptionFeatures": {
     "deterministic": { ... },
-    "llm": { ... }
+    "llm": { ... },
+    "warnings": [...]
   }
 }
-- Nunca null: si algo no se pudo calcular, poner valor por defecto + warning.
+Regla: si ya existe el JSON por title agent, debe “mergearse” (leer->merge->write) sin perder campos.
 
-IMPORTANTE: Qué se calcula SIN AutoGen (determinista) y NO debe ir al prompt del agente
+IMPORTANTE: Qué se calcula SIN AutoGen (determinista) y NO debe ir al prompt LLM
 Implementar en TypeScript (Node) y NO llamar LLM para:
-1) Señales de formato:
-   - title_len_chars, title_len_words
-   - caps_ratio (mayúsculas/letras)
-   - emoji_count
-   - punct_count_total + por tipo: question_mark_count, exclamation_count, colon_count, dash_count, paren_count, bracket_count
-   - has_number, number_count, leading_number
-2) “Pseudo-LIWC” simple (determinista, con wordlists internas):
-   - pronoun_count (I/you/we/he/she/they + variantes)
-   - negation_count (not/no/never/n't + variantes es/en)
-   - certainty_count (must/always/definitely + variantes)
-   - hedging_count (maybe/might/probably + variantes)
-   (No usar LIWC propietario. Solo wordlists pequeñas versionadas en repo.)
-3) Congruencia título ↔ transcript (sin LLM):
-   - title_keyword_coverage: % de tokens importantes del título presentes en transcript
-   - title_keyword_early_coverage_30s:
-     - si existen segmentos con startSec/endSec: usar ventanas 0-30s reales
-     - si no hay timestamps: fallback a “primer N caracteres” del transcript (documentar).
-   Evidencia: guardar lista de tokens del título y cuáles aparecen (audit).
-4) (Opcional determinista con embeddings, NO AutoGen):
-   - title_transcript_sim_cosine usando embeddings (OpenAI text-embedding-3-small o 3-large).
-   - Esto NO usa AutoGen; es un request directo a API de embeddings (si OPENAI_API_KEY existe).
-   - Si no hay key, dejarlo null y warning.
-   Nota: text-embedding-3-large/3-small existen oficialmente. (No inventar modelos.)
+
+A) Estructura:
+- desc_len_chars, desc_len_words
+- line_count
+- has_timestamps (regex: (\d{1,2}:)?\d{1,2}:\d{2})
+- url_count + urls[] extraídas (normalizadas)
+- domain_counts (top dominios)
+- hashtag_count (#\w+)
+- mentions_count (@\w+)
+- cta_count por reglas (diccionario ES/EN):
+  - subscribe/suscríbete/suscribete, like/me gusta, comment/comenta, link/enlace, follow/sígueme, newsletter, patreon, etc.
+- cta_in_first_200_chars (bool)
+
+B) SEO / overlap:
+- title_desc_overlap_jaccard sobre tokens normalizados (min length >=2)
+- title_desc_overlap_tokens: {titleTokens:[], hitTokens:[]} como evidencia (audit)
+
+C) Flags de disclosure (reglas, no LLM):
+- has_sponsor_disclosure:
+  - patrones: "sponsor", "sponsored", "patrocinado", "patrocinio", "ad", "paid promotion"
+- has_affiliate_disclosure:
+  - patrones: "affiliate", "afiliado", "affiliate link", "enlace afiliado"
+- has_credits_sources:
+  - patrones: "sources", "fuentes", "references", "créditos", "credit", "further reading" + url_count>0
+Guardar evidence: matches con (charStart,charEnd,snippet).
+
+D) Readability (determinista):
+- readability:
+  - si texto parece ES: Fernández-Huerta o Szigriszt-Pazos (implementación aproximada aceptable)
+  - si EN: Flesch Reading Ease
+- Guardar {metric, score} y warning si language desconocido.
+
+E) Link list determinista:
+- urls[] con:
+  - url, domain, charStart, charEnd (span exacto en description)
+  - isShortener (bit.ly, t.co, youtu.be, etc.)
+No clasificar propósito con reglas (eso va al LLM).
 
 Qué SÍ se calcula CON AutoGen (LLM) y debe ir al prompt del agente:
-- promise_type multi-label con scores (taxonomía cerrada):
-  howto/tutorial, review, news, challenge, comparison, listicle, storytime, reaction, case-study, tooling, explainer
-- curiosity_gap_type (taxonomía cerrada):
-  threat, mystery, contrarian, how-to, controversy, warning, breakdown, unknown
-- (Opcional) headline_claim_strength: low|medium|high (cerrada)
-Todo con:
-- confidence 0..1
-- evidence: spans del título (charStart/charEnd + snippet) justificando labels
-Sin texto libre.
+- linkPurpose classification (cerrado) para cada URL detectada (o top N=10):
+  sponsor | affiliate | sources | social | merch | newsletter | community | other
+  Con:
+  - confidence 0..1
+  - evidence: referencia al span del URL (charStart/charEnd/snippet)
+- sponsorBrandMentions (si existen): lista de marcas mencionadas (closed? no; pero debe venir como strings) + evidence spans en description
+- primaryCTA (cerrado): subscribe|like|comment|link|follow|none + confidence + evidence
 
-Implementación requerida (backend):
-A) Código TS (apps/api):
-1) Crear módulo:
-   - apps/api/src/derived/titleDeterministic.ts
-     export function computeTitleDeterministicFeatures(args): DeterministicTitleFeatures
+Implementación requerida (apps/api):
+1) Crear módulo determinista:
+   - apps/api/src/derived/descriptionDeterministic.ts
+     export function computeDescriptionDeterministicFeatures({title, description}): {features, evidence, warnings}
+   Incluye helpers: tokenize, extractUrlsWithSpans, domainCounts, regex flags, readability.
+
 2) Crear agente:
-   - apps/api/src/derived/titleFeaturesAgent.ts
-     - computeDeterministic(title, transcriptArtifacts?)
-     - maybeComputeEmbeddingsSimilarity(title, transcript) (opcional, si OPENAI_API_KEY)
-     - callAutoGenTitleClassifier(title) (si OPENAI_API_KEY y AUTO_GEN_ENABLED=true)
-     - return TitleFeaturesBundle + warnings
-3) Persistencia:
-   - escribir a exports/<channel>/derived/video_features/<videoId>.json
-   - asegurar ensureInsideRoot(...) para derived/
-4) Manifest:
-   - si existe manifest.json, agregar artifacts de derived/video_features/<videoId>.json
-   - si no existe, crear manifest básico sin romper export actual
+   - apps/api/src/derived/descriptionFeaturesAgent.ts
+     - computeDeterministic(...)
+     - if AUTO_GEN_ENABLED && OPENAI_API_KEY: call autogenRuntime.request({task:"description_classifier_v1", payload:{videoId, title, description, urlsWithSpans, languageHint}})
+     - merge deterministic + llm
+     - return bundle + warnings
 
-B) Integración en flujo de export (NO nuevos endpoints):
-- En apps/api/src/services/exportService.ts:
-  - después de obtener transcript (y si ya existe transcript artifact), invocar Title Features Agent
-  - agregar warning si LLM/embeddings no están configurados, pero NO fallar job
-- Progreso SSE:
-  - Reusar stage existente "writing_json" incrementando percent (recomendado para no romper UI), O
-  - Agregar stage "deriving_features" (si lo haces, actualiza enum en apps/web/src/types.ts + reducer + tests).
-  Preferencia: NO introducir nueva stage para minimizar cambios.
+3) Extender autogen_worker.py para soportar el nuevo task:
+   - task == "description_classifier_v1"
+   - usar SYSTEM PROMPT fijo (ver “PROMPT AUTOGEN — DescriptionClassifierAgent v1” al final)
+   - validar JSON parseable (no markdown)
+   Nota: NO re-hagas bootstrap, solo agrega handler.
 
-Implementación requerida (AutoGen bootstrap inicial):
-C) Python worker para AutoGen (similar al ASR worker, persistente):
-1) Agregar:
-   - apps/api/scripts/autogen_worker.py
-   - apps/api/scripts/requirements-autogen.txt
-2) requirements-autogen.txt debe incluir:
-   - autogen-agentchat
-   - autogen-ext[openai]
-   (según docs oficiales de AutoGen)
-3) Protocolo JSONL (stdin/stdout) del worker:
-   Input (una línea JSON):
-   {
-     "id": "uuid",
-     "task": "title_classifier_v1",
-     "payload": {
-       "videoId": "...",
-       "title": "...",
-       "languageHint": "auto|en|es"
-     },
-     "provider": "openai",
-     "model": "gpt-5.2",
-     "reasoningEffort": "low|medium|high"
-   }
-   Output ok:
-   { "id":"uuid", "ok":true, "result": <TitleLLMResultV1> }
-   Output error:
-   { "id":"uuid", "ok":false, "error":"..." }
-4) Worker debe:
-   - construir 1 agente AutoGen (AssistantAgent) con SYSTEM PROMPT fijo (ver más abajo en este prompt: “AutoGen Agent Prompt”)
-   - pedir salida JSON estricta (sin markdown) y validar parse
-   - logs a stderr, no mezclar con stdout
+4) Integración export:
+   - En apps/api/src/services/exportService.ts
+     - tras obtener video details (title/description) y transcript (ya existe)
+     - invocar descriptionFeaturesAgent y persistir merged JSON en derived/video_features/<videoId>.json
+   - SSE:
+     - NO agregar nuevo stage si no es necesario; reusa "writing_json" con percent incremental.
+     - Si agregas stage, actualiza apps/web/src/types.ts + reducer + tests.
 
-D) Runtime Node para worker (apps/api):
-1) Crear:
-   - apps/api/src/services/autogenRuntime.ts
-     - start/stop worker
-     - request(task) con cola y timeout
-     - reinicio 1 vez si el worker crashea
-2) Env vars (apps/api/.env.example + env.ts):
-   - AUTO_GEN_ENABLED=true|false (default true)
-   - OPENAI_API_KEY (si usas provider openai)
-   - AUTO_GEN_MODEL_TITLE=gpt-5.2 (default)
-   - AUTO_GEN_REASONING_EFFORT=low (default)
-   - AUTO_GEN_TIMEOUT_SEC=60 (default)
-   (Gemini no es necesario implementarlo en este primer PR; solo deja interfaz preparada.)
+5) Persistencia:
+   - Asegurar carpeta exports/<channel>/derived/video_features/
+   - ensureInsideRoot para derived.
+   - Escritura atómica: write temp + rename.
 
-E) Tests:
-1) apps/api/tests/titleDeterministic.test.ts:
-   - length/caps/punct/numbers
-   - pronoun/negation/certainty/hedging counts
-2) apps/api/tests/titleFeaturesAgent.test.ts:
-   - con AutoGen deshabilitado: solo deterministic + warnings
-   - mock autogenRuntime: retorna payload fijo y verificar escritura del JSON de derived/
-3) Export integration:
-   - actualizar test existente de export jobs para verificar que derived/video_features/<videoId>.json existe
+6) Tests:
+   - apps/api/tests/descriptionDeterministic.test.ts:
+     - timestamps, urls, domain_counts, hashtags, mentions
+     - disclosure flags + evidence spans
+     - title_desc_overlap_jaccard
+   - apps/api/tests/descriptionFeaturesAgent.test.ts:
+     - con AutoGen deshabilitado: llm=null + warnings, deterministic ok
+     - con autogenRuntime mock: verifica merge de llm
+   - Export integration test:
+     - derived/video_features/<videoId>.json contiene descriptionFeatures
 
-F) Documentación:
-- docs/DATA_CONTRACTS.md: agregar “derived/video_features/<videoId>.json” (v1)
-- AI Context Pack: mencionar env vars de autogen y el artefacto derived
+7) Docs:
+   - docs/DATA_CONTRACTS.md: agregar descriptionFeatures al derived schema
+   - AI Context Pack: mention new task "description_classifier_v1"
 
-AutoGen Agent Prompt (debe quedar embebido en el worker como system prompt):
-(usa exactamente el contenido que te dejo en el siguiente bloque “PROMPT AUTOGEN — TitleIntentClassifierAgent”; no inventes otro).
+PROMPT AUTOGEN — DescriptionClassifierAgent v1:
+(usa EXACTAMENTE el bloque del siguiente apartado; no inventes otro)
 
 Entrega:
-- Todo corre con pnpm dev/test
-- Export job genera derived/video_features para cada video exportado
-- Si no hay OPENAI_API_KEY o AUTO_GEN_ENABLED=false -> derived se genera igual con deterministic + llm=null + warnings
-- No cambia la UX: sigue siendo “Exportar” desde el frontend, sin pasos manuales.
+- pnpm test verde
+- export job genera derived con descriptionFeatures para cada video
+- sin pasos nuevos en frontend

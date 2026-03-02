@@ -461,12 +461,23 @@ describe("export jobs + SSE progress", () => {
         };
         llm: unknown;
       };
+      descriptionFeatures: {
+        deterministic: {
+          desc_len_chars: number;
+          url_count: number;
+        };
+        llm: unknown;
+        warnings: string[];
+      };
     };
     expect(derivedVideoOne.schemaVersion).toBe("derived.video_features.v1");
     expect(derivedVideoOne.videoId).toBe("video0000011");
     expect(derivedVideoOne.titleFeatures.deterministic.title_len_chars).toBeGreaterThan(0);
     expect(typeof derivedVideoOne.titleFeatures.deterministic.title_keyword_coverage).toBe("number");
     expect(derivedVideoOne.titleFeatures.llm).toBeNull();
+    expect(derivedVideoOne.descriptionFeatures.deterministic.desc_len_chars).toBeGreaterThan(0);
+    expect(typeof derivedVideoOne.descriptionFeatures.deterministic.url_count).toBe("number");
+    expect(Array.isArray(derivedVideoOne.descriptionFeatures.warnings)).toBe(true);
   });
 
   it("writes transcript artifact with meta only when transcript is missing", async () => {

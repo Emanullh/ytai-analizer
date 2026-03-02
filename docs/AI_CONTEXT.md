@@ -93,11 +93,12 @@ Fuente de verdad:
 - `YOUTUBE_AUDIO_DOWNLOAD_TIMEOUT_SEC` (default `300`)
 - `ASR_PYTHON_PATH` (override explícito del binario python del worker)
 
-### Opcionales AutoGen / Title Features
+### Opcionales AutoGen / Derived Features
 
-- `OPENAI_API_KEY` (OpenAI API para embeddings y clasificación de título)
+- `OPENAI_API_KEY` (OpenAI API para embeddings + clasificación title/description)
 - `AUTO_GEN_ENABLED` (default `true`)
 - `AUTO_GEN_MODEL_TITLE` (default `gpt-5.2`)
+- `AUTO_GEN_MODEL_DESCRIPTION` (default `gpt-5.2`)
 - `AUTO_GEN_REASONING_EFFORT` (default `low`)
 - `AUTO_GEN_TIMEOUT_SEC` (default `60`)
 
@@ -173,19 +174,23 @@ Detalles útiles:
 - `localAsrService.ts` usa worker Python persistente (`apps/api/scripts/asr_worker.py`) con cola y reintento al crash.
 - si falla health-check de `faster_whisper`, desactiva ASR en runtime y sigue en modo captions-only.
 
-### 5.4 Title Features Agent (deterministic + AutoGen opcional)
+### 5.4 Derived Features Agents (deterministic + AutoGen opcional)
 
 Orquestación en `apps/api/src/services/exportService.ts`:
 
 1. termina transcript por video
 2. escribe `raw/transcripts/<videoId>.jsonl`
-3. genera `derived/video_features/<videoId>.json` via `apps/api/src/derived/titleFeaturesAgent.ts`
+3. genera/mergea `derived/video_features/<videoId>.json` via:
+   - `apps/api/src/derived/titleFeaturesAgent.ts`
+   - `apps/api/src/derived/descriptionFeaturesAgent.ts`
 
 Detalles:
 
 - features deterministas siempre activas (`apps/api/src/derived/titleDeterministic.ts`)
+- description determinista (`apps/api/src/derived/descriptionDeterministic.ts`) sin llamar LLM
 - embeddings (`text-embedding-3-small`) opcionales si hay `OPENAI_API_KEY`
 - AutoGen worker opcional (`apps/api/src/services/autogenRuntime.ts` + `apps/api/scripts/autogen_worker.py`)
+- task AutoGen para descripción: `description_classifier_v1`
 - fallos de LLM/embeddings no rompen el export; quedan como warning y `llm: null`
 
 ## 6) Archivos generados y side effects

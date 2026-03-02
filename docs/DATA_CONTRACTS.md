@@ -437,6 +437,57 @@ Formato mínimo estable:
       }
     },
     "llm": null
+  },
+  "descriptionFeatures": {
+    "deterministic": {
+      "desc_len_chars": 350,
+      "desc_len_words": 62,
+      "line_count": 8,
+      "has_timestamps": true,
+      "url_count": 3,
+      "urls": [
+        {
+          "url": "https://example.com/resource",
+          "domain": "example.com",
+          "charStart": 120,
+          "charEnd": 148,
+          "isShortener": false
+        }
+      ],
+      "domain_counts": [{ "domain": "example.com", "count": 2 }],
+      "hashtag_count": 2,
+      "mentions_count": 1,
+      "cta_count": {
+        "subscribe": 1,
+        "like": 0,
+        "comment": 0,
+        "link": 1,
+        "follow": 1,
+        "newsletter": 0,
+        "patreon": 0,
+        "total": 3
+      },
+      "cta_in_first_200_chars": true,
+      "title_desc_overlap_jaccard": 0.21,
+      "title_desc_overlap_tokens": {
+        "titleTokens": ["ai", "pipeline", "tutorial"],
+        "hitTokens": ["ai", "tutorial"]
+      },
+      "has_sponsor_disclosure": true,
+      "has_affiliate_disclosure": false,
+      "has_credits_sources": true,
+      "readability": {
+        "metric": "fernandez_huerta",
+        "score": 58.4
+      },
+      "evidence": {
+        "sponsorDisclosureMatches": [{ "charStart": 200, "charEnd": 209, "snippet": "sponsored" }],
+        "affiliateDisclosureMatches": [],
+        "creditsSourcesMatches": [{ "charStart": 260, "charEnd": 267, "snippet": "Sources" }]
+      }
+    },
+    "llm": null,
+    "warnings": []
   }
 }
 ```
@@ -445,6 +496,7 @@ Notas:
 
 - `deterministic` se calcula siempre (sin LLM).
 - `llm` puede ser `null` si `AUTO_GEN_ENABLED=false`, falta `OPENAI_API_KEY` o falla el worker.
+- `descriptionFeatures.llm` se calcula con task AutoGen `description_classifier_v1`.
 - El archivo se genera durante el flujo normal de export (`POST /export` y `/export/jobs`) sin pasos extra en UI.
 - Si no hay timestamps de transcript, `title_keyword_early_coverage_30s` usa fallback por prefijo de caracteres y lo documenta en `title_keyword_audit`.
 

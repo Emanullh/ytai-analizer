@@ -67,6 +67,7 @@ export const env = {
   youtubeAudioDownloadTimeoutSec: parsePositiveInt(process.env.YOUTUBE_AUDIO_DOWNLOAD_TIMEOUT_SEC, 300),
   autoGenEnabled: parseBoolean(process.env.AUTO_GEN_ENABLED, true),
   autoGenModelTitle: process.env.AUTO_GEN_MODEL_TITLE?.trim() || "gpt-5.2",
+  autoGenModelDescription: process.env.AUTO_GEN_MODEL_DESCRIPTION?.trim() || "gpt-5.2",
   autoGenReasoningEffort: parseReasoningEffort(process.env.AUTO_GEN_REASONING_EFFORT),
   autoGenTimeoutSec: parsePositiveInt(process.env.AUTO_GEN_TIMEOUT_SEC, 60)
 };

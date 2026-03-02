@@ -3,11 +3,11 @@ import { CERTAINTY_WORDS, HEDGING_WORDS, NEGATION_WORDS, PRONOUN_WORDS, TITLE_ST
 
 const DEFAULT_EARLY_WINDOW_CHAR_LIMIT = 800;
 
-const PRONOUN_SET = new Set(PRONOUN_WORDS);
-const NEGATION_SET = new Set(NEGATION_WORDS);
-const CERTAINTY_SET = new Set(CERTAINTY_WORDS);
-const HEDGING_SET = new Set(HEDGING_WORDS);
-const STOPWORD_SET = new Set(TITLE_STOPWORDS);
+const PRONOUN_SET: ReadonlySet<string> = new Set(PRONOUN_WORDS);
+const NEGATION_SET: ReadonlySet<string> = new Set(NEGATION_WORDS);
+const CERTAINTY_SET: ReadonlySet<string> = new Set(CERTAINTY_WORDS);
+const HEDGING_SET: ReadonlySet<string> = new Set(HEDGING_WORDS);
+const STOPWORD_SET: ReadonlySet<string> = new Set(TITLE_STOPWORDS);
 
 type EarlyWindowMode = "timestamp_window_0_30s" | "leading_chars_fallback";
 

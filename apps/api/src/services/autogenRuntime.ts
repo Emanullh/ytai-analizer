@@ -9,17 +9,39 @@ import { env } from "../config/env.js";
 export type AutoGenProvider = "openai" | "gemini";
 export type AutoGenReasoningEffort = "low" | "medium" | "high";
 
-export interface AutoGenTaskRequest {
+interface AutoGenBaseTaskRequest {
+  provider?: AutoGenProvider;
+  model?: string;
+  reasoningEffort?: AutoGenReasoningEffort;
+}
+
+interface AutoGenTitleTaskRequest extends AutoGenBaseTaskRequest {
   task: "title_classifier_v1";
   payload: {
     videoId: string;
     title: string;
     languageHint?: "auto" | "en" | "es";
   };
-  provider?: AutoGenProvider;
-  model?: string;
-  reasoningEffort?: AutoGenReasoningEffort;
 }
+
+interface AutoGenDescriptionTaskRequest extends AutoGenBaseTaskRequest {
+  task: "description_classifier_v1";
+  payload: {
+    videoId: string;
+    title: string;
+    description: string;
+    urlsWithSpans: Array<{
+      url: string;
+      domain: string;
+      charStart: number;
+      charEnd: number;
+      isShortener: boolean;
+    }>;
+    languageHint?: "auto" | "en" | "es";
+  };
+}
+
+export type AutoGenTaskRequest = AutoGenTitleTaskRequest | AutoGenDescriptionTaskRequest;
 
 interface AutoGenInFlightTask {
   id: string;
@@ -55,6 +77,31 @@ function resolveAutoGenPythonPath(): string {
   }
 
   return process.platform === "win32" ? "python" : "python3";
+}
+
+function resolveAutoGenModel(request: AutoGenTaskRequest): string {
+  if (request.model) {
+    return request.model;
+  }
+  return request.task === "description_classifier_v1" ? env.autoGenModelDescription : env.autoGenModelTitle;
+}
+
+function normalizeAutoGenPayload(request: AutoGenTaskRequest): AutoGenTaskRequest["payload"] {
+  if (request.task === "description_classifier_v1") {
+    return {
+      videoId: request.payload.videoId,
+      title: request.payload.title,
+      description: request.payload.description,
+      urlsWithSpans: Array.isArray(request.payload.urlsWithSpans) ? request.payload.urlsWithSpans : [],
+      languageHint: request.payload.languageHint ?? "auto"
+    };
+  }
+
+  return {
+    videoId: request.payload.videoId,
+    title: request.payload.title,
+    languageHint: request.payload.languageHint ?? "auto"
+  };
 }
 
 class AutoGenWorkerClient {
@@ -134,13 +181,9 @@ class AutoGenWorkerClient {
     const requestPayload = {
       id: task.id,
       task: task.request.task,
-      payload: {
-        videoId: task.request.payload.videoId,
-        title: task.request.payload.title,
-        languageHint: task.request.payload.languageHint ?? "auto"
-      },
+      payload: normalizeAutoGenPayload(task.request),
       provider: task.request.provider ?? "openai",
-      model: task.request.model ?? env.autoGenModelTitle,
+      model: resolveAutoGenModel(task.request),
       reasoningEffort: task.request.reasoningEffort ?? env.autoGenReasoningEffort
     };
 
@@ -163,7 +206,8 @@ class AutoGenWorkerClient {
         env: {
           ...process.env,
           OPENAI_API_KEY: env.openAiApiKey,
-          AUTO_GEN_MODEL_TITLE: env.autoGenModelTitle
+          AUTO_GEN_MODEL_TITLE: env.autoGenModelTitle,
+          AUTO_GEN_MODEL_DESCRIPTION: env.autoGenModelDescription
         }
       });
 
