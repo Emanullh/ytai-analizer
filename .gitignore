@@ -27,6 +27,7 @@ apps/*/node_modules/
 apps/*/dist/
 apps/*/coverage/
 apps/api/exports/
+
 # .gitignore additions
 apps/api/eng.traineddata
 .swarm/
