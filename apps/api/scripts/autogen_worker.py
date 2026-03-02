@@ -4,14 +4,13 @@ import base64
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from autogen_agentchat.agents import AssistantAgent
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 
-TITLE_SYSTEM_PROMPT = """TitleIntentClassifierAgent v1
-
-You are a strict classification agent. You must output ONLY valid JSON (no markdown, no prose).
+TITLE_SYSTEM_PROMPT = """You are a strict classification agent. You must output ONLY valid JSON (no markdown, no prose).
 Task: classify a YouTube video title into closed taxonomies with confidence and evidence spans.
 
 INPUT:
@@ -60,258 +59,369 @@ RULES:
 Now wait for the JSON input and respond with ONLY the JSON output.
 """
 
-DESCRIPTION_SYSTEM_PROMPT = """DescriptionClassifierAgent v1
+DESCRIPTION_SYSTEM_PROMPT = """You must output ONLY valid JSON (no markdown, no prose).
+Task: Given a YouTube video description and extracted URL spans, classify URL purposes and extract sponsor/affiliate brand mentions and primary CTA. Use only the provided text. No hallucinations.
 
-You are a strict classification agent. You must output ONLY valid JSON (no markdown, no prose).
-Task: classify URL purpose, sponsor brand mentions, and primary CTA from a YouTube description.
-
-INPUT:
-You will receive a JSON payload with:
-- videoId (string)
-- title (string)
-- description (string)
-- urlsWithSpans (array of {url,domain,charStart,charEnd,isShortener})
-- languageHint ("auto"|"en"|"es")
-
-OUTPUT (MUST match this schema exactly):
+INPUT JSON payload:
 {
-  "schemaVersion": "derived.description_llm.v1",
-  "linkPurpose": [
+  "videoId": "string",
+  "title": "string",
+  "description": "string",
+  "languageHint": "auto|en|es",
+  "urls": [
+    { "url": "string", "domain": "string", "charStart": 0, "charEnd": 0, "snippet": "string" }
+  ]
+}
+
+OUTPUT JSON (must match exactly):
+{
+  "schemaVersion": "llm.description_classifier.v1",
+  "videoId": "string",
+  "linkPurposes": [
     {
       "url": "string",
       "label": "sponsor|affiliate|sources|social|merch|newsletter|community|other",
       "confidence": 0.0,
-      "evidence": {"charStart": 0, "charEnd": 0, "snippet": "string"}
+      "evidence": [ { "charStart": 0, "charEnd": 0, "snippet": "string" } ]
     }
   ],
   "sponsorBrandMentions": [
     {
       "brand": "string",
       "confidence": 0.0,
-      "evidence": [{"charStart": 0, "charEnd": 0, "snippet": "string"}]
+      "evidence": [ { "charStart": 0, "charEnd": 0, "snippet": "string" } ]
     }
   ],
   "primaryCTA": {
     "label": "subscribe|like|comment|link|follow|none",
     "confidence": 0.0,
-    "evidence": [{"charStart": 0, "charEnd": 0, "snippet": "string"}]
+    "evidence": [ { "charStart": 0, "charEnd": 0, "snippet": "string" } ]
   }
 }
 
 RULES:
-1) Use ONLY labels from the enums above.
-2) linkPurpose should be returned for provided urlsWithSpans (up to 10 urls).
-3) Evidence spans MUST point to exact substrings from the original description.
+1) Use ONLY labels from the enums.
+2) evidence spans MUST reference exact substrings of the original description string.
    - charStart/charEnd are zero-based indices, charEnd exclusive.
    - snippet must equal description[charStart:charEnd].
-4) Do not infer claims unsupported by the description text.
-5) If no sponsor brands are present, return empty sponsorBrandMentions.
-6) If no CTA is clear, return primaryCTA.label="none" with low confidence.
-7) Return strict JSON only.
+3) linkPurposes:
+   - return an entry for each input url (or at least for the first 10 urls if too many).
+   - evidence for a link should point to its URL substring span (use the provided span if correct).
+4) sponsorBrandMentions:
+   - extract only brands explicitly present in the description text (e.g., "Boot.dev", "NordVPN").
+   - if none, return [].
+5) primaryCTA:
+   - choose the most prominent CTA implied by the description (subscribe/like/comment/link/follow).
+   - if no CTA, label "none" with low confidence and empty/short evidence.
+6) No free-form explanations. Output JSON only.
 
 Now wait for the JSON input and respond with ONLY the JSON output.
 """
 
-TRANSCRIPT_SYSTEM_PROMPT = """TranscriptClassifierAgent v1
+TRANSCRIPT_SYSTEM_PROMPT = """You must output ONLY valid JSON (no markdown, no prose).
+Task: From sampled transcript segments and candidate sponsor/CTA segments, classify story arc and extract sponsor/CTA segments with strict evidence.
 
-You are a strict classification agent. You must output ONLY valid JSON (no markdown, no prose).
-Task: classify story arc, sponsor segments, and CTA segments using ONLY sampled transcript segments.
-
-INPUT:
-You will receive a JSON payload with:
-- videoId (string)
-- title (string)
-- languageHint ("auto"|"en"|"es")
-- segmentsSample (array of {segmentIndex,startSec,endSec,text})
-- candidateSponsorSegments (array of {segmentIndex,startSec,endSec,text})
-- candidateCTASegments (array of {segmentIndex,startSec,endSec,text})
-
-OUTPUT (MUST match this schema exactly):
+INPUT JSON payload:
 {
-  "schemaVersion": "derived.transcript_llm.v1",
-  "story_arc": {
+  "videoId": "string",
+  "title": "string",
+  "durationSec": 0,
+  "segmentsSample": [
+    { "segmentIndex": 0, "startSec": null, "endSec": null, "text": "string" }
+  ],
+  "candidateSponsorSegments": [
+    { "segmentIndex": 0, "startSec": null, "endSec": null, "text": "string" }
+  ],
+  "candidateCTASegments": [
+    { "segmentIndex": 0, "startSec": null, "endSec": null, "text": "string" }
+  ]
+}
+
+OUTPUT JSON (must match exactly):
+{
+  "schemaVersion": "llm.transcript_classifier.v1",
+  "videoId": "string",
+  "storyArc": {
     "label": "problem-solution|listicle|timeline|explainer|debate|investigation|tutorial|other",
     "confidence": 0.0,
-    "evidenceSegments": [{"segmentIndex": 0, "snippet": "string"}]
+    "evidenceSegments": [
+      { "segmentIndex": 0, "snippet": "string" }
+    ]
   },
-  "sponsor_segments": [
+  "sponsorSegments": [
     {
-      "startSec": 0.0,
-      "endSec": 0.0,
+      "startSec": null,
+      "endSec": null,
       "brand": "string",
       "confidence": 0.0,
-      "evidenceSegments": [{"segmentIndex": 0, "snippet": "string"}]
+      "evidenceSegments": [
+        { "segmentIndex": 0, "snippet": "string" }
+      ]
     }
   ],
-  "cta_segments": [
+  "ctaSegments": [
     {
       "type": "subscribe|like|comment|link|follow|none",
       "confidence": 0.0,
-      "evidenceSegments": [{"segmentIndex": 0, "snippet": "string"}]
+      "evidenceSegments": [
+        { "segmentIndex": 0, "snippet": "string" }
+      ]
     }
   ]
 }
 
 RULES:
-1) Use ONLY labels from the enums above.
-2) evidenceSegments snippets MUST be exact substrings from segmentsSample[*].text.
-3) brand MUST appear in at least one sponsor evidence snippet.
-4) Do not invent brands or unsupported claims.
-5) If no sponsor is detected, return sponsor_segments as [].
-6) If no CTA is clear, return one cta_segments item with type="none" and low confidence.
-7) Return strict JSON only.
+1) Use ONLY labels from the enums.
+2) Do NOT hallucinate: base decisions only on provided segmentsSample/candidates.
+3) evidenceSegments:
+   - segmentIndex MUST exist in segmentsSample (or candidates lists which are subsets of segmentsSample).
+   - snippet MUST be an exact substring of that segment's text.
+4) sponsorSegments:
+   - Only include if sponsorship is explicitly indicated.
+   - brand MUST appear literally in the snippet (e.g., "Boot.dev"). If not present, omit the sponsor segment.
+   - If no sponsor, return [].
+5) ctaSegments:
+   - If no CTA is present, return one entry with type "none" with low confidence and minimal evidence (or empty evidenceSegments).
+6) Keep outputs concise: max 2 sponsor segments, max 2 cta segments.
 
 Now wait for the JSON input and respond with ONLY the JSON output.
 """
 
-THUMBNAIL_SYSTEM_PROMPT = """ThumbnailVisionClassifierAgent v1
+THUMBNAIL_SYSTEM_PROMPT = """You must output ONLY valid JSON (no markdown, no prose).
+Task: Given a YouTube thumbnail image (as image input) plus a deterministic summary (OCR text + numeric stats), classify thumbnail archetype and visual signals with strict, auditable outputs.
 
-You are a strict multimodal classification agent. You must output ONLY valid JSON (no markdown, no prose).
-Task: classify a YouTube thumbnail using the provided image and deterministic signals.
-
-INPUT:
-You will receive:
-- thumbnail image
-- JSON payload with:
-  - videoId (string)
-  - title (string)
-  - thumbMeta ({thumbnailLocalPath,fileSizeBytes,imageWidth,imageHeight,aspectRatio})
-  - ocrSummary ({ocrText,ocrConfidenceMean,ocrCharCount,ocrWordCount,textAreaRatio,hasBigText})
-  - statsSummary ({brightnessMean,contrastStd,colorfulness,sharpnessLaplacianVar,edgeDensity,thumb_ocr_title_overlap_jaccard})
-
-OUTPUT (MUST match this schema exactly):
+INPUT JSON payload (text part):
 {
-  "schemaVersion": "derived.thumbnail_llm.v1",
-  "archetype": { "label": "reaction|diagram|logo|portrait|screenshot|text-heavy|collage|other", "confidence": 0.0 },
+  "videoId": "string",
+  "title": "string",
+  "thumbnail": {
+    "width": 0,
+    "height": 0,
+    "fileSizeBytes": 0
+  },
+  "ocrSummary": {
+    "ocrText": "string",
+    "ocrWordCount": 0,
+    "textAreaRatio": 0.0,
+    "hasBigText": true
+  },
+  "imageStats": {
+    "brightnessMean": 0.0,
+    "contrastStd": 0.0,
+    "colorfulness": 0.0,
+    "sharpnessLaplacianVar": 0.0,
+    "edgeDensity": 0.0
+  }
+}
+You will ALSO receive the thumbnail image as an image input in the same message.
+
+OUTPUT JSON (must match exactly):
+{
+  "schemaVersion": "llm.thumbnail_classifier.v1",
+  "videoId": "string",
+  "archetype": {
+    "label": "reaction|diagram|logo|portrait|screenshot|text-heavy|collage|other",
+    "confidence": 0.0,
+    "evidenceSignals": [
+      { "field": "string", "value": "string" }
+    ],
+    "evidenceRegions": [
+      { "label": "face|text|logo|ui|diagram", "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 }
+    ]
+  },
   "faceSignals": {
     "faceCountBucket": "0|1|2|3plus",
     "dominantFacePosition": { "x": "left|center|right|unknown", "y": "top|mid|bottom|unknown" },
     "faceEmotionTone": "positive|negative|neutral|mixed|unknown",
-    "hasEyeContact": true,
-    "confidence": 0.0
+    "hasEyeContact": "true|false|unknown",
+    "confidence": 0.0,
+    "evidenceRegions": [
+      { "label": "face", "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 }
+    ]
   },
-  "clutterLevel": { "label": "low|medium|high", "confidence": 0.0 },
-  "styleTags": [{ "label": "high-contrast|low-contrast|colorful|dark|minimal|cluttered|clean|big-text|no-text|face|no-face|logo-heavy|screenshot-like|diagram-like", "confidence": 0.0 }],
-  "evidenceRegions": [{ "label": "string", "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 }],
-  "evidenceSignals": [{ "fieldName": "string", "value": 0.0 }]
+  "clutterLevel": {
+    "label": "low|medium|high",
+    "confidence": 0.0,
+    "evidenceSignals": [
+      { "field": "string", "value": "string" }
+    ]
+  },
+  "styleTags": [
+    { "label": "high-contrast|low-contrast|colorful|dark|minimal|cluttered|clean|big-text|no-text|face|no-face|logo-heavy|screenshot-like|diagram-like", "confidence": 0.0 }
+  ]
 }
 
 RULES:
 1) Use ONLY labels from the enums above.
-2) styleTags is multi-label, max 6 unique labels.
-3) confidence fields are in [0,1].
-4) evidenceRegions must use normalized coordinates in [0,1].
-5) Do not hallucinate text that is not visible in the image.
-6) Use deterministic summary as supporting signals, not as replacement for visual inspection.
-7) If faceCountBucket is "0":
-   - dominantFacePosition.x and .y should be "unknown"
-   - hasEyeContact should be "unknown"
-8) Output strict JSON only.
+2) Do NOT hallucinate facts not visible in the image or provided summary.
+3) evidenceRegions:
+   - All coordinates are normalized in [0,1].
+   - If uncertain, you may omit regions or provide fewer regions.
+4) faceSignals:
+   - If faceCountBucket is "0", set dominantFacePosition.x/y to "unknown" and hasEyeContact to "unknown". Provide empty evidenceRegions or omit them.
+5) styleTags:
+   - Return up to 6 tags. Each with confidence.
+6) evidenceSignals:
+   - Reference the deterministic fields when relevant (e.g., "textAreaRatio", "edgeDensity", "ocrWordCount").
+7) If unsure, choose conservative outputs:
+   - archetype.label = "other"
+   - faceCountBucket = "0"
+   - clutterLevel = "medium"
+   - low confidences.
 
-Now wait for the multimodal input and respond with ONLY the JSON output.
+Return JSON only.
 """
 
-CHANNEL_ORCHESTRATOR_SYSTEM_PROMPT = """ChannelOrchestratorAgent v1
+CHANNEL_ORCHESTRATOR_SYSTEM_PROMPT = """You must output ONLY valid JSON (no markdown, no prose).
+Task: Given a deterministic summary of a YouTube channel export (cohorts, drivers, exemplars with numeric evidence), produce an analysis playbook and reusable templates for a new channel strategy. Do not compute new stats. Do not hallucinate.
 
-You are the final channel research orchestrator. You must output ONLY valid JSON (no markdown, no prose).
-You will receive deterministic evidence already computed from a YouTube export.
-
-CRITICAL RULES:
-1) Do not compute new statistics, rankings, or correlations.
-2) Use only evidence present in the input payload.
-3) Every claim in insights/rules/templates must include:
-   - supported_by: array of videoIds from input rows
-   - evidence_fields: array of valid dotted paths from row fields
-4) Never reference a videoId that is not in input rows.
-5) Never invent evidence fields.
-
-OUTPUT JSON (exact top-level shape):
+INPUT JSON payload shape (high-level):
 {
+  "schemaVersion": "analysis.orchestrator_input.v1",
+  "channel": { "channelId": "...", "channelName": "...", "timeframe": "1m|6m|1y" },
+  "rows": [
+    {
+      "videoId": "...",
+      "title": "...",
+      "publishedAt": "...",
+      "performance": { "viewsPerDay": 0.0, "engagementRate": 0.0, "residual": 0.0, "percentile": 0.0 },
+      "features": {
+        "...": "flattened key/value signals (numbers, enums, booleans) ..."
+      }
+    }
+  ],
+  "cohorts": [
+    {
+      "key": { "duration_bucket": "...", "promise_type_primary": "...", "thumbnail_archetype": "..." },
+      "n": 0,
+      "metrics": { "median_residual": 0.0, "median_viewsPerDay": 0.0, "median_engagementRate": 0.0 },
+      "exemplars": [ { "videoId":"...", "percentile":0.0 } ]
+    }
+  ],
+  "drivers": [
+    {
+      "feature": "string",
+      "type": "spearman|delta",
+      "effect": 0.0,
+      "n": 0,
+      "supported_by": ["videoId1","videoId2"],
+      "evidence_fields": ["performance.residual", "features.thumbnail.textAreaRatio"]
+    }
+  ],
+  "exemplars": {
+    "top": [ { "videoId":"...", "percentile":0.0 } ],
+    "bottom": [ { "videoId":"...", "percentile":0.0 } ],
+    "baseline": [ { "videoId":"...", "percentile":0.0 } ]
+  },
+  "warnings": ["..."]
+}
+
+OUTPUT JSON (must match exactly):
+{
+  "schemaVersion": "llm.channel_orchestrator.v1",
+  "channelId": "string",
   "playbook": {
     "schemaVersion": "analysis.playbook.v1",
-    "generatedAt": "ISO-8601 string",
-    "channel": {
-      "channelId": "string",
-      "channelName": "string",
-      "timeframe": "1m|6m|1y",
-      "jobId": "string"
+    "positioning": {
+      "oneLine": "string",
+      "audience": ["string"],
+      "valueProps": ["string"]
     },
-    "warnings": ["string"],
+    "contentPillars": [
+      {
+        "pillar": "string",
+        "description": "string",
+        "supported_by": ["videoId"],
+        "evidence_fields": ["string"]
+      }
+    ],
     "insights": [
       {
         "id": "string",
-        "title": "string",
-        "summary": "string",
+        "statement": "string",
+        "confidence": 0.0,
         "supported_by": ["videoId"],
-        "evidence_fields": ["performance.residual"]
+        "evidence_fields": ["string"]
       }
     ],
-    "rules": [
+    "antiPatterns": [
       {
-        "id": "string",
-        "name": "string",
-        "recommendation": "string",
+        "statement": "string",
         "supported_by": ["videoId"],
-        "evidence_fields": ["titleFeatures.deterministic.has_number"]
+        "evidence_fields": ["string"]
       }
     ],
-    "keys": [
-      {
-        "id": "string",
-        "label": "string",
-        "rationale": "string",
-        "supported_by": ["videoId"],
-        "evidence_fields": ["thumbnailFeatures.deterministic.textAreaRatio"]
-      }
-    ],
-    "evidence": {
-      "cohorts": [],
-      "drivers": [],
-      "exemplars": {}
+    "checklists": {
+      "title": ["string"],
+      "thumbnail": ["string"],
+      "hook_0_30s": ["string"]
     }
   },
   "templates": {
     "schemaVersion": "derived.templates.v1",
-    "generatedAt": "ISO-8601 string",
-    "channel": {
-      "channelId": "string",
-      "channelName": "string",
-      "timeframe": "1m|6m|1y",
-      "jobId": "string"
+    "title": {
+      "rules": [
+        {
+          "rule": "string",
+          "supported_by": ["videoId"],
+          "evidence_fields": ["string"]
+        }
+      ],
+      "formulas": [
+        {
+          "pattern": "string",
+          "examples": ["string"],
+          "supported_by": ["videoId"],
+          "evidence_fields": ["string"]
+        }
+      ]
     },
-    "warnings": ["string"],
-    "titleTemplates": [
-      {
-        "id": "string",
-        "template": "string",
-        "when_to_use": "string",
-        "supported_by": ["videoId"],
-        "evidence_fields": ["titleFeatures.deterministic.question_mark_count"]
-      }
-    ],
-    "thumbnailTemplates": [
-      {
-        "id": "string",
-        "template": "string",
-        "when_to_use": "string",
-        "supported_by": ["videoId"],
-        "evidence_fields": ["thumbnailFeatures.llm.archetype"]
-      }
-    ],
-    "scriptTemplates": [
-      {
-        "id": "string",
-        "template": "string",
-        "when_to_use": "string",
-        "supported_by": ["videoId"],
-        "evidence_fields": ["transcriptFeatures.deterministic.promise_delivery_30s_score"]
-      }
-    ]
+    "thumbnail": {
+      "rules": [
+        {
+          "rule": "string",
+          "supported_by": ["videoId"],
+          "evidence_fields": ["string"]
+        }
+      ],
+      "archetypes": [
+        {
+          "label": "string",
+          "designBrief": "string",
+          "supported_by": ["videoId"],
+          "evidence_fields": ["string"]
+        }
+      ]
+    },
+    "script": {
+      "blueprints": [
+        {
+          "label": "string",
+          "timeline": [
+            { "rangeSec": "0-10", "instruction": "string" },
+            { "rangeSec": "10-30", "instruction": "string" },
+            { "rangeSec": "30-120", "instruction": "string" },
+            { "rangeSec": "mid", "instruction": "string" },
+            { "rangeSec": "end", "instruction": "string" }
+          ],
+          "supported_by": ["videoId"],
+          "evidence_fields": ["string"]
+        }
+      ]
+    }
   }
 }
 
-If evidence is weak, return fewer items and include warnings.
-Return strict JSON only.
+RULES:
+1) Use ONLY the provided deterministic input. Do NOT compute new stats.
+2) Every insight/rule/formula/archetype/blueprint MUST include:
+   - supported_by: videoIds that exist in the input
+   - evidence_fields: valid field paths from the input (e.g. "performance.residual", "features.thumbnail.textAreaRatio")
+3) Keep statements concise and operational (actionable).
+4) If evidence is weak (low n), lower confidence and avoid strong claims.
+5) Do not invent CTR/retention/impressions or any YouTube Analytics-only metrics.
+6) Prefer using "drivers" and "cohorts" as the basis for insights.
+7) Output JSON only.
 """
 
 PROMISE_LABELS = {
@@ -494,11 +604,36 @@ def normalize_claim_strength(raw: Any, title: str) -> Dict[str, Any] | None:
 
 def coerce_title_result(raw: Any, title: str) -> Dict[str, Any]:
     source = raw if isinstance(raw, dict) else {}
+    raw_promise_type = source.get("promiseType")
+    if not isinstance(raw_promise_type, list):
+        raw_promise_type = source.get("promise_type", [])
+
+    curiosity_items: List[Dict[str, Any]] = []
+    raw_curiosity = source.get("curiosityGapType")
+    if isinstance(raw_curiosity, dict):
+        label = raw_curiosity.get("label")
+        if isinstance(label, str) and label in CURIOSITY_LABELS:
+            confidence = clamp_01(raw_curiosity.get("confidence", 0.0))
+            curiosity_items.append(
+                {
+                    "label": label,
+                    "score": confidence,
+                    "confidence": confidence,
+                    "evidence": normalize_evidence(raw_curiosity.get("evidence", []), title),
+                }
+            )
+    elif isinstance(source.get("curiosity_gap_type"), list):
+        curiosity_items = normalize_multi_label(source.get("curiosity_gap_type", []), title, CURIOSITY_LABELS)
+
+    raw_headline = source.get("headlineClaimStrength")
+    if not isinstance(raw_headline, dict):
+        raw_headline = source.get("headline_claim_strength")
+
     return {
         "schemaVersion": "derived.title_llm.v1",
-        "promise_type": normalize_multi_label(source.get("promise_type", []), title, PROMISE_LABELS),
-        "curiosity_gap_type": normalize_multi_label(source.get("curiosity_gap_type", []), title, CURIOSITY_LABELS),
-        "headline_claim_strength": normalize_claim_strength(source.get("headline_claim_strength"), title),
+        "promise_type": normalize_multi_label(raw_promise_type, title, PROMISE_LABELS),
+        "curiosity_gap_type": curiosity_items,
+        "headline_claim_strength": normalize_claim_strength(raw_headline, title),
     }
 
 
@@ -506,8 +641,11 @@ def coerce_description_result(raw: Any, description: str) -> Dict[str, Any]:
     source = raw if isinstance(raw, dict) else {}
 
     link_purpose: List[Dict[str, Any]] = []
-    if isinstance(source.get("linkPurpose"), list):
-        for item in source.get("linkPurpose", []):
+    raw_link_purposes = source.get("linkPurposes")
+    if not isinstance(raw_link_purposes, list):
+        raw_link_purposes = source.get("linkPurpose")
+    if isinstance(raw_link_purposes, list):
+        for item in raw_link_purposes:
             if not isinstance(item, dict):
                 continue
 
@@ -517,13 +655,22 @@ def coerce_description_result(raw: Any, description: str) -> Dict[str, Any]:
                 continue
             if not isinstance(label, str) or label not in LINK_PURPOSE_LABELS:
                 continue
-
+            raw_evidence = item.get("evidence")
+            if isinstance(raw_evidence, list):
+                normalized_evidence = normalize_evidence(raw_evidence, description)
+                normalized_single_evidence = (
+                    normalized_evidence[0]
+                    if normalized_evidence
+                    else {"charStart": 0, "charEnd": 0, "snippet": ""}
+                )
+            else:
+                normalized_single_evidence = normalize_single_evidence(raw_evidence, description)
             link_purpose.append(
                 {
                     "url": url.strip(),
                     "label": label,
                     "confidence": clamp_01(item.get("confidence", 0.0)),
-                    "evidence": normalize_single_evidence(item.get("evidence"), description),
+                    "evidence": normalized_single_evidence,
                 }
             )
 
@@ -593,7 +740,9 @@ def coerce_transcript_result(raw: Any, sample_segments: Dict[int, str]) -> Dict[
     source = raw if isinstance(raw, dict) else {}
 
     story_arc = None
-    story_arc_raw = source.get("story_arc")
+    story_arc_raw = source.get("storyArc")
+    if not isinstance(story_arc_raw, dict):
+        story_arc_raw = source.get("story_arc")
     if isinstance(story_arc_raw, dict):
         story_label = story_arc_raw.get("label")
         if isinstance(story_label, str) and story_label in STORY_ARC_LABELS:
@@ -606,8 +755,11 @@ def coerce_transcript_result(raw: Any, sample_segments: Dict[int, str]) -> Dict[
             }
 
     sponsor_segments: List[Dict[str, Any]] = []
-    if isinstance(source.get("sponsor_segments"), list):
-        for item in source.get("sponsor_segments", []):
+    raw_sponsor_segments = source.get("sponsorSegments")
+    if not isinstance(raw_sponsor_segments, list):
+        raw_sponsor_segments = source.get("sponsor_segments")
+    if isinstance(raw_sponsor_segments, list):
+        for item in raw_sponsor_segments:
             if not isinstance(item, dict):
                 continue
 
@@ -634,10 +786,15 @@ def coerce_transcript_result(raw: Any, sample_segments: Dict[int, str]) -> Dict[
                     "evidenceSegments": evidence_segments,
                 }
             )
+            if len(sponsor_segments) >= 2:
+                break
 
     cta_segments: List[Dict[str, Any]] = []
-    if isinstance(source.get("cta_segments"), list):
-        for item in source.get("cta_segments", []):
+    raw_cta_segments = source.get("ctaSegments")
+    if not isinstance(raw_cta_segments, list):
+        raw_cta_segments = source.get("cta_segments")
+    if isinstance(raw_cta_segments, list):
+        for item in raw_cta_segments:
             if not isinstance(item, dict):
                 continue
 
@@ -654,6 +811,8 @@ def coerce_transcript_result(raw: Any, sample_segments: Dict[int, str]) -> Dict[
                     ),
                 }
             )
+            if len(cta_segments) >= 2:
+                break
 
     return {
         "schemaVersion": "derived.transcript_llm.v1",
@@ -715,6 +874,10 @@ def coerce_thumbnail_result(raw: Any) -> Dict[str, Any]:
             has_eye_contact = eye_contact
         elif eye_contact == "unknown":
             has_eye_contact = "unknown"
+        elif eye_contact == "true":
+            has_eye_contact = True
+        elif eye_contact == "false":
+            has_eye_contact = False
 
         face_confidence = clamp_01(face_raw.get("confidence", 0.0))
 
@@ -752,9 +915,37 @@ def coerce_thumbnail_result(raw: Any) -> Dict[str, Any]:
         style_tags = [tag for tag in style_tags if tag.get("label") != "face"]
 
     evidence_regions: List[Dict[str, Any]] = []
-    raw_regions = source.get("evidenceRegions")
-    if isinstance(raw_regions, list):
-        for item in raw_regions:
+    raw_top_regions = source.get("evidenceRegions")
+    if isinstance(raw_top_regions, list):
+        for item in raw_top_regions:
+            if not isinstance(item, dict):
+                continue
+            label = item.get("label")
+            evidence_regions.append(
+                {
+                    "label": str(label).strip() if isinstance(label, str) and label.strip() else "region",
+                    "x": clamp_bbox(item.get("x", 0.0)),
+                    "y": clamp_bbox(item.get("y", 0.0)),
+                    "w": clamp_bbox(item.get("w", 0.0)),
+                    "h": clamp_bbox(item.get("h", 0.0)),
+                }
+            )
+    if isinstance(archetype_raw, dict) and isinstance(archetype_raw.get("evidenceRegions"), list):
+        for item in archetype_raw.get("evidenceRegions", []):
+            if not isinstance(item, dict):
+                continue
+            label = item.get("label")
+            evidence_regions.append(
+                {
+                    "label": str(label).strip() if isinstance(label, str) and label.strip() else "region",
+                    "x": clamp_bbox(item.get("x", 0.0)),
+                    "y": clamp_bbox(item.get("y", 0.0)),
+                    "w": clamp_bbox(item.get("w", 0.0)),
+                    "h": clamp_bbox(item.get("h", 0.0)),
+                }
+            )
+    if isinstance(face_raw, dict) and isinstance(face_raw.get("evidenceRegions"), list):
+        for item in face_raw.get("evidenceRegions", []):
             if not isinstance(item, dict):
                 continue
             label = item.get("label")
@@ -769,12 +960,32 @@ def coerce_thumbnail_result(raw: Any) -> Dict[str, Any]:
             )
 
     evidence_signals: List[Dict[str, Any]] = []
-    raw_signals = source.get("evidenceSignals")
-    if isinstance(raw_signals, list):
-        for item in raw_signals:
+    raw_top_signals = source.get("evidenceSignals")
+    if isinstance(raw_top_signals, list):
+        for item in raw_top_signals:
             if not isinstance(item, dict):
                 continue
             field_name = item.get("fieldName")
+            if not isinstance(field_name, str) or not field_name.strip():
+                continue
+            value = item.get("value")
+            if isinstance(value, (float, int)):
+                value = round(float(value), 6)
+            elif not isinstance(value, (str, bool)) and value is not None:
+                value = None
+            evidence_signals.append({"fieldName": field_name.strip(), "value": value})
+    for signal_container in (archetype_raw, clutter_raw):
+        if not isinstance(signal_container, dict):
+            continue
+        raw_signals = signal_container.get("evidenceSignals")
+        if not isinstance(raw_signals, list):
+            continue
+        for item in raw_signals:
+            if not isinstance(item, dict):
+                continue
+            field_name = item.get("field")
+            if not isinstance(field_name, str) or not field_name.strip():
+                field_name = item.get("fieldName")
             if not isinstance(field_name, str) or not field_name.strip():
                 continue
             value = item.get("value")
@@ -873,39 +1084,247 @@ def coerce_channel_orchestrator_result(raw: Any, payload: Dict[str, Any]) -> Dic
     if not generated_at:
         generated_at = payload.get("generatedAt") if isinstance(payload.get("generatedAt"), str) else ""
     if not generated_at:
-        generated_at = ""
+        generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     playbook_source = playbook_raw if isinstance(playbook_raw, dict) else {}
     templates_source = templates_raw if isinstance(templates_raw, dict) else {}
 
-    playbook = {
-        "schemaVersion": "analysis.playbook.v1",
-        "generatedAt": str(playbook_source.get("generatedAt", generated_at)),
-        "channel": playbook_source.get("channel")
-        if isinstance(playbook_source.get("channel"), dict)
-        else channel_fallback,
-        "warnings": [str(item) for item in playbook_source.get("warnings", []) if isinstance(item, str)]
-        if isinstance(playbook_source.get("warnings"), list)
-        else [],
-        "insights": _normalize_claim_list(playbook_source.get("insights"), "insight"),
-        "rules": _normalize_claim_list(playbook_source.get("rules"), "rule"),
-        "keys": _normalize_claim_list(playbook_source.get("keys"), "key"),
-        "evidence": playbook_source.get("evidence") if isinstance(playbook_source.get("evidence"), dict) else {},
-    }
+    playbook_warnings: List[str] = []
+    if isinstance(payload.get("warnings"), list):
+        playbook_warnings.extend([str(item) for item in payload.get("warnings", []) if isinstance(item, str)])
+    if isinstance(source.get("warnings"), list):
+        playbook_warnings.extend([str(item) for item in source.get("warnings", []) if isinstance(item, str)])
+    if isinstance(playbook_source.get("warnings"), list):
+        playbook_warnings.extend([str(item) for item in playbook_source.get("warnings", []) if isinstance(item, str)])
 
-    templates = {
-        "schemaVersion": "derived.templates.v1",
-        "generatedAt": str(templates_source.get("generatedAt", generated_at)),
-        "channel": templates_source.get("channel")
-        if isinstance(templates_source.get("channel"), dict)
-        else channel_fallback,
-        "warnings": [str(item) for item in templates_source.get("warnings", []) if isinstance(item, str)]
-        if isinstance(templates_source.get("warnings"), list)
-        else [],
-        "titleTemplates": _normalize_claim_list(templates_source.get("titleTemplates"), "title-template"),
-        "thumbnailTemplates": _normalize_claim_list(templates_source.get("thumbnailTemplates"), "thumbnail-template"),
-        "scriptTemplates": _normalize_claim_list(templates_source.get("scriptTemplates"), "script-template"),
-    }
+    templates_warnings: List[str] = []
+    if isinstance(source.get("warnings"), list):
+        templates_warnings.extend([str(item) for item in source.get("warnings", []) if isinstance(item, str)])
+    if isinstance(templates_source.get("warnings"), list):
+        templates_warnings.extend([str(item) for item in templates_source.get("warnings", []) if isinstance(item, str)])
+
+    playbook_uses_new_shape = isinstance(playbook_source.get("positioning"), dict) or isinstance(
+        playbook_source.get("contentPillars"), list
+    )
+    templates_use_new_shape = isinstance(templates_source.get("title"), dict) or isinstance(
+        templates_source.get("thumbnail"), dict
+    )
+
+    if playbook_uses_new_shape:
+        normalized_insights: List[Dict[str, Any]] = []
+        raw_insights = playbook_source.get("insights")
+        if isinstance(raw_insights, list):
+            for index, item in enumerate(raw_insights):
+                if not isinstance(item, dict):
+                    continue
+                statement = item.get("statement")
+                confidence = clamp_01(item.get("confidence", 0.0))
+                summary = statement.strip() if isinstance(statement, str) else ""
+                if confidence > 0:
+                    summary = f"{summary} (confidence={confidence})" if summary else f"confidence={confidence}"
+                normalized_insights.append(
+                    {
+                        "id": str(item.get("id")).strip()
+                        if isinstance(item.get("id"), str) and str(item.get("id")).strip()
+                        else f"insight-{index + 1}",
+                        "title": summary if summary else f"Insight {index + 1}",
+                        "summary": summary,
+                        "supported_by": _normalize_supported_by(item.get("supported_by")),
+                        "evidence_fields": _normalize_evidence_fields(item.get("evidence_fields")),
+                    }
+                )
+
+        normalized_rules: List[Dict[str, Any]] = []
+        raw_pillars = playbook_source.get("contentPillars")
+        if isinstance(raw_pillars, list):
+            for index, item in enumerate(raw_pillars):
+                if not isinstance(item, dict):
+                    continue
+                pillar = item.get("pillar")
+                description = item.get("description")
+                normalized_rules.append(
+                    {
+                        "id": f"pillar-{index + 1}",
+                        "name": pillar.strip() if isinstance(pillar, str) and pillar.strip() else f"Pillar {index + 1}",
+                        "recommendation": description.strip() if isinstance(description, str) else "",
+                        "supported_by": _normalize_supported_by(item.get("supported_by")),
+                        "evidence_fields": _normalize_evidence_fields(item.get("evidence_fields")),
+                    }
+                )
+
+        normalized_keys: List[Dict[str, Any]] = []
+        raw_anti_patterns = playbook_source.get("antiPatterns")
+        if isinstance(raw_anti_patterns, list):
+            for index, item in enumerate(raw_anti_patterns):
+                if not isinstance(item, dict):
+                    continue
+                statement = item.get("statement")
+                normalized_keys.append(
+                    {
+                        "id": f"anti-pattern-{index + 1}",
+                        "label": "anti-pattern",
+                        "rationale": statement.strip() if isinstance(statement, str) else "",
+                        "supported_by": _normalize_supported_by(item.get("supported_by")),
+                        "evidence_fields": _normalize_evidence_fields(item.get("evidence_fields")),
+                    }
+                )
+
+        playbook = {
+            "schemaVersion": "analysis.playbook.v1",
+            "generatedAt": generated_at,
+            "channel": channel_fallback,
+            "warnings": list(dict.fromkeys(playbook_warnings)),
+            "insights": normalized_insights,
+            "rules": normalized_rules,
+            "keys": normalized_keys,
+            "evidence": {
+                "cohorts": payload.get("cohorts") if isinstance(payload.get("cohorts"), list) else [],
+                "drivers": payload.get("drivers") if isinstance(payload.get("drivers"), list) else [],
+                "exemplars": payload.get("exemplars") if isinstance(payload.get("exemplars"), dict) else {},
+            },
+        }
+    else:
+        playbook = {
+            "schemaVersion": "analysis.playbook.v1",
+            "generatedAt": str(playbook_source.get("generatedAt", generated_at)),
+            "channel": playbook_source.get("channel")
+            if isinstance(playbook_source.get("channel"), dict)
+            else channel_fallback,
+            "warnings": list(dict.fromkeys(playbook_warnings)),
+            "insights": _normalize_claim_list(playbook_source.get("insights"), "insight"),
+            "rules": _normalize_claim_list(playbook_source.get("rules"), "rule"),
+            "keys": _normalize_claim_list(playbook_source.get("keys"), "key"),
+            "evidence": playbook_source.get("evidence") if isinstance(playbook_source.get("evidence"), dict) else {},
+        }
+
+    if templates_use_new_shape:
+        title_templates: List[Dict[str, Any]] = []
+        title_source = templates_source.get("title")
+        if isinstance(title_source, dict):
+            raw_rules = title_source.get("rules")
+            if isinstance(raw_rules, list):
+                for index, item in enumerate(raw_rules):
+                    if not isinstance(item, dict):
+                        continue
+                    rule = item.get("rule")
+                    title_templates.append(
+                        {
+                            "id": f"title-rule-{index + 1}",
+                            "template": rule.strip() if isinstance(rule, str) else "",
+                            "when_to_use": "Apply when evidence indicates this title pattern",
+                            "supported_by": _normalize_supported_by(item.get("supported_by")),
+                            "evidence_fields": _normalize_evidence_fields(item.get("evidence_fields")),
+                        }
+                    )
+            raw_formulas = title_source.get("formulas")
+            if isinstance(raw_formulas, list):
+                base_index = len(title_templates)
+                for index, item in enumerate(raw_formulas):
+                    if not isinstance(item, dict):
+                        continue
+                    pattern = item.get("pattern")
+                    examples = item.get("examples")
+                    when_to_use = ""
+                    if isinstance(examples, list):
+                        examples_text = [str(example).strip() for example in examples if isinstance(example, str) and str(example).strip()]
+                        if examples_text:
+                            when_to_use = "Examples: " + " | ".join(examples_text[:3])
+                    title_templates.append(
+                        {
+                            "id": f"title-formula-{base_index + index + 1}",
+                            "template": pattern.strip() if isinstance(pattern, str) else "",
+                            "when_to_use": when_to_use,
+                            "supported_by": _normalize_supported_by(item.get("supported_by")),
+                            "evidence_fields": _normalize_evidence_fields(item.get("evidence_fields")),
+                        }
+                    )
+
+        thumbnail_templates: List[Dict[str, Any]] = []
+        thumbnail_source = templates_source.get("thumbnail")
+        if isinstance(thumbnail_source, dict):
+            raw_rules = thumbnail_source.get("rules")
+            if isinstance(raw_rules, list):
+                for index, item in enumerate(raw_rules):
+                    if not isinstance(item, dict):
+                        continue
+                    rule = item.get("rule")
+                    thumbnail_templates.append(
+                        {
+                            "id": f"thumbnail-rule-{index + 1}",
+                            "template": rule.strip() if isinstance(rule, str) else "",
+                            "when_to_use": "Use when corresponding thumbnail evidence is present",
+                            "supported_by": _normalize_supported_by(item.get("supported_by")),
+                            "evidence_fields": _normalize_evidence_fields(item.get("evidence_fields")),
+                        }
+                    )
+            raw_archetypes = thumbnail_source.get("archetypes")
+            if isinstance(raw_archetypes, list):
+                base_index = len(thumbnail_templates)
+                for index, item in enumerate(raw_archetypes):
+                    if not isinstance(item, dict):
+                        continue
+                    label = item.get("label")
+                    design_brief = item.get("designBrief")
+                    thumbnail_templates.append(
+                        {
+                            "id": f"thumbnail-archetype-{base_index + index + 1}",
+                            "template": design_brief.strip() if isinstance(design_brief, str) else "",
+                            "when_to_use": label.strip() if isinstance(label, str) else "",
+                            "supported_by": _normalize_supported_by(item.get("supported_by")),
+                            "evidence_fields": _normalize_evidence_fields(item.get("evidence_fields")),
+                        }
+                    )
+
+        script_templates: List[Dict[str, Any]] = []
+        script_source = templates_source.get("script")
+        if isinstance(script_source, dict):
+            raw_blueprints = script_source.get("blueprints")
+            if isinstance(raw_blueprints, list):
+                for index, item in enumerate(raw_blueprints):
+                    if not isinstance(item, dict):
+                        continue
+                    label = item.get("label")
+                    timeline = item.get("timeline")
+                    timeline_steps: List[str] = []
+                    if isinstance(timeline, list):
+                        for step in timeline:
+                            if not isinstance(step, dict):
+                                continue
+                            step_range = step.get("rangeSec")
+                            instruction = step.get("instruction")
+                            if isinstance(step_range, str) and isinstance(instruction, str):
+                                timeline_steps.append(f"{step_range}: {instruction.strip()}")
+                    script_templates.append(
+                        {
+                            "id": f"script-blueprint-{index + 1}",
+                            "template": " | ".join(timeline_steps),
+                            "when_to_use": label.strip() if isinstance(label, str) else "",
+                            "supported_by": _normalize_supported_by(item.get("supported_by")),
+                            "evidence_fields": _normalize_evidence_fields(item.get("evidence_fields")),
+                        }
+                    )
+
+        templates = {
+            "schemaVersion": "derived.templates.v1",
+            "generatedAt": generated_at,
+            "channel": channel_fallback,
+            "warnings": list(dict.fromkeys(templates_warnings)),
+            "titleTemplates": title_templates,
+            "thumbnailTemplates": thumbnail_templates,
+            "scriptTemplates": script_templates,
+        }
+    else:
+        templates = {
+            "schemaVersion": "derived.templates.v1",
+            "generatedAt": str(templates_source.get("generatedAt", generated_at)),
+            "channel": templates_source.get("channel")
+            if isinstance(templates_source.get("channel"), dict)
+            else channel_fallback,
+            "warnings": list(dict.fromkeys(templates_warnings)),
+            "titleTemplates": _normalize_claim_list(templates_source.get("titleTemplates"), "title-template"),
+            "thumbnailTemplates": _normalize_claim_list(templates_source.get("thumbnailTemplates"), "thumbnail-template"),
+            "scriptTemplates": _normalize_claim_list(templates_source.get("scriptTemplates"), "script-template"),
+        }
 
     return {
         "playbook": playbook,
@@ -1001,15 +1420,9 @@ async def classify_title(request: Dict[str, Any]) -> Dict[str, Any]:
 
     user_prompt = json.dumps(
         {
-            "task": "title_classifier_v1",
+            "videoId": str(payload.get("videoId", "")).strip(),
             "title": title,
             "languageHint": str(payload.get("languageHint", "auto")).strip() or "auto",
-            "requiredOutput": {
-                "schemaVersion": "derived.title_llm.v1",
-                "promise_type": "array of label+score+confidence+evidence",
-                "curiosity_gap_type": "array of label+score+confidence+evidence",
-                "headline_claim_strength": "object(label/confidence/evidence) or null",
-            },
         },
         ensure_ascii=False,
     )
@@ -1047,21 +1460,39 @@ async def classify_description(request: Dict[str, Any]) -> Dict[str, Any]:
     urls_with_spans = payload.get("urlsWithSpans")
     if not isinstance(urls_with_spans, list):
         urls_with_spans = []
+    urls: List[Dict[str, Any]] = []
+    for item in urls_with_spans[:10]:
+        if not isinstance(item, dict):
+            continue
+        url = item.get("url")
+        domain = item.get("domain")
+        char_start = item.get("charStart")
+        char_end = item.get("charEnd")
+        if not isinstance(url, str) or not isinstance(domain, str):
+            continue
+        if not isinstance(char_start, int):
+            char_start = 0
+        if not isinstance(char_end, int):
+            char_end = char_start
+        start = max(0, min(char_start, len(description)))
+        end = max(start, min(char_end, len(description)))
+        urls.append(
+            {
+                "url": url,
+                "domain": domain,
+                "charStart": start,
+                "charEnd": end,
+                "snippet": description[start:end],
+            }
+        )
 
     user_prompt = json.dumps(
         {
-            "task": "description_classifier_v1",
             "videoId": str(payload.get("videoId", "")).strip(),
             "title": str(payload.get("title", "")).strip(),
             "description": description,
-            "urlsWithSpans": urls_with_spans[:10],
             "languageHint": str(payload.get("languageHint", "auto")).strip() or "auto",
-            "requiredOutput": {
-                "schemaVersion": "derived.description_llm.v1",
-                "linkPurpose": "array(url,label,confidence,evidence)",
-                "sponsorBrandMentions": "array(brand,confidence,evidence[])",
-                "primaryCTA": "object(label,confidence,evidence[]) or null",
-            },
+            "urls": urls,
         },
         ensure_ascii=False,
     )
@@ -1105,21 +1536,18 @@ async def classify_transcript(request: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(segment_index, int) and isinstance(text, str) and text.strip():
             sample_segments[segment_index] = text
 
+    duration_sec = payload.get("durationSec")
+    if not isinstance(duration_sec, (int, float)):
+        duration_sec = 0
+
     user_prompt = json.dumps(
         {
-            "task": "transcript_classifier_v1",
             "videoId": str(payload.get("videoId", "")).strip(),
             "title": str(payload.get("title", "")).strip(),
-            "languageHint": str(payload.get("languageHint", "auto")).strip() or "auto",
+            "durationSec": float(duration_sec),
             "segmentsSample": segments_sample,
             "candidateSponsorSegments": payload.get("candidateSponsorSegments", []),
             "candidateCTASegments": payload.get("candidateCTASegments", []),
-            "requiredOutput": {
-                "schemaVersion": "derived.transcript_llm.v1",
-                "story_arc": "object(label,confidence,evidenceSegments[]) or null",
-                "sponsor_segments": "array(startSec,endSec,brand,confidence,evidenceSegments[])",
-                "cta_segments": "array(type,confidence,evidenceSegments[])",
-            },
         },
         ensure_ascii=False,
     )
@@ -1202,22 +1630,37 @@ async def classify_thumbnail(request: Dict[str, Any]) -> Dict[str, Any]:
         system_message=THUMBNAIL_SYSTEM_PROMPT,
     )
 
+    thumb_meta = payload.get("thumbMeta")
+    if not isinstance(thumb_meta, dict):
+        thumb_meta = {}
+    ocr_summary = payload.get("ocrSummary")
+    if not isinstance(ocr_summary, dict):
+        ocr_summary = {}
+    stats_summary = payload.get("statsSummary")
+    if not isinstance(stats_summary, dict):
+        stats_summary = {}
+
     user_prompt = json.dumps(
         {
-            "task": "thumbnail_classifier_v1",
             "videoId": str(payload.get("videoId", "")).strip(),
             "title": str(payload.get("title", "")).strip(),
-            "thumbMeta": payload.get("thumbMeta", {}),
-            "ocrSummary": payload.get("ocrSummary", {}),
-            "statsSummary": payload.get("statsSummary", {}),
-            "requiredOutput": {
-                "schemaVersion": "derived.thumbnail_llm.v1",
-                "archetype": "object(label,confidence)",
-                "faceSignals": "object(faceCountBucket,dominantFacePosition{x,y},faceEmotionTone,hasEyeContact,confidence)",
-                "clutterLevel": "object(label,confidence)",
-                "styleTags": "array(label,confidence), max 6",
-                "evidenceRegions": "array(label,x,y,w,h) normalized in [0,1]",
-                "evidenceSignals": "array(fieldName,value) using deterministic fields",
+            "thumbnail": {
+                "width": thumb_meta.get("imageWidth", 0),
+                "height": thumb_meta.get("imageHeight", 0),
+                "fileSizeBytes": thumb_meta.get("fileSizeBytes", 0),
+            },
+            "ocrSummary": {
+                "ocrText": ocr_summary.get("ocrText", ""),
+                "ocrWordCount": ocr_summary.get("ocrWordCount", 0),
+                "textAreaRatio": ocr_summary.get("textAreaRatio", 0.0),
+                "hasBigText": ocr_summary.get("hasBigText", False),
+            },
+            "imageStats": {
+                "brightnessMean": stats_summary.get("brightnessMean", 0.0),
+                "contrastStd": stats_summary.get("contrastStd", 0.0),
+                "colorfulness": stats_summary.get("colorfulness", 0.0),
+                "sharpnessLaplacianVar": stats_summary.get("sharpnessLaplacianVar", 0.0),
+                "edgeDensity": stats_summary.get("edgeDensity", 0.0),
             },
         },
         ensure_ascii=False,
@@ -1253,18 +1696,7 @@ async def classify_channel_orchestrator(request: Dict[str, Any]) -> Dict[str, An
         system_message=CHANNEL_ORCHESTRATOR_SYSTEM_PROMPT,
     )
 
-    user_prompt = json.dumps(
-        {
-            "task": "channel_orchestrator_v1",
-            "payload": payload,
-            "requiredOutput": {
-                "playbook": "analysis.playbook.v1",
-                "templates": "derived.templates.v1",
-                "mandatoryEvidence": ["supported_by", "evidence_fields"],
-            },
-        },
-        ensure_ascii=False,
-    )
+    user_prompt = json.dumps(payload, ensure_ascii=False)
 
     try:
         run_result = await agent.run(task=user_prompt)
