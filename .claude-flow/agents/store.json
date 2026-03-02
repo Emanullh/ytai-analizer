@@ -7,7 +7,7 @@
       "health": 1,
       "taskCount": 0,
       "config": {},
-      "createdAt": "2026-02-28T21:02:48.032Z",
+      "createdAt": "2026-03-02T19:53:42.541Z",
       "model": "haiku",
       "modelRoutedBy": "router"
     },
@@ -18,29 +18,29 @@
       "health": 1,
       "taskCount": 0,
       "config": {},
-      "createdAt": "2026-02-28T21:02:48.077Z",
+      "createdAt": "2026-03-02T19:53:42.572Z",
       "model": "sonnet",
       "modelRoutedBy": "router"
     },
     "web-analyst": {
       "agentId": "web-analyst",
-      "agentType": "coder",
+      "agentType": "researcher",
       "status": "idle",
       "health": 1,
       "taskCount": 0,
       "config": {},
-      "createdAt": "2026-02-28T21:02:48.077Z",
+      "createdAt": "2026-03-02T19:53:42.582Z",
       "model": "sonnet",
       "modelRoutedBy": "router"
     },
     "doc-writer": {
       "agentId": "doc-writer",
-      "agentType": "reviewer",
+      "agentType": "coder",
       "status": "idle",
       "health": 1,
       "taskCount": 0,
       "config": {},
-      "createdAt": "2026-02-28T21:02:48.078Z",
+      "createdAt": "2026-03-02T19:53:42.583Z",
       "model": "haiku",
       "modelRoutedBy": "router"
     }

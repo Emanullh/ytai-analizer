@@ -6,6 +6,15 @@ import { z } from "zod";
 import { env } from "./config/env.js";
 import { exportSelectedVideos } from "./services/exportService.js";
 import { ExportJobEvent, exportJobService } from "./services/exportJobService.js";
+import {
+  createThumbnailStream,
+  getProjectDetail,
+  getProjectVideoDetail,
+  listProjectVideos,
+  listProjects,
+  readProjectArtifact,
+  resolveProjectThumbnail
+} from "./services/projectsService.js";
 import { analyzeChannel } from "./services/youtubeService.js";
 import { HttpError } from "./utils/errors.js";
 
@@ -26,6 +35,20 @@ const exportSchema = z.object({
 
 const exportJobParamsSchema = z.object({
   jobId: z.string().uuid("Invalid jobId")
+});
+
+const projectParamsSchema = z.object({
+  projectId: z.string().min(1)
+});
+
+const projectVideoParamsSchema = z.object({
+  projectId: z.string().min(1),
+  videoId: z.string().min(1)
+});
+
+const projectVideoDetailQuerySchema = z.object({
+  maxSegments: z.coerce.number().int().positive().max(2000).optional(),
+  truncateChars: z.coerce.number().int().positive().max(10000).optional()
 });
 
 export async function buildServer() {
@@ -135,6 +158,88 @@ export async function buildServer() {
     if (latestJob?.status === "done" || latestJob?.status === "failed") {
       closeStream();
     }
+  });
+
+  app.get("/projects", async (_, reply) => {
+    const projects = await listProjects();
+    return reply.send(projects);
+  });
+
+  app.get("/projects/:projectId", async (request, reply) => {
+    const params = projectParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: params.error.issues[0]?.message ?? "Invalid params" });
+    }
+
+    const detail = await getProjectDetail(params.data.projectId);
+    return reply.send(detail);
+  });
+
+  app.get("/projects/:projectId/videos", async (request, reply) => {
+    const params = projectParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: params.error.issues[0]?.message ?? "Invalid params" });
+    }
+
+    const videos = await listProjectVideos(params.data.projectId);
+    return reply.send(videos);
+  });
+
+  app.get("/projects/:projectId/videos/:videoId", async (request, reply) => {
+    const params = projectVideoParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: params.error.issues[0]?.message ?? "Invalid params" });
+    }
+
+    const query = projectVideoDetailQuerySchema.safeParse(request.query);
+    if (!query.success) {
+      return reply.status(400).send({ error: query.error.issues[0]?.message ?? "Invalid query params" });
+    }
+
+    const detail = await getProjectVideoDetail(params.data.projectId, params.data.videoId, query.data);
+    return reply.send(detail);
+  });
+
+  app.get("/projects/:projectId/artifacts/playbook", async (request, reply) => {
+    const params = projectParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: params.error.issues[0]?.message ?? "Invalid params" });
+    }
+
+    const artifact = await readProjectArtifact(params.data.projectId, "playbook");
+    return reply.send(artifact);
+  });
+
+  app.get("/projects/:projectId/artifacts/templates", async (request, reply) => {
+    const params = projectParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: params.error.issues[0]?.message ?? "Invalid params" });
+    }
+
+    const artifact = await readProjectArtifact(params.data.projectId, "templates");
+    return reply.send(artifact);
+  });
+
+  app.get("/projects/:projectId/artifacts/channel_models", async (request, reply) => {
+    const params = projectParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: params.error.issues[0]?.message ?? "Invalid params" });
+    }
+
+    const artifact = await readProjectArtifact(params.data.projectId, "channel_models");
+    return reply.send(artifact);
+  });
+
+  app.get("/projects/:projectId/thumb/:videoId", async (request, reply) => {
+    const params = projectVideoParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: params.error.issues[0]?.message ?? "Invalid params" });
+    }
+
+    const thumbnailPath = await resolveProjectThumbnail(params.data.projectId, params.data.videoId);
+    reply.header("Cache-Control", "public, max-age=3600, immutable");
+    reply.type("image/jpeg");
+    return reply.send(createThumbnailStream(thumbnailPath));
   });
 
   app.setErrorHandler((error, _, reply) => {

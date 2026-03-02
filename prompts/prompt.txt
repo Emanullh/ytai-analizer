@@ -1,14 +1,217 @@
-Tarea: Error fix
+Tarea: Crear un “Projects Dashboard” para visualizar TODOS los resultados exportados (por proyecto) + migrar/mejorar UI con Tailwind (sin cambiar el flujo actual de export)
 
-Contexto:
-Warnings:
-Discarded evidence signal 'ocrSummary.hasBigText': unknown deterministic field
-Discarded evidence signal 'imageStats.brightnessMean': unknown deterministic field
-Discarded evidence signal 'imageStats.contrastStd': unknown deterministic field
-Discarded evidence signal 'imageStats.edgeDensity': unknown deterministic field
-Discarded evidence signal 'ocrSummary.ocrWordCount': unknown deterministic field
-Performance model skipped: requires at least 5 videos, received 1
-Channel orchestrator LLM failed: Error code: 404 - {'error': {'message': 'This is not a chat model and thus not supported in the v1/chat/completions endpoint. Did you mean to use v1/completions?', 'type': 'invalid_request_error', 'param': 'model', 'code': None}}
-Channel orchestrator LLM returned incomplete payload; using deterministic fallback
+Contexto (repo):
+- apps/web: Vite + React + TS (UI actual: analyze + export con modal SSE)
+- apps/api: Fastify + export pipeline que genera artifacts en exports/<channel_sanitizado>/
+  - channel.json, manifest.json, raw/*, thumbnails/*, derived/*, analysis/*, logs/*
+- Contratos SSE y artifacts ya están definidos (exportVersion 1.1, cache, logs, playbook, templates, etc.)
 
-Importante: Quiero usar el modelo 5.2 y 5.2 pro de chatgpt para este proyecto, investiga la solucion sin cambiar de modelos
+Objetivo UX:
+1) Agregar un dashboard adicional “Projects” donde el usuario pueda:
+   - ver lista de proyectos/export runs organizados por “proyecto” (carpeta en exports/<channel>)
+   - abrir un proyecto y visualizar:
+     - summary del job más reciente (logs/job_<jobId>.summary.json)
+     - manifest.json (counts, warnings, artifacts)
+     - playbook.json y templates.json en vistas legibles
+     - lista de videos con thumbnails + performance + flags (transcriptStatus, cache hits si aplica)
+     - botón para abrir detalles de un video (derived/video_features/<videoId>.json) y transcript (raw/transcripts/<videoId>.jsonl) en vista expandible
+2) Mantener el flujo actual:
+   - /analyze + export SSE siguen igual
+   - solo agregamos una nueva sección de UI (navegación)
+3) Mejorar UI actual con Tailwind:
+   - layout consistente (header/nav, cards, tables, badges)
+   - modal de progreso más claro y visual (sin cambiar lógica del reducer)
+
+Definición “Project”:
+- Un “Project” = una carpeta bajo exports/<channel_sanitizado>/ (por canal).
+- Dentro puede haber múltiples jobs (logs/job_<jobId>.*). En el dashboard:
+  - el “project list item” muestra el último job (por exportedAt o por logs summary timestamp)
+  - el detalle muestra lista de jobs (opcional MVP) y permite ver logs por job.
+
+Requisitos backend (apps/api):
+A) Implementar endpoints de lectura “read-only” (NO nuevos writes):
+1) GET /projects
+   Respuesta: lista de proyectos:
+   [
+     {
+       "projectId": "Canal_Demo",                 // channelFolder
+       "channelId": "...",
+       "channelName": "...",
+       "exportVersion": "1.1",
+       "lastExportedAt": "ISO",
+       "lastJobId": "uuid|null",
+       "counts": { ... }                          // desde manifest si existe
+       "warningsCount": number,
+       "status": "ok|partial|failed|unknown"      // derivado del último summary o manifest
+     }
+   ]
+   Implementación:
+   - enumerar directorios bajo exports/
+   - por cada uno, leer manifest.json si existe (y channel.json como fallback)
+   - determinar lastJobId:
+     - preferir logs/job_*.summary.json más reciente
+     - si no hay logs, null
+   - NO bloquear si un project está corrupto: incluirlo con status unknown y warning.
+
+2) GET /projects/:projectId
+   Respuesta: detalle de proyecto:
+   {
+     "projectId": "...",
+     "channel": { channelId, channelName, sourceInput, timeframe, exportedAt, timeframeResolved },
+     "manifest": {...}|null,
+     "latestJob": {
+       "jobId": "...",
+       "status": "done|failed",
+       "startedAt": "ISO",
+       "finishedAt": "ISO",
+       "durationMs": number,
+       "warningsCount": number,
+       "errorsCount": number
+     }|null,
+     "jobs": [
+       { jobId, status, startedAt, finishedAt, durationMs, warningsCount, errorsCount }
+     ],
+     "artifacts": {
+       "playbook": "analysis/playbook.json"|null,
+       "templates": "derived/templates.json"|null,
+       "channelModels": "derived/channel_models.json"|null
+     }
+   }
+   - jobs[]: listar logs/job_*.summary.json (orden desc por finishedAt)
+   - artifacts: verificar existencia de archivos
+
+3) GET /projects/:projectId/videos
+   Respuesta: lista de videos (ligera, sin transcript full):
+   [
+     {
+       "videoId": "...",
+       "title": "...",
+       "publishedAt": "...",
+       "thumbnailPath": "thumbnails/<id>.jpg",
+       "transcriptStatus": "ok|missing|error",
+       "transcriptSource": "captions|asr|none",
+       "performance": { viewsPerDay, engagementRate, residual, percentile }|null,
+       "hasLLM": { description:boolean, transcript:boolean, thumbnail:boolean } // derivado de derived/video_features
+     }
+   ]
+   Implementación:
+   - leer channel.json (videos base + transcriptStatus/source)
+   - para cada videoId, leer derived/video_features/<id>.json si existe:
+     - extraer performance + flags de llm presence
+   - optimización: leer en paralelo con límite (usar EXPORT_FS_CONCURRENCY o un p-limit interno).
+
+4) GET /projects/:projectId/videos/:videoId
+   Respuesta: detalles completos:
+   {
+     "videoId": "...",
+     "derived": {...}|null,                 // derived/video_features/<id>.json completo
+     "transcriptJsonl": [ ... ]|null,       // parsear raw/transcripts/<id>.jsonl y devolver como array de objetos
+     "rawVideo": {...}|null                 // opcional: buscar en raw/videos.jsonl la línea del videoId
+   }
+   Nota: transcript puede ser grande; si preocupa, implementar query param ?maxSegments=200 o ?truncateChars=... (MVP opcional).
+
+5) GET /projects/:projectId/artifacts/playbook
+   GET /projects/:projectId/artifacts/templates
+   GET /projects/:projectId/artifacts/channel_models
+   - Devuelven JSON directo para consumo en UI.
+   - Alternativa: usar el GET /projects/:projectId y luego fetch a rutas específicas.
+
+B) Seguridad:
+- projectId siempre es folder name bajo exports/
+- usar ensureInsideRoot(...) con root exports/
+- prohibir '..' y paths absolutos
+- todos los endpoints son read-only
+
+C) Tests backend:
+- apps/api/tests/projectsApi.test.ts:
+  - crear fixtures en /exports (usar tmp dir) con 2 projects
+  - GET /projects retorna ambos
+  - GET /projects/:id retorna jobs/artifacts
+  - GET /projects/:id/videos retorna lista con performance si derived existe
+  - path traversal bloqueado (../)
+
+Requisitos frontend (apps/web):
+D) Agregar Tailwind (mejora UI global):
+1) Instalar deps en apps/web:
+   - tailwindcss postcss autoprefixer
+2) Config:
+   - apps/web/tailwind.config.(js|cjs|ts): content incluye src/**/*.tsx y index.html
+   - apps/web/postcss.config.(js|cjs)
+   - apps/web/src/index.css con:
+     @tailwind base;
+     @tailwind components;
+     @tailwind utilities;
+3) Refactor UI actual:
+   - crear Layout con header + nav:
+     - Tabs: “Analyze” y “Projects”
+   - cards, inputs, botones, tables, badges, modal con Tailwind
+   - mantener lógica existente (reducers, SSE) intacta, solo cambiar estilos/markup
+
+E) Dashboard “Projects” (nuevo):
+1) Routing:
+   - agregar react-router-dom
+   - rutas:
+     /            -> Analyze (pantalla actual)
+     /projects    -> ProjectsList
+     /projects/:projectId -> ProjectDetail
+2) Components:
+   - src/pages/ProjectsList.tsx
+     - fetch /api/projects
+     - search (por canal/proyecto), sort (lastExportedAt desc), badges (status)
+     - cards/list responsive
+   - src/pages/ProjectDetail.tsx
+     - fetch /api/projects/:projectId (header)
+     - fetch /api/projects/:projectId/videos (tabla/grid)
+     - secciones colapsables:
+       - Playbook (render JSON bonito: key sections, insights, evidence)
+       - Templates (titleTemplates/thumbnailTemplates/scriptTemplates)
+       - Jobs (lista de jobs; al click, mostrar link a logs y resumen)
+     - Video grid/table:
+       - thumbnail (img src="/api/static/..." o servir desde API)
+       - title, publishedAt, percentile/residual badges
+       - transcriptStatus/source
+       - botón “Details” -> abre panel/modal con:
+         - derived JSON (pretty)
+         - transcript segments (primeros N + buscador local)
+3) Servir thumbnails:
+   - Opción A (preferida): endpoint en API:
+     GET /projects/:projectId/thumb/:videoId -> stream del jpg desde exports/<project>/thumbnails/<videoId>.jpg con correct headers
+   - Opción B: static file serving seguro bajo /exports (pero debe evitar traversal).
+   Implementar A para control de seguridad y caching.
+4) UI/UX:
+   - skeleton loaders
+   - empty states (no projects, no videos)
+   - warnings panel (mostrar warnings de manifest/summary)
+   - top metrics tiles:
+     - totalVideosSelected, transcriptsOk/missing/error, thumbnailsOk/failed
+     - last export duration
+
+F) Tests frontend:
+- Mantener tests existentes del reducer.
+- Añadir al menos 1 test (vitest) para:
+  - ProjectsList render de items (mock fetch)
+  - ProjectDetail render de tabla (mock fetch)
+  (MVP: si ya hay setup de testing; si no, mínimo snapshot o component test básico.)
+
+G) Docs:
+- Actualizar AI Context Pack:
+  - nueva sección “Projects Dashboard”
+  - endpoints nuevos
+  - cómo navegar /projects
+- DATA_CONTRACTS.md:
+  - documentar endpoints /projects*
+  - documentar endpoint thumb serving
+
+Criterios de aceptación:
+- pnpm dev levanta web + api
+- en UI hay nav “Analyze / Projects”
+- Projects list carga proyectos existentes desde exports/
+- Project detail muestra videos + playbook + templates si existen
+- Thumbnails se ven desde UI (vía endpoint seguro)
+- No rompe export flow ni SSE modal
+- pnpm test pasa (api + web)
+
+Notas de implementación:
+- Evitar cargar transcript completo en /videos (usar endpoint de detalle o truncar).
+- Usar Tailwind para toda la UI: botones, inputs, badges, modal, tables.
+- Mantener la lógica: solo refactor visual y agregados.

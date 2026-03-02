@@ -3,46 +3,41 @@
     "name": "ytai-analizer",
     "type": "pnpm monorepo",
     "workspace": "apps/*",
+    "runtime": {
+      "node": ">=20",
+      "pnpm": "10.x",
+      "python": "3.10+ (ASR local)",
+      "ffmpeg": "required in PATH for local ASR"
+    },
     "apps": [
       {
         "name": "api",
         "path": "apps/api",
         "entry": "apps/api/src/server.ts",
-        "stack": ["node", "typescript", "fastify", "zod"]
+        "config": "apps/api/src/config/env.ts"
       },
       {
         "name": "web",
         "path": "apps/web",
         "entry": "apps/web/src/main.tsx",
-        "stack": ["react", "vite", "typescript"]
+        "router": "apps/web/src/App.tsx"
       }
     ],
-    "asr": {
-      "worker": "apps/api/scripts/asr_worker.py",
-      "requirements": "apps/api/scripts/requirements-asr.txt",
-      "setupScripts": [
+    "scripts": {
+      "asrSetup": [
         "scripts/setup_asr.mjs",
         "scripts/setup_asr.sh",
         "scripts/setup_asr.ps1"
       ],
-      "checkScript": "scripts/check_asr.mjs"
-    },
-    "autogen": {
-      "worker": "apps/api/scripts/autogen_worker.py",
-      "requirements": "apps/api/scripts/requirements-autogen.txt",
-      "runtime": "apps/api/src/services/autogenRuntime.ts",
-      "tasks": [
-        "title_classifier_v1",
-        "description_classifier_v1",
-        "transcript_classifier_v1",
-        "thumbnail_classifier_v1"
-      ]
+      "asrCheck": "scripts/check_asr.mjs",
+      "asrWorker": "apps/api/scripts/asr_worker.py",
+      "asrRequirements": "apps/api/scripts/requirements-asr.txt"
     }
   },
   "flows": [
     {
       "name": "analyze-channel",
-      "frontend": "apps/web/src/App.tsx",
+      "frontend": "apps/web/src/pages/AnalyzePage.tsx",
       "backend": [
         "apps/api/src/server.ts",
         "apps/api/src/services/youtubeService.ts"
@@ -51,9 +46,9 @@
       "response": "AnalyzeResult"
     },
     {
-      "name": "export-job-sse",
+      "name": "export-async-sse",
       "frontend": [
-        "apps/web/src/App.tsx",
+        "apps/web/src/pages/AnalyzePage.tsx",
         "apps/web/src/exportJobState.ts"
       ],
       "backend": [
@@ -65,11 +60,7 @@
         "POST /export/jobs",
         "GET /export/jobs/:jobId/events",
         "SSE events -> reducer",
-        "logs/job_<jobId>.events.jsonl + logs/job_<jobId>.errors.jsonl",
-        "derived/video_features/<videoId>.json write",
-        "performance normalization (deterministic) per video",
-        "derived/channel_models.json write",
-        "channel.json write"
+        "write exports/<channel>/channel.json + manifest.json"
       ]
     },
     {
@@ -81,173 +72,114 @@
         "apps/api/src/services/asrRuntime.ts",
         "apps/api/scripts/asr_worker.py"
       ],
-      "policy": "captions first, local ASR fallback, never fail full export for transcript-only errors"
+      "policy": "captions first, ASR fallback, transcript failure should not fail whole export"
+    },
+    {
+      "name": "projects-dashboard",
+      "frontend": [
+        "apps/web/src/pages/ProjectsList.tsx",
+        "apps/web/src/pages/ProjectDetail.tsx"
+      ],
+      "backend": [
+        "apps/api/src/server.ts",
+        "apps/api/src/services/projectsService.ts"
+      ],
+      "source": "exports/*"
     }
   ],
   "endpoints": [
-    {
-      "method": "GET",
-      "path": "/health",
-      "response": { "ok": true }
-    },
-    {
-      "method": "POST",
-      "path": "/analyze",
-      "body": { "sourceInput": "string", "timeframe": "1m|6m|1y" },
-      "responseType": "AnalyzeResult"
-    },
-    {
-      "method": "POST",
-      "path": "/export",
-      "bodyType": "ExportRequest",
-      "responseType": "{folderPath,warnings,exportedCount}"
-    },
-    {
-      "method": "POST",
-      "path": "/export/jobs",
-      "bodyType": "ExportRequest",
-      "response": { "jobId": "uuid" }
-    },
-    {
-      "method": "GET",
-      "path": "/export/jobs/:jobId",
-      "responseType": "ExportJobState"
-    },
-    {
-      "method": "GET",
-      "path": "/export/jobs/:jobId/events",
-      "responseType": "SSE<ExportJobEvent>"
-    }
+    { "method": "GET", "path": "/health" },
+    { "method": "POST", "path": "/analyze" },
+    { "method": "POST", "path": "/export" },
+    { "method": "POST", "path": "/export/jobs" },
+    { "method": "GET", "path": "/export/jobs/:jobId" },
+    { "method": "GET", "path": "/export/jobs/:jobId/events", "kind": "SSE" },
+    { "method": "GET", "path": "/projects" },
+    { "method": "GET", "path": "/projects/:projectId" },
+    { "method": "GET", "path": "/projects/:projectId/videos" },
+    { "method": "GET", "path": "/projects/:projectId/videos/:videoId" },
+    { "method": "GET", "path": "/projects/:projectId/artifacts/playbook" },
+    { "method": "GET", "path": "/projects/:projectId/artifacts/templates" },
+    { "method": "GET", "path": "/projects/:projectId/artifacts/channel_models" },
+    { "method": "GET", "path": "/projects/:projectId/thumb/:videoId" }
   ],
   "schemas": {
-    "exportPayloadRuntime": {
-      "source": "apps/api/src/types.ts",
-      "fields": ["channelName", "channelId", "sourceInput", "timeframe", "videos[]"]
+    "exportVersion": {
+      "field": "exportVersion",
+      "current": "1.1",
+      "source": "apps/api/src/services/exportService.ts"
     },
-    "exportVersioning": {
-      "runtimeFieldPresent": true,
-      "currentVersion": "1.1",
-      "field": "exportVersion"
+    "channelJson": {
+      "path": "exports/<channel>/channel.json",
+      "sourceType": "apps/api/src/types.ts::ExportPayload"
     },
-    "videoRecord": {
-      "fields": [
-        "videoId",
-        "title",
-        "viewCount",
-        "publishedAt",
-        "thumbnailPath",
-        "transcript",
-        "transcriptStatus?"
-      ]
+    "manifest": {
+      "path": "exports/<channel>/manifest.json",
+      "sourceType": "apps/api/src/services/exportService.ts::ExportManifestV1"
     },
-    "derivedVideoFeatures": {
-      "path": "exports/<channel>/derived/video_features/<videoId>.json",
-      "schemaVersion": "derived.video_features.v1",
-      "fields": [
-        "schemaVersion",
-        "videoId",
-        "computedAt",
-        "titleFeatures.deterministic",
-        "titleFeatures.llm",
-        "descriptionFeatures.deterministic",
-        "descriptionFeatures.llm",
-        "descriptionFeatures.warnings",
-        "transcriptFeatures.deterministic",
-        "transcriptFeatures.llm",
-        "transcriptFeatures.warnings",
-        "thumbnailFeatures.deterministic",
-        "thumbnailFeatures.llm",
-        "thumbnailFeatures.warnings",
-        "performance.daysSincePublish",
-        "performance.viewsPerDay",
-        "performance.likeRate",
-        "performance.commentRate",
-        "performance.engagementRate",
-        "performance.logViews",
-        "performance.residual",
-        "performance.percentile"
-      ],
-      "assets": [
-        "apps/api/src/derived/assets/transcript-stopwords.json",
-        "apps/api/src/derived/assets/transcript-sentiment-lexicon.json",
-        "apps/api/src/derived/assets/transcript-emotions.json"
-      ]
+    "raw": {
+      "channel": "exports/<channel>/raw/channel.json",
+      "videos": "exports/<channel>/raw/videos.jsonl",
+      "transcripts": "exports/<channel>/raw/transcripts/<videoId>.jsonl"
     },
-    "derivedChannelModels": {
-      "path": "exports/<channel>/derived/channel_models.json",
-      "schemaVersion": "derived.channel_models.v1",
-      "modelType": "robust-linear",
-      "deterministic": true,
-      "formula": "log1p(viewCount) ~ log1p(daysSincePublish) + log1p(durationSec) + weekday + isShort"
+    "derived": {
+      "videoFeatures": "exports/<channel>/derived/video_features/<videoId>.json",
+      "channelModels": "exports/<channel>/derived/channel_models.json"
     },
-    "exportCacheIndex": {
+    "cache": {
       "path": "exports/<channel>/.cache/index.json",
       "schemaVersion": "cache.index.v1",
-      "keySpace": ["channelId", "exportVersion", "timeframe", "videoId"],
-      "cacheHitRequirements": [
-        "thumbnail + raw/transcript + derived/video_features exist",
-        "hash/config/model fingerprints match"
-      ],
-      "partialInvalidation": {
-        "ocrConfigChange": "thumbnailFeatures.deterministic only (ocr_only mode)",
-        "llmModelChange": "only affected *.llm section",
-        "missingApiKey": "reuse existing llm cache without invalidation"
-      }
+      "source": "apps/api/src/services/exportCacheService.ts"
     },
-    "jobLogs": {
+    "logs": {
       "path": "exports/<channel>/logs/",
       "files": [
         "job_<jobId>.events.jsonl",
         "job_<jobId>.errors.jsonl",
         "job_<jobId>.summary.json",
-        "job_<jobId>.debug_bundle.json (failed only)"
-      ],
-      "correlationIds": ["jobId", "requestId", "videoId", "stepId"],
-      "secretPolicy": "No API keys or full prompts"
-    },
-    "sseEvents": [
-      "job_started",
-      "video_progress",
-      "job_progress",
-      "warning",
-      "job_done",
-      "job_failed"
-    ]
+        "job_<jobId>.debug_bundle.json"
+      ]
+    }
   },
   "runbook": {
-    "install": ["pnpm install"],
-    "dev": ["pnpm dev"],
-    "test": ["pnpm test"],
-    "asrSetup": ["pnpm asr:setup", "pnpm asr:check"],
-    "requiredEnv": ["YOUTUBE_API_KEY"],
-    "optionalEnv": [
-      "PORT",
-      "TRANSCRIPT_LANG",
-      "LOCAL_ASR_ENABLED",
-      "LOCAL_ASR_MODEL",
-      "LOCAL_ASR_COMPUTE_TYPE",
-      "LOCAL_ASR_LANGUAGE",
-      "LOCAL_ASR_BEAM_SIZE",
-      "LOCAL_ASR_MAX_CONCURRENCY",
-      "LOCAL_ASR_TIMEOUT_SEC",
-      "YOUTUBE_AUDIO_DOWNLOAD_TIMEOUT_SEC",
-      "ASR_PYTHON_PATH",
-      "OPENAI_API_KEY",
-      "AUTO_GEN_ENABLED",
-      "AUTO_GEN_MODEL_TITLE",
-      "AUTO_GEN_MODEL_DESCRIPTION",
-      "AUTO_GEN_MODEL_THUMBNAIL",
-      "AUTO_GEN_REASONING_EFFORT",
-      "AUTO_GEN_TIMEOUT_SEC",
-      "THUMB_OCR_ENABLED",
-      "THUMB_OCR_LANGS",
-      "THUMB_VISION_DOWNSCALE_WIDTH"
-    ],
-    "windowsNotes": {
-      "venvPython": ".venv-asr\\\\Scripts\\\\python.exe",
-      "activate": ".\\\\.venv-asr\\\\Scripts\\\\Activate.ps1",
-      "asrPythonPathExample": "C:\\\\path\\\\to\\\\ytai-analizer\\\\.venv-asr\\\\Scripts\\\\python.exe",
-      "ffmpeg": "ffmpeg.exe must be in PATH"
-    }
+    "commands": {
+      "install": "pnpm install",
+      "dev": "pnpm dev",
+      "test": "pnpm test",
+      "asrSetup": "pnpm asr:setup",
+      "asrCheck": "pnpm asr:check"
+    },
+    "env": {
+      "required": [
+        "YOUTUBE_API_KEY"
+      ],
+      "optionalCore": [
+        "PORT",
+        "TRANSCRIPT_LANG",
+        "OPENAI_API_KEY"
+      ],
+      "optionalAsr": [
+        "LOCAL_ASR_ENABLED",
+        "LOCAL_ASR_MODEL",
+        "LOCAL_ASR_COMPUTE_TYPE",
+        "LOCAL_ASR_LANGUAGE",
+        "LOCAL_ASR_BEAM_SIZE",
+        "LOCAL_ASR_MAX_CONCURRENCY",
+        "LOCAL_ASR_TIMEOUT_SEC",
+        "YOUTUBE_AUDIO_DOWNLOAD_TIMEOUT_SEC",
+        "ASR_PYTHON_PATH"
+      ]
+    },
+    "windows": {
+      "venvPython": ".venv-asr\\Scripts\\python.exe",
+      "activate": ".\\.venv-asr\\Scripts\\Activate.ps1",
+      "ffmpeg": "ffmpeg.exe in PATH"
+    },
+    "troubleshooting": [
+      "Missing YOUTUBE_API_KEY -> configure apps/api/.env",
+      "ffmpeg not found -> install ffmpeg and check PATH",
+      "faster_whisper import failed -> run pnpm asr:setup && pnpm asr:check",
+      "SSE disconnected -> check /health and apps/web/vite.config.ts proxy"
+    ]
   }
 }

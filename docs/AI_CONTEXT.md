@@ -1,23 +1,17 @@
 # AI Context Pack — ytai-analizer
 
-Este documento es una guía operativa para otras IAs que vayan a modificar el repo.  
-Foco: arquitectura real, contratos y runbook reproducible.
+Guía operativa para otras IAs. Enfocada en código real, contratos y runbook reproducible.
 
-## 1) Qué es este repo
+## 1) Scope rápido
 
-Monorepo `pnpm` con 2 apps:
+- Monorepo `pnpm` con workspace `apps/*` (`pnpm-workspace.yaml`).
+- Backend: Fastify + TypeScript (`apps/api`).
+- Frontend: React + Vite + TypeScript (`apps/web`).
+- Export principal: genera `exports/<canal>/channel.json` + artifacts `raw/`, `derived/`, `logs/`.
 
-- `apps/api`: API Fastify + pipeline de transcript/captions/ASR local.
-- `apps/web`: UI React/Vite para analizar canal y lanzar export asíncrono con progreso SSE.
+## 2) Comandos exactos
 
-Workspace:
-
-- `pnpm-workspace.yaml`
-- `package.json` (scripts raíz)
-
-## 2) Comandos base (exactos)
-
-Desde la raíz del repo:
+Desde raíz del repo:
 
 ```bash
 pnpm install
@@ -25,7 +19,7 @@ pnpm dev
 pnpm test
 ```
 
-Comandos ASR local:
+Setup/check de ASR local:
 
 ```bash
 pnpm asr:setup
@@ -41,20 +35,30 @@ pnpm -C apps/api test
 pnpm -C apps/web test
 ```
 
-## 3) Entry points reales
+## 3) Entry points y archivos clave
 
 Backend:
 
 - `apps/api/src/server.ts`
 - `apps/api/src/config/env.ts`
+- `apps/api/src/services/exportService.ts`
+- `apps/api/src/services/exportJobService.ts`
+- `apps/api/src/services/transcriptPipeline.ts`
+- `apps/api/src/services/localAsrService.ts`
+- `apps/api/src/services/projectsService.ts`
 
 Frontend:
 
 - `apps/web/src/main.tsx`
 - `apps/web/src/App.tsx`
-- `apps/web/vite.config.ts` (proxy `/api` -> `http://localhost:3001`)
+- `apps/web/src/pages/AnalyzePage.tsx`
+- `apps/web/src/pages/ProjectsList.tsx`
+- `apps/web/src/pages/ProjectDetail.tsx`
+- `apps/web/src/exportJobState.ts`
+- `apps/web/src/types.ts`
+- `apps/web/vite.config.ts`
 
-Scripts ASR:
+ASR:
 
 - `scripts/setup_asr.mjs`
 - `scripts/setup_asr.sh`
@@ -62,91 +66,87 @@ Scripts ASR:
 - `scripts/check_asr.mjs`
 - `apps/api/scripts/asr_worker.py`
 - `apps/api/scripts/requirements-asr.txt`
-- `apps/api/scripts/autogen_worker.py`
-- `apps/api/scripts/requirements-autogen.txt`
 
-## 4) Variables de entorno
+## 4) Entorno y dependencias
 
 Fuente de verdad:
 
 - `apps/api/.env.example`
-- parsing/config: `apps/api/src/config/env.ts`
+- parser/defaults: `apps/api/src/config/env.ts`
 
-### Requerida
+Requeridas:
 
-- `YOUTUBE_API_KEY`: obligatoria para llamadas YouTube Data API (`/analyze`, `/export`, `/export/jobs`).
+- `YOUTUBE_API_KEY` (sin esto falla `/analyze` y export).
 
-### Opcionales API
+Opcionales (núcleo):
 
 - `PORT` (default `3001`)
-- `TRANSCRIPT_LANG` (si se setea, intenta captions en ese idioma)
+- `TRANSCRIPT_LANG`
+- `OPENAI_API_KEY` (habilita partes LLM/embeddings cuando `AUTO_GEN_ENABLED=true`)
 
-### Opcionales ASR local
+Opcionales ASR:
 
-- `LOCAL_ASR_ENABLED` (default `true`)
-- `LOCAL_ASR_MODEL` (default `large-v3-turbo`)
-- `LOCAL_ASR_COMPUTE_TYPE` (default `auto`)
-- `LOCAL_ASR_LANGUAGE` (default `auto`)
-- `LOCAL_ASR_BEAM_SIZE` (default `5`)
-- `LOCAL_ASR_MAX_CONCURRENCY` (default `1`)
-- `LOCAL_ASR_TIMEOUT_SEC` (default `900`)
-- `YOUTUBE_AUDIO_DOWNLOAD_TIMEOUT_SEC` (default `300`)
-- `ASR_PYTHON_PATH` (override explícito del binario python del worker)
+- `LOCAL_ASR_ENABLED`
+- `LOCAL_ASR_MODEL`
+- `LOCAL_ASR_COMPUTE_TYPE`
+- `LOCAL_ASR_LANGUAGE`
+- `LOCAL_ASR_BEAM_SIZE`
+- `LOCAL_ASR_MAX_CONCURRENCY`
+- `LOCAL_ASR_TIMEOUT_SEC`
+- `YOUTUBE_AUDIO_DOWNLOAD_TIMEOUT_SEC`
+- `ASR_PYTHON_PATH`
 
-### Opcionales AutoGen / Derived Features
+Opcionales de scheduler/export:
 
-- `OPENAI_API_KEY` (OpenAI API para embeddings + clasificación title/description/transcript/thumbnail)
-- `AUTO_GEN_ENABLED` (default `true`)
-- `AUTO_GEN_MODEL_TITLE` (default `gpt-5.2`)
-- `AUTO_GEN_MODEL_DESCRIPTION` (default `gpt-5.2`)
-- `AUTO_GEN_MODEL_THUMBNAIL` (default `gpt-5.2`)
-- `AUTO_GEN_MODEL_ORCHESTRATOR` (default `gpt-5.2-pro`)
-- `AUTO_GEN_REASONING_EFFORT` (default `low`)
-- `AUTO_GEN_REASONING_EFFORT_ORCHESTRATOR` (default `medium`)
-- `AUTO_GEN_TIMEOUT_SEC` (default `60`)
-- `THUMB_OCR_ENABLED` (default `true`)
-- `THUMB_OCR_LANGS` (default `eng`; soporta `eng+spa`)
-- `THUMB_VISION_DOWNSCALE_WIDTH` (default `256`)
+- `EXPORT_VIDEO_CONCURRENCY`
+- `EXPORT_HTTP_CONCURRENCY`
+- `EXPORT_ASR_CONCURRENCY`
+- `EXPORT_OCR_CONCURRENCY`
+- `EXPORT_LLM_CONCURRENCY`
+- `EXPORT_EMBEDDINGS_CONCURRENCY`
+- `EXPORT_FS_CONCURRENCY`
+- `EXPORT_FAIL_FAST`
 
-Resolución de Python ASR (`apps/api/src/services/asrRuntime.ts`):
+Opcionales AutoGen/OCR:
 
-1. `ASR_PYTHON_PATH`
-2. `./.venv-asr/bin/python` (Unix) o `./.venv-asr/Scripts/python.exe` (Windows)
-3. fallback: `python3` (Unix) / `python` (Windows)
+- `AUTO_GEN_ENABLED`
+- `AUTO_GEN_MODEL_TITLE`
+- `AUTO_GEN_MODEL_DESCRIPTION`
+- `AUTO_GEN_MODEL_THUMBNAIL`
+- `AUTO_GEN_MODEL_ORCHESTRATOR`
+- `AUTO_GEN_REASONING_EFFORT`
+- `AUTO_GEN_REASONING_EFFORT_ORCHESTRATOR`
+- `AUTO_GEN_TIMEOUT_SEC`
+- `AUTO_GEN_TIMEOUT_ORCHESTRATOR_SEC`
+- `THUMB_OCR_ENABLED`
+- `THUMB_OCR_LANGS`
+- `THUMB_VISION_DOWNSCALE_WIDTH`
 
-## 5) Flujos críticos
+Requisitos runtime externos:
 
-### 5.1 Analyze flow
+- Node.js `>=20`
+- pnpm `10.x`
+- Python `3.10+` para ASR local
+- `ffmpeg` en `PATH`
 
-UI (`apps/web/src/App.tsx`) hace `POST /api/analyze`.
+## 5) Flujo del sistema
 
-API (`apps/api/src/server.ts`):
+### 5.1 Analyze
 
-- valida body (`sourceInput`, `timeframe: 1m|6m|1y`)
-- llama `analyzeChannel` (`apps/api/src/services/youtubeService.ts`)
-- devuelve `AnalyzeResult` (canal, warnings, lista de videos)
+1. UI en `apps/web/src/pages/AnalyzePage.tsx` llama `POST /api/analyze`.
+2. API valida body en `apps/api/src/server.ts`.
+3. Resolución de canal/videos en `apps/api/src/services/youtubeService.ts`.
+4. Respuesta: `AnalyzeResult` (`apps/api/src/types.ts`).
 
-Notas:
+### 5.2 Export async + progreso SSE
 
-- Soporta input: `UC...`, `@handle`, `/user/...`, `/c/...`, URL de canal, o handle suelto.
-- Usa fallback de resolución por HTML + búsqueda API si no resuelve directo.
+1. UI llama `POST /api/export/jobs`.
+2. UI abre `EventSource('/api/export/jobs/:jobId/events')`.
+3. Estado modal se reduce en `apps/web/src/exportJobState.ts`.
+4. API crea y ejecuta job en `apps/api/src/services/exportJobService.ts`.
+5. Trabajo real de export en `apps/api/src/services/exportService.ts`.
 
-### 5.2 Export flow asíncrono con SSE
-
-UI (`apps/web/src/App.tsx`) hace:
-
-1. `POST /api/export/jobs`
-2. abre `EventSource('/api/export/jobs/:jobId/events')`
-3. reduce estado en `apps/web/src/exportJobState.ts`
-
-API (`apps/api/src/server.ts` + `apps/api/src/services/exportJobService.ts`):
-
-1. crea job (`queued` -> `running`)
-2. ejecuta `exportSelectedVideos` (`apps/api/src/services/exportService.ts`)
-3. emite eventos SSE y guarda historial para replay
-4. finaliza con `job_done` o `job_failed`
-
-Eventos SSE emitidos:
+Eventos SSE soportados:
 
 - `job_started`
 - `video_progress`
@@ -155,13 +155,7 @@ Eventos SSE emitidos:
 - `job_done`
 - `job_failed`
 
-Correlación runtime:
-
-- warnings técnicos pueden incluir `stepId`:
-  - `ERR <scope>/<action> stepId=<id> (see logs/job_<jobId>.errors.jsonl)`
-- esto permite unir SSE con logs persistentes por job.
-
-Stages por video:
+Stages de video:
 
 - `queue`
 - `downloading_audio`
@@ -172,92 +166,49 @@ Stages por video:
 - `warning`
 - `failed`
 
-Concurrencia configurable por ENV (scheduler interno, `apps/api/src/services/taskScheduler.ts`):
+### 5.3 Transcript pipeline
 
-- `EXPORT_VIDEO_CONCURRENCY` (default `3`): videos simultáneos.
-- `EXPORT_HTTP_CONCURRENCY` (default `6`): descargas/API HTTP (thumbnail/captions).
-- `EXPORT_ASR_CONCURRENCY` (default `LOCAL_ASR_MAX_CONCURRENCY`, usualmente `1`): tareas ASR.
-- `EXPORT_OCR_CONCURRENCY` (default `2`): OCR de thumbnails.
-- `EXPORT_LLM_CONCURRENCY` (default `2`): tareas AutoGen/LLM.
-- `EXPORT_EMBEDDINGS_CONCURRENCY` (default `2`): embeddings.
-- `EXPORT_FS_CONCURRENCY` (default `6`): escrituras/operaciones filesystem.
-- `EXPORT_FAIL_FAST` (default `false`): aborta el job en el primer error recuperable.
+Orquestador: `apps/api/src/services/transcriptPipeline.ts`
 
-Política de stage SSE con tareas simultáneas:
-
-- strategy `last-change-wins`: cuando transcript y thumbnail corren al mismo tiempo, el stage visible sigue el último cambio relevante emitido por backend.
-- `transcribing` solo se emite cuando hay fetch real de transcript (captions/ASR), no en cache hit completo.
-
-### 5.3 Transcript pipeline (captions + fallback local ASR)
-
-Orquestación: `apps/api/src/services/transcriptPipeline.ts`
+Orden:
 
 1. intenta captions (`apps/api/src/services/transcriptService.ts`)
-2. si faltan/fallan y ASR local habilitado -> llama ASR (`apps/api/src/services/localAsrService.ts`)
-3. si ASR también falla -> no rompe export; transcript queda `""` y se agrega warning
+2. fallback ASR local si aplica (`apps/api/src/services/localAsrService.ts`)
+3. si falla todo, export sigue; transcript queda vacío con warning
 
-Detalles útiles:
+Worker ASR:
 
-- `transcriptService.ts` tiene timeout, retry corto y cache in-memory.
-- `localAsrService.ts` usa worker Python persistente (`apps/api/scripts/asr_worker.py`) con cola y reintento al crash.
-- si falla health-check de `faster_whisper`, desactiva ASR en runtime y sigue en modo captions-only.
+- proceso Python persistente (`apps/api/scripts/asr_worker.py`)
+- eventos internos: `downloading_audio`, `transcribing`
+- usa `yt-dlp` + `faster-whisper`
 
-### 5.4 Derived Features Agents (deterministic + AutoGen opcional)
+## 6) Formato de export (versión + schema)
 
-Orquestación en `apps/api/src/services/exportService.ts`:
+- Versión actual en runtime: `EXPORT_VERSION = "1.1"` (`apps/api/src/services/exportService.ts`).
+- Archivo principal: `exports/<canal>/channel.json`.
+- Manifest: `exports/<canal>/manifest.json`.
+- Contratos completos: ver `docs/DATA_CONTRACTS.md`.
 
-1. termina transcript por video
-2. escribe `raw/transcripts/<videoId>.jsonl`
-3. genera/mergea `derived/video_features/<videoId>.json` via:
-   - `apps/api/src/derived/titleFeaturesAgent.ts`
-   - `apps/api/src/derived/descriptionFeaturesAgent.ts`
-   - `apps/api/src/derived/transcriptFeaturesAgent.ts`
-   - `apps/api/src/derived/thumbnailFeaturesAgent.ts`
-4. ejecuta Performance Normalization Agent determinista:
-   - `apps/api/src/derived/performanceNormalization.ts`
-   - mergea `performance` por video en `derived/video_features/<videoId>.json`
-   - escribe baseline de canal en `derived/channel_models.json`
+## 7) Notas Windows
 
-Detalles:
+- Python del venv local: `.venv-asr\\Scripts\\python.exe`.
+- Activación manual: `.\\.venv-asr\\Scripts\\Activate.ps1`.
+- Si usas override: setear `ASR_PYTHON_PATH=C:\\ruta\\ytai-analizer\\.venv-asr\\Scripts\\python.exe`.
+- `ffmpeg.exe` debe estar en `PATH`.
 
-- features deterministas siempre activas (`apps/api/src/derived/titleDeterministic.ts`)
-- description determinista (`apps/api/src/derived/descriptionDeterministic.ts`) sin llamar LLM
-- transcript determinista (`apps/api/src/derived/transcriptDeterministic.ts`) y similitud título-transcript con embeddings opcionales (`text-embedding-3-small`)
-- AutoGen worker opcional (`apps/api/src/services/autogenRuntime.ts` + `apps/api/scripts/autogen_worker.py`)
-- task AutoGen para descripción: `description_classifier_v1`
-- task AutoGen para transcript: `transcript_classifier_v1`
-- task AutoGen para thumbnail: `thumbnail_classifier_v1` (multimodal texto + imagen)
-- Performance Normalization no usa LLM/AutoGen/red: calcula proxies, residual y percentil de forma determinista
-- assets versionados para transcript:
-  - `apps/api/src/derived/assets/transcript-stopwords.json`
-  - `apps/api/src/derived/assets/transcript-sentiment-lexicon.json`
-  - `apps/api/src/derived/assets/transcript-emotions.json`
-- fallos de LLM/embeddings no rompen el export; quedan como warning y `llm: null`
+## 8) Troubleshooting operativo
 
-DAG por video (validado por `apps/api/src/services/exportPlan.ts`):
+- `Missing YOUTUBE_API_KEY`: revisar `apps/api/.env`.
+- `ffmpeg not found`: instalar ffmpeg y validar `ffmpeg --version`.
+- `faster_whisper import failed`: correr `pnpm asr:setup` y `pnpm asr:check`.
+- SSE se corta en dev:
+  - verificar API en `http://localhost:3001/health`
+  - verificar proxy en `apps/web/vite.config.ts`
 
-- `cache_check` primero.
-- en paralelo si aplica:
-  - `transcript_fetch` (captions + fallback ASR),
-  - `thumbnail_download`.
-- dependencias obligatorias:
-  - `transcript -> transcript_derived`,
-  - `thumbnail_download -> thumbnail_derived`,
-  - `transcript -> write_raw_transcript`.
-- estrategia elegida para título:
-  - `title_derived` usa `waitForTranscript=true` (no rama parcial sin coverage).
-- `description_derived` puede correr sin esperar transcript/thumbnail.
-- si el validador de plan falla (deps faltantes/ciclos), el video cae a modo secuencial con warning.
+## 9) Dónde ampliar contexto
 
-### 5.5 Export Cache Persistente (filesystem)
-
-`apps/api/src/services/exportCacheService.ts` mantiene un índice por canal en:
-
-- `exports/<channel_sanitizado>/.cache/index.json`
-
-Objetivo del cache:
-
-- reutilizar artifacts por video ya existentes (`thumbnail`, `raw/transcripts`, `derived/video_features`)
+- Contratos HTTP/SSE y schemas de archivos: `docs/DATA_CONTRACTS.md`
+- Mapa de módulos y responsabilidades: `docs/REPO_MAP.md`
 - evitar recomputar trabajo pesado por video (captions/ASR, OCR, embeddings, AutoGen)
 - soportar reuse parcial por subset de videos
 
@@ -347,6 +298,47 @@ Comportamiento:
 - al iniciar export, inicializa todos los videos en `queue`
 - cada evento SSE muta estado incremental
 - al evento terminal (`job_done`/`job_failed`) cierra stream y libera estado global de export
+
+## 8.1 Projects Dashboard (nuevo)
+
+Objetivo:
+
+- agregar exploración de exports históricos sin tocar el flujo de analyze/export actual.
+- navegación principal:
+  - `/` -> `Analyze`
+  - `/projects` -> lista de proyectos
+  - `/projects/:projectId` -> detalle de proyecto
+
+Frontend (`apps/web`):
+
+- router con `react-router-dom` en `src/main.tsx` + `src/App.tsx`.
+- páginas:
+  - `src/pages/AnalyzePage.tsx` (misma lógica SSE/reducer, UI Tailwind)
+  - `src/pages/ProjectsList.tsx`
+  - `src/pages/ProjectDetail.tsx`
+- Tailwind configurado en:
+  - `tailwind.config.cjs`
+  - `postcss.config.cjs`
+  - `src/index.css` (`@tailwind base/components/utilities`)
+
+Backend (`apps/api`):
+
+- servicio read-only: `src/services/projectsService.ts`
+- endpoints:
+  - `GET /projects`
+  - `GET /projects/:projectId`
+  - `GET /projects/:projectId/videos`
+  - `GET /projects/:projectId/videos/:videoId`
+  - `GET /projects/:projectId/artifacts/playbook`
+  - `GET /projects/:projectId/artifacts/templates`
+  - `GET /projects/:projectId/artifacts/channel_models`
+  - `GET /projects/:projectId/thumb/:videoId`
+
+Seguridad:
+
+- `projectId` y `videoId` se validan como segmentos simples (sin `..`, `/`, `\\`, paths absolutos).
+- validación `ensureInsideRoot(...)` sobre root `exports/`.
+- endpoints nuevos son solo lectura.
 
 ## 9) Runbook rápido para contribuir
 
