@@ -469,6 +469,14 @@ describe("export jobs + SSE progress", () => {
         llm: unknown;
         warnings: string[];
       };
+      transcriptFeatures: {
+        deterministic: {
+          title_keyword_coverage: number;
+          promise_delivery_30s_score: number | null;
+        };
+        llm: unknown;
+        warnings: string[];
+      };
     };
     expect(derivedVideoOne.schemaVersion).toBe("derived.video_features.v1");
     expect(derivedVideoOne.videoId).toBe("video0000011");
@@ -478,6 +486,9 @@ describe("export jobs + SSE progress", () => {
     expect(derivedVideoOne.descriptionFeatures.deterministic.desc_len_chars).toBeGreaterThan(0);
     expect(typeof derivedVideoOne.descriptionFeatures.deterministic.url_count).toBe("number");
     expect(Array.isArray(derivedVideoOne.descriptionFeatures.warnings)).toBe(true);
+    expect(typeof derivedVideoOne.transcriptFeatures.deterministic.title_keyword_coverage).toBe("number");
+    expect(derivedVideoOne.transcriptFeatures.deterministic.promise_delivery_30s_score).toBeNull();
+    expect(Array.isArray(derivedVideoOne.transcriptFeatures.warnings)).toBe(true);
   });
 
   it("writes transcript artifact with meta only when transcript is missing", async () => {

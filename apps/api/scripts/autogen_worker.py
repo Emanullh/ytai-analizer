@@ -111,6 +111,58 @@ RULES:
 Now wait for the JSON input and respond with ONLY the JSON output.
 """
 
+TRANSCRIPT_SYSTEM_PROMPT = """TranscriptClassifierAgent v1
+
+You are a strict classification agent. You must output ONLY valid JSON (no markdown, no prose).
+Task: classify story arc, sponsor segments, and CTA segments using ONLY sampled transcript segments.
+
+INPUT:
+You will receive a JSON payload with:
+- videoId (string)
+- title (string)
+- languageHint ("auto"|"en"|"es")
+- segmentsSample (array of {segmentIndex,startSec,endSec,text})
+- candidateSponsorSegments (array of {segmentIndex,startSec,endSec,text})
+- candidateCTASegments (array of {segmentIndex,startSec,endSec,text})
+
+OUTPUT (MUST match this schema exactly):
+{
+  "schemaVersion": "derived.transcript_llm.v1",
+  "story_arc": {
+    "label": "problem-solution|listicle|timeline|explainer|debate|investigation|tutorial|other",
+    "confidence": 0.0,
+    "evidenceSegments": [{"segmentIndex": 0, "snippet": "string"}]
+  },
+  "sponsor_segments": [
+    {
+      "startSec": 0.0,
+      "endSec": 0.0,
+      "brand": "string",
+      "confidence": 0.0,
+      "evidenceSegments": [{"segmentIndex": 0, "snippet": "string"}]
+    }
+  ],
+  "cta_segments": [
+    {
+      "type": "subscribe|like|comment|link|follow|none",
+      "confidence": 0.0,
+      "evidenceSegments": [{"segmentIndex": 0, "snippet": "string"}]
+    }
+  ]
+}
+
+RULES:
+1) Use ONLY labels from the enums above.
+2) evidenceSegments snippets MUST be exact substrings from segmentsSample[*].text.
+3) brand MUST appear in at least one sponsor evidence snippet.
+4) Do not invent brands or unsupported claims.
+5) If no sponsor is detected, return sponsor_segments as [].
+6) If no CTA is clear, return one cta_segments item with type="none" and low confidence.
+7) Return strict JSON only.
+
+Now wait for the JSON input and respond with ONLY the JSON output.
+"""
+
 PROMISE_LABELS = {
     "howto/tutorial",
     "review",
@@ -148,6 +200,17 @@ LINK_PURPOSE_LABELS = {
     "other",
 }
 PRIMARY_CTA_LABELS = {"subscribe", "like", "comment", "link", "follow", "none"}
+STORY_ARC_LABELS = {
+    "problem-solution",
+    "listicle",
+    "timeline",
+    "explainer",
+    "debate",
+    "investigation",
+    "tutorial",
+    "other",
+}
+TRANSCRIPT_CTA_LABELS = {"subscribe", "like", "comment", "link", "follow", "none"}
 
 
 def log(message: str) -> None:
@@ -319,6 +382,105 @@ def coerce_description_result(raw: Any, description: str) -> Dict[str, Any]:
     }
 
 
+def normalize_transcript_evidence(raw: Any, sample_segments: Dict[int, str]) -> List[Dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+
+    normalized: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+
+        segment_index = item.get("segmentIndex")
+        snippet = item.get("snippet")
+        if not isinstance(segment_index, int):
+            continue
+        if not isinstance(snippet, str) or not snippet.strip():
+            continue
+
+        segment_text = sample_segments.get(segment_index, "")
+        if not segment_text or snippet not in segment_text:
+            continue
+
+        normalized.append({"segmentIndex": segment_index, "snippet": snippet})
+
+    return normalized
+
+
+def coerce_transcript_result(raw: Any, sample_segments: Dict[int, str]) -> Dict[str, Any]:
+    source = raw if isinstance(raw, dict) else {}
+
+    story_arc = None
+    story_arc_raw = source.get("story_arc")
+    if isinstance(story_arc_raw, dict):
+        story_label = story_arc_raw.get("label")
+        if isinstance(story_label, str) and story_label in STORY_ARC_LABELS:
+            story_arc = {
+                "label": story_label,
+                "confidence": clamp_01(story_arc_raw.get("confidence", 0.0)),
+                "evidenceSegments": normalize_transcript_evidence(
+                    story_arc_raw.get("evidenceSegments", []), sample_segments
+                ),
+            }
+
+    sponsor_segments: List[Dict[str, Any]] = []
+    if isinstance(source.get("sponsor_segments"), list):
+        for item in source.get("sponsor_segments", []):
+            if not isinstance(item, dict):
+                continue
+
+            brand = item.get("brand")
+            if not isinstance(brand, str) or not brand.strip():
+                continue
+
+            evidence_segments = normalize_transcript_evidence(item.get("evidenceSegments", []), sample_segments)
+            if not evidence_segments:
+                continue
+
+            brand_lower = brand.lower().strip()
+            if not any(brand_lower in evidence.get("snippet", "").lower() for evidence in evidence_segments):
+                continue
+
+            start_sec = item.get("startSec")
+            end_sec = item.get("endSec")
+            sponsor_segments.append(
+                {
+                    "startSec": float(start_sec) if isinstance(start_sec, (int, float)) else None,
+                    "endSec": float(end_sec) if isinstance(end_sec, (int, float)) else None,
+                    "brand": brand.strip(),
+                    "confidence": clamp_01(item.get("confidence", 0.0)),
+                    "evidenceSegments": evidence_segments,
+                }
+            )
+
+    cta_segments: List[Dict[str, Any]] = []
+    if isinstance(source.get("cta_segments"), list):
+        for item in source.get("cta_segments", []):
+            if not isinstance(item, dict):
+                continue
+
+            cta_type = item.get("type")
+            if not isinstance(cta_type, str) or cta_type not in TRANSCRIPT_CTA_LABELS:
+                continue
+
+            cta_segments.append(
+                {
+                    "type": cta_type,
+                    "confidence": clamp_01(item.get("confidence", 0.0)),
+                    "evidenceSegments": normalize_transcript_evidence(
+                        item.get("evidenceSegments", []), sample_segments
+                    ),
+                }
+            )
+
+    return {
+        "schemaVersion": "derived.transcript_llm.v1",
+        "story_arc": story_arc,
+        "sponsor_segments": sponsor_segments,
+        "cta_segments": cta_segments,
+    }
+
+
 def extract_text_from_agent_result(run_result: Any) -> str:
     if isinstance(run_result, str):
         return run_result
@@ -469,12 +631,72 @@ async def classify_description(request: Dict[str, Any]) -> Dict[str, Any]:
     return coerce_description_result(parsed, description)
 
 
+async def classify_transcript(request: Dict[str, Any]) -> Dict[str, Any]:
+    payload = request.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("missing payload")
+
+    segments_sample = payload.get("segmentsSample")
+    if not isinstance(segments_sample, list) or not segments_sample:
+        raise ValueError("payload.segmentsSample is required")
+
+    model_client = build_model_client(request, "AUTO_GEN_MODEL_DESCRIPTION")
+    agent = AssistantAgent(
+        name="TranscriptClassifierAgent",
+        model_client=model_client,
+        system_message=TRANSCRIPT_SYSTEM_PROMPT,
+    )
+
+    sample_segments: Dict[int, str] = {}
+    for item in segments_sample:
+        if not isinstance(item, dict):
+            continue
+        segment_index = item.get("segmentIndex")
+        text = item.get("text")
+        if isinstance(segment_index, int) and isinstance(text, str) and text.strip():
+            sample_segments[segment_index] = text
+
+    user_prompt = json.dumps(
+        {
+            "task": "transcript_classifier_v1",
+            "videoId": str(payload.get("videoId", "")).strip(),
+            "title": str(payload.get("title", "")).strip(),
+            "languageHint": str(payload.get("languageHint", "auto")).strip() or "auto",
+            "segmentsSample": segments_sample,
+            "candidateSponsorSegments": payload.get("candidateSponsorSegments", []),
+            "candidateCTASegments": payload.get("candidateCTASegments", []),
+            "requiredOutput": {
+                "schemaVersion": "derived.transcript_llm.v1",
+                "story_arc": "object(label,confidence,evidenceSegments[]) or null",
+                "sponsor_segments": "array(startSec,endSec,brand,confidence,evidenceSegments[])",
+                "cta_segments": "array(type,confidence,evidenceSegments[])",
+            },
+        },
+        ensure_ascii=False,
+    )
+
+    try:
+        run_result = await agent.run(task=user_prompt)
+        content = extract_text_from_agent_result(run_result)
+        parsed = parse_agent_json(content)
+    finally:
+        close_method = getattr(model_client, "close", None)
+        if callable(close_method):
+            maybe_coroutine = close_method()
+            if asyncio.iscoroutine(maybe_coroutine):
+                await maybe_coroutine
+
+    return coerce_transcript_result(parsed, sample_segments)
+
+
 async def classify_request(request: Dict[str, Any]) -> Dict[str, Any]:
     task = request.get("task")
     if task == "title_classifier_v1":
         return await classify_title(request)
     if task == "description_classifier_v1":
         return await classify_description(request)
+    if task == "transcript_classifier_v1":
+        return await classify_transcript(request)
     raise ValueError(f"unsupported task '{task}'")
 
 

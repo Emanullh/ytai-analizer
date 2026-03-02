@@ -21,6 +21,7 @@ import type { TranscriptSegment } from "./transcriptModels.js";
 import { resolveTimeframeRange } from "../utils/timeframe.js";
 import { persistTitleFeaturesArtifact } from "../derived/titleFeaturesAgent.js";
 import { persistDescriptionFeaturesArtifact } from "../derived/descriptionFeaturesAgent.js";
+import { persistTranscriptFeaturesArtifact } from "../derived/transcriptFeaturesAgent.js";
 
 export type ExportVideoStage =
   | "queue"
@@ -774,7 +775,39 @@ export async function exportSelectedVideos(
         callbacks.onVideoProgress?.({
           videoId: video.videoId,
           stage: "writing_json",
-          percent: 95
+          percent: 90
+        });
+
+        try {
+          const derived = await persistTranscriptFeaturesArtifact({
+            exportsRoot,
+            channelFolderPath,
+            videoId: video.videoId,
+            title: titleForFeatures,
+            transcript: sanitizedTranscriptResult.transcript,
+            transcriptArtifactPath: transcriptAbsolutePath,
+            durationSec: enrichedVideo?.durationSec,
+            publishedAt: enrichedVideo?.publishedAt ?? video.publishedAt,
+            nowISO: exportedAt,
+            languageHint: toLanguageHint(resolveTranscriptLanguage(transcriptResult))
+          });
+          derivedVideoFeaturesArtifactPath = derived.artifactAbsolutePath;
+
+          for (const warning of derived.warnings) {
+            videoWarnings.push(warning);
+            addWarning(warning, video.videoId);
+          }
+        } catch (error) {
+          const warning = `Transcript features generation failed for ${video.videoId}: ${
+            error instanceof Error ? error.message : "unknown error"
+          }`;
+          videoWarnings.push(warning);
+          addWarning(warning, video.videoId);
+        }
+        callbacks.onVideoProgress?.({
+          videoId: video.videoId,
+          stage: "writing_json",
+          percent: 97
         });
 
         const transcriptRef: RawVideoRecordV1["transcriptRef"] = {

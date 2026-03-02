@@ -95,7 +95,7 @@ Fuente de verdad:
 
 ### Opcionales AutoGen / Derived Features
 
-- `OPENAI_API_KEY` (OpenAI API para embeddings + clasificación title/description)
+- `OPENAI_API_KEY` (OpenAI API para embeddings + clasificación title/description/transcript)
 - `AUTO_GEN_ENABLED` (default `true`)
 - `AUTO_GEN_MODEL_TITLE` (default `gpt-5.2`)
 - `AUTO_GEN_MODEL_DESCRIPTION` (default `gpt-5.2`)
@@ -183,14 +183,20 @@ Orquestación en `apps/api/src/services/exportService.ts`:
 3. genera/mergea `derived/video_features/<videoId>.json` via:
    - `apps/api/src/derived/titleFeaturesAgent.ts`
    - `apps/api/src/derived/descriptionFeaturesAgent.ts`
+   - `apps/api/src/derived/transcriptFeaturesAgent.ts`
 
 Detalles:
 
 - features deterministas siempre activas (`apps/api/src/derived/titleDeterministic.ts`)
 - description determinista (`apps/api/src/derived/descriptionDeterministic.ts`) sin llamar LLM
-- embeddings (`text-embedding-3-small`) opcionales si hay `OPENAI_API_KEY`
+- transcript determinista (`apps/api/src/derived/transcriptDeterministic.ts`) con embeddings opcionales (`text-embedding-3-large`)
 - AutoGen worker opcional (`apps/api/src/services/autogenRuntime.ts` + `apps/api/scripts/autogen_worker.py`)
 - task AutoGen para descripción: `description_classifier_v1`
+- task AutoGen para transcript: `transcript_classifier_v1`
+- assets versionados para transcript:
+  - `apps/api/src/derived/assets/transcript-stopwords.json`
+  - `apps/api/src/derived/assets/transcript-sentiment-lexicon.json`
+  - `apps/api/src/derived/assets/transcript-emotions.json`
 - fallos de LLM/embeddings no rompen el export; quedan como warning y `llm: null`
 
 ## 6) Archivos generados y side effects

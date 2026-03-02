@@ -31,7 +31,11 @@
       "worker": "apps/api/scripts/autogen_worker.py",
       "requirements": "apps/api/scripts/requirements-autogen.txt",
       "runtime": "apps/api/src/services/autogenRuntime.ts",
-      "tasks": ["title_classifier_v1", "description_classifier_v1"]
+      "tasks": [
+        "title_classifier_v1",
+        "description_classifier_v1",
+        "transcript_classifier_v1"
+      ]
     }
   },
   "flows": [
@@ -143,7 +147,15 @@
         "titleFeatures.llm",
         "descriptionFeatures.deterministic",
         "descriptionFeatures.llm",
-        "descriptionFeatures.warnings"
+        "descriptionFeatures.warnings",
+        "transcriptFeatures.deterministic",
+        "transcriptFeatures.llm",
+        "transcriptFeatures.warnings"
+      ],
+      "assets": [
+        "apps/api/src/derived/assets/transcript-stopwords.json",
+        "apps/api/src/derived/assets/transcript-sentiment-lexicon.json",
+        "apps/api/src/derived/assets/transcript-emotions.json"
       ]
     },
     "sseEvents": [

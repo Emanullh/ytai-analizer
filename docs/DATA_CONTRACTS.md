@@ -488,6 +488,37 @@ Formato mínimo estable:
     },
     "llm": null,
     "warnings": []
+  },
+  "transcriptFeatures": {
+    "deterministic": {
+      "hook_keyword_hit_time_sec": 12,
+      "hook_keyword_hit_evidence": {
+        "matchedToken": "tutorial",
+        "segmentIndex": 3,
+        "snippet": "this tutorial starts with"
+      },
+      "title_keyword_coverage": 0.66,
+      "title_keyword_early_coverage_30s": 0.33,
+      "promise_delivery_30s_score": null,
+      "wpm_overall": 137.4,
+      "wpm_0_30": 150,
+      "wpm_30_120": 132.2,
+      "wpm_last_30": 145.1,
+      "wpm_variance": 58.15,
+      "step_markers_count": 4,
+      "list_markers_count": 2,
+      "contrast_markers_count": 3,
+      "story_markers_count": 5,
+      "sentiment_mean": 0.12,
+      "sentiment_std": 0.44,
+      "sentiment_trend": -0.003,
+      "emotion_peaks": [
+        { "emotion": "joy", "segmentIndex": 5, "snippet": "amazing result", "score": 2 }
+      ],
+      "topic_shift_count": null
+    },
+    "llm": null,
+    "warnings": []
   }
 }
 ```
@@ -497,6 +528,7 @@ Notas:
 - `deterministic` se calcula siempre (sin LLM).
 - `llm` puede ser `null` si `AUTO_GEN_ENABLED=false`, falta `OPENAI_API_KEY` o falla el worker.
 - `descriptionFeatures.llm` se calcula con task AutoGen `description_classifier_v1`.
+- `transcriptFeatures.llm` se calcula con task AutoGen `transcript_classifier_v1` sobre `segmentsSample` (no sobre transcript completo).
 - El archivo se genera durante el flujo normal de export (`POST /export` y `/export/jobs`) sin pasos extra en UI.
 - Si no hay timestamps de transcript, `title_keyword_early_coverage_30s` usa fallback por prefijo de caracteres y lo documenta en `title_keyword_audit`.
 

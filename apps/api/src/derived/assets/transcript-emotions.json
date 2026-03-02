@@ -1,0 +1,17 @@
+{
+  "joy": [
+    "happy", "joy", "excited", "amazing", "love", "great", "feliz", "alegria", "alegría", "emocionado", "increible", "increíble"
+  ],
+  "sadness": [
+    "sad", "upset", "depressed", "cry", "loss", "triste", "deprimido", "llorar", "perdida", "pérdida"
+  ],
+  "anger": [
+    "angry", "mad", "furious", "hate", "rage", "enojado", "enfadado", "furioso", "odio", "rabia"
+  ],
+  "fear": [
+    "fear", "afraid", "scared", "risk", "danger", "miedo", "temor", "asustado", "riesgo", "peligro"
+  ],
+  "surprise": [
+    "surprised", "shocking", "unexpected", "suddenly", "wow", "sorpresa", "sorprendente", "inesperado", "de repente", "wow"
+  ]
+}

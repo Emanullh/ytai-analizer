@@ -41,7 +41,37 @@ interface AutoGenDescriptionTaskRequest extends AutoGenBaseTaskRequest {
   };
 }
 
-export type AutoGenTaskRequest = AutoGenTitleTaskRequest | AutoGenDescriptionTaskRequest;
+interface AutoGenTranscriptTaskRequest extends AutoGenBaseTaskRequest {
+  task: "transcript_classifier_v1";
+  payload: {
+    videoId: string;
+    title: string;
+    languageHint?: "auto" | "en" | "es";
+    segmentsSample: Array<{
+      segmentIndex: number;
+      startSec: number | null;
+      endSec: number | null;
+      text: string;
+    }>;
+    candidateSponsorSegments: Array<{
+      segmentIndex: number;
+      startSec: number | null;
+      endSec: number | null;
+      text: string;
+    }>;
+    candidateCTASegments: Array<{
+      segmentIndex: number;
+      startSec: number | null;
+      endSec: number | null;
+      text: string;
+    }>;
+  };
+}
+
+export type AutoGenTaskRequest =
+  | AutoGenTitleTaskRequest
+  | AutoGenDescriptionTaskRequest
+  | AutoGenTranscriptTaskRequest;
 
 interface AutoGenInFlightTask {
   id: string;
@@ -83,10 +113,25 @@ function resolveAutoGenModel(request: AutoGenTaskRequest): string {
   if (request.model) {
     return request.model;
   }
-  return request.task === "description_classifier_v1" ? env.autoGenModelDescription : env.autoGenModelTitle;
+  return request.task === "title_classifier_v1" ? env.autoGenModelTitle : env.autoGenModelDescription;
 }
 
 function normalizeAutoGenPayload(request: AutoGenTaskRequest): AutoGenTaskRequest["payload"] {
+  if (request.task === "transcript_classifier_v1") {
+    return {
+      videoId: request.payload.videoId,
+      title: request.payload.title,
+      languageHint: request.payload.languageHint ?? "auto",
+      segmentsSample: Array.isArray(request.payload.segmentsSample) ? request.payload.segmentsSample : [],
+      candidateSponsorSegments: Array.isArray(request.payload.candidateSponsorSegments)
+        ? request.payload.candidateSponsorSegments
+        : [],
+      candidateCTASegments: Array.isArray(request.payload.candidateCTASegments)
+        ? request.payload.candidateCTASegments
+        : []
+    };
+  }
+
   if (request.task === "description_classifier_v1") {
     return {
       videoId: request.payload.videoId,

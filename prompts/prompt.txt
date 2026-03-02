@@ -1,133 +1,165 @@
-Tarea: Implementar Description Features Agent (determinista + LLM via AutoGen) integrado al flujo actual de export (sin pasos extra en frontend)
+Tarea: Implementar Transcript Features Agent (determinista + LLM via AutoGen) integrado al flujo actual de export (sin pasos extra fuera del frontend)
 
-Contexto:
-- Ya existe AutoGen runtime del primer agente:
-  - apps/api/scripts/autogen_worker.py
-  - apps/api/src/services/autogenRuntime.ts
-  - env vars AUTO_GEN_ENABLED, AUTO_GEN_MODEL_*, etc.
-- Export flow asíncrono con SSE:
-  - exportJobService -> exportService
-- Artefactos derivados:
-  - exports/<channel>/derived/video_features/<videoId>.json (ya creado por Title agent)
+Contexto (repo):
+- Export flow asíncrono con SSE: exportJobService -> exportService
+- Transcript pipeline ya existe (captions + fallback ASR) y export ya guarda transcript string + transcriptStatus.
+- Fase 1 ya generó (o está generando) raw/transcripts/<videoId>.jsonl con meta + segments (si existe).
+- AutoGen runtime ya existe (del primer agente): apps/api/src/services/autogenRuntime.ts y autogen_worker.py.
+- Derived por video existe: exports/<channel>/derived/video_features/<videoId>.json (merge incremental por agentes previos).
 
 Objetivo:
-Agregar descripción (description) como fuente de features derivadas por video y persistir en el MISMO template de salida reusable.
+Calcular features de transcript con evidencia (segment indices/tiempos) para habilitar análisis posterior (hook/pacing/estructura/sponsor/CTAs) y guardarlas en el template reusable.
 
-Salida (template fijo, extendiendo sin romper lo existente):
-exports/<channel>/derived/video_features/<videoId>.json debe incluir además:
-{
-  "schemaVersion": "derived.video_features.v1",
-  "videoId": "...",
-  "computedAt": "ISO",
-  "titleFeatures": { ... },            // existente
-  "descriptionFeatures": {
-    "deterministic": { ... },
-    "llm": { ... },
-    "warnings": [...]
-  }
+Salida (template fijo):
+En exports/<channel>/derived/video_features/<videoId>.json agregar:
+"transcriptFeatures": {
+  "deterministic": { ... },
+  "llm": { ... | null },
+  "warnings": [...]
 }
-Regla: si ya existe el JSON por title agent, debe “mergearse” (leer->merge->write) sin perder campos.
+Sin romper titleFeatures/descriptionFeatures existentes (merge).
 
-IMPORTANTE: Qué se calcula SIN AutoGen (determinista) y NO debe ir al prompt LLM
-Implementar en TypeScript (Node) y NO llamar LLM para:
+IMPORTANTE: Qué se calcula SIN AutoGen (determinista) y NO debe ir al prompt del agente
+Implementar en TypeScript y NO llamar LLM para:
 
-A) Estructura:
-- desc_len_chars, desc_len_words
-- line_count
-- has_timestamps (regex: (\d{1,2}:)?\d{1,2}:\d{2})
-- url_count + urls[] extraídas (normalizadas)
-- domain_counts (top dominios)
-- hashtag_count (#\w+)
-- mentions_count (@\w+)
-- cta_count por reglas (diccionario ES/EN):
-  - subscribe/suscríbete/suscribete, like/me gusta, comment/comenta, link/enlace, follow/sígueme, newsletter, patreon, etc.
-- cta_in_first_200_chars (bool)
+A) Hook / entrega de promesa (medible):
+1) hook_keyword_hit_time_sec:
+   - tokens importantes del título (min len>=3, sin stopwords ES/EN)
+   - buscar primer segmento (por orden de tiempo) que contiene algún token
+   - si hay startSec: usar ese startSec; si no, set null + warning
+   - evidence:
+     - matchedToken
+     - segmentIndex i
+     - snippet (subcadena del segmento)
+2) title_keyword_coverage:
+   - % tokens importantes del título presentes en transcript completo
+   - evidence: {titleTokens[], hitTokens[]}
+3) title_keyword_early_coverage_30s:
+   - si hay timestamps, usar texto de segmentos con start<30
+   - si no hay timestamps, usar primer N chars (ej 800) como proxy + warning
+4) promise_delivery_30s_score (determinista con embeddings, NO AutoGen):
+   - cosine( embed(title), embed(text_first_30s) )
+   - usar OpenAI embeddings si OPENAI_API_KEY; modelo default text-embedding-3-large
+   - si no hay API key, set null + warning
 
-B) SEO / overlap:
-- title_desc_overlap_jaccard sobre tokens normalizados (min length >=2)
-- title_desc_overlap_tokens: {titleTokens:[], hitTokens:[]} como evidencia (audit)
+B) Pacing (sin video):
+- wpm_overall:
+  - si hay timestamps: totalWords / (durationSec/60) usando:
+    - preferir durationSec del metadata video (raw/videos.jsonl) si existe
+    - si no existe, usar lastSegmentEndSec si disponible
+    - si no, set null + warning
+- wpm_0_30, wpm_30_120, wpm_last_30:
+  - si hay timestamps y durationSec: calcular por ventanas
+  - si no hay timestamps: null + warning
+- wpm_variance:
+  - varianza por ventanas (0-30,30-120,rest) si disponibles
+- segment_length_stats:
+  - chars y words por segmento: median, p90 (si segments>0)
+- silence_gap_stats:
+  - si timestamps confiables: gaps entre endSec y next.startSec: mean, p90, max (clamp >=0)
 
-C) Flags de disclosure (reglas, no LLM):
-- has_sponsor_disclosure:
-  - patrones: "sponsor", "sponsored", "patrocinado", "patrocinio", "ad", "paid promotion"
-- has_affiliate_disclosure:
-  - patrones: "affiliate", "afiliado", "affiliate link", "enlace afiliado"
-- has_credits_sources:
-  - patrones: "sources", "fuentes", "references", "créditos", "credit", "further reading" + url_count>0
-Guardar evidence: matches con (charStart,charEnd,snippet).
+C) Estructura retórica por reglas + conteos (determinista):
+- step_markers_count: patrones ("step 1","paso 1","primero","luego","por último", etc.)
+- list_markers_count: ("top","x things","3 reasons","razones", etc.)
+- contrast_markers_count: ("but","however","sin embargo","aunque", etc.)
+- story_markers_count: ("when","then","al final","entonces", etc.)
+Guardar evidence como topMatches[] con {segmentIndex, match, snippet}.
 
-D) Readability (determinista):
-- readability:
-  - si texto parece ES: Fernández-Huerta o Szigriszt-Pazos (implementación aproximada aceptable)
-  - si EN: Flesch Reading Ease
-- Guardar {metric, score} y warning si language desconocido.
+D) Sentimiento / afecto (determinista, lexicon-based):
+- sentiment_mean, sentiment_std, sentiment_trend:
+  - usar un lexicon simple (EN+ES) versionado en repo (pequeño) y calcular score por segmento
+  - trend: slope de score vs tiempo (si timestamps); si no, vs index
+- emotion_peaks:
+  - usar wordlists pequeñas por emoción (joy/sadness/anger/fear/surprise)
+  - devolver top 3 picos con evidence: segmentIndex + snippet + score
+No LLM para sentimiento (evitar alucinación).
 
-E) Link list determinista:
-- urls[] con:
-  - url, domain, charStart, charEnd (span exacto en description)
-  - isShortener (bit.ly, t.co, youtu.be, etc.)
-No clasificar propósito con reglas (eso va al LLM).
+E) Topic shift count (opcional determinista con embeddings, NO AutoGen):
+- topic_shift_count:
+  - construir ventanas (ej cada 20s) si timestamps; si no, chunk por N palabras (ej 120)
+  - embed cada ventana con embeddings (text-embedding-3-large)
+  - contar saltos donde cosine_distance > threshold (ej 0.22) con evidencia (window indices)
+Si no hay OPENAI_API_KEY, set null + warning.
 
-Qué SÍ se calcula CON AutoGen (LLM) y debe ir al prompt del agente:
-- linkPurpose classification (cerrado) para cada URL detectada (o top N=10):
-  sponsor | affiliate | sources | social | merch | newsletter | community | other
-  Con:
-  - confidence 0..1
-  - evidence: referencia al span del URL (charStart/charEnd/snippet)
-- sponsorBrandMentions (si existen): lista de marcas mencionadas (closed? no; pero debe venir como strings) + evidence spans en description
-- primaryCTA (cerrado): subscribe|like|comment|link|follow|none + confidence + evidence
+Qué SÍ se calcula CON AutoGen (LLM) y debe ir al prompt del agente
+Solo lo “interpretativo” que queremos en taxonomías cerradas y con evidencia:
+
+1) story_arc (clasificación cerrada):
+   - problem-solution | listicle | timeline | explainer | debate | investigation | tutorial | other
+   Con:
+   - confidence 0..1
+   - evidenceSegments: [{segmentIndex, snippet}] (snippets exactos del input)
+
+2) sponsor_segments (extracción semiestructurada con evidencia):
+   - detectar si hay sponsor mid-roll y extraer:
+     - { startSec|null, endSec|null, brand, confidence, evidenceSegments:[{segmentIndex,snippet}] }
+   El LLM NO inventa marcas: brand debe aparecer literal en snippet.
+
+3) cta_segments (CTA detectada y tipificada, con evidencia):
+   - { type: subscribe|like|comment|link|follow|none, confidence, evidenceSegments:[...] }
+   Preferir evidence dentro de los primeros/últimos 60s si existe.
+
+IMPORTANTE: Para minimizar tokens y alucinación, el LLM NO recibe el transcript completo.
+Debes construir un payload reducido:
+- segmentsSample[]:
+  - primeros N segmentos (ej 20)
+  - + 5 segmentos del medio
+  - + últimos 10 segmentos
+  Cada texto truncado a 240 chars.
+- candidateSponsorSegments[] (determinista por regex “sponsor/brought to you by/patrocinado”):
+  segmentos detectados (si alguno)
+- candidateCTASegments[] (determinista por regex “subscribe/like/comment/follow”):
+  segmentos detectados (si alguno)
+Esto se pasa al LLM y el LLM solo confirma/clasifica/extrae con evidencia.
 
 Implementación requerida (apps/api):
-1) Crear módulo determinista:
-   - apps/api/src/derived/descriptionDeterministic.ts
-     export function computeDescriptionDeterministicFeatures({title, description}): {features, evidence, warnings}
-   Incluye helpers: tokenize, extractUrlsWithSpans, domainCounts, regex flags, readability.
-
-2) Crear agente:
-   - apps/api/src/derived/descriptionFeaturesAgent.ts
+1) Parsing de transcript artifacts:
+   - crear apps/api/src/derived/transcriptArtifacts.ts
+     - loadTranscriptJsonl(path) -> {meta, segments[]}
+     - fallback: si no existe raw/transcripts/<id>.jsonl, crear un artifact in-memory con 1 segmento {i:0,text:transcript,startSec:null,endSec:null} y warning.
+2) Determinista:
+   - apps/api/src/derived/transcriptDeterministic.ts
+     export function computeTranscriptDeterministicFeatures({title, transcriptArtifact, durationSec?, publishedAt?, nowISO?}): {features, warnings}
+   - incluir stopwords ES/EN en repo (pequeñas) para keywords del título
+   - incluir lexicon simple EN/ES y emotion wordlists (assets JSON)
+3) Agente:
+   - apps/api/src/derived/transcriptFeaturesAgent.ts
      - computeDeterministic(...)
-     - if AUTO_GEN_ENABLED && OPENAI_API_KEY: call autogenRuntime.request({task:"description_classifier_v1", payload:{videoId, title, description, urlsWithSpans, languageHint}})
-     - merge deterministic + llm
-     - return bundle + warnings
-
-3) Extender autogen_worker.py para soportar el nuevo task:
-   - task == "description_classifier_v1"
-   - usar SYSTEM PROMPT fijo (ver “PROMPT AUTOGEN — DescriptionClassifierAgent v1” al final)
-   - validar JSON parseable (no markdown)
-   Nota: NO re-hagas bootstrap, solo agrega handler.
-
-4) Integración export:
-   - En apps/api/src/services/exportService.ts
-     - tras obtener video details (title/description) y transcript (ya existe)
-     - invocar descriptionFeaturesAgent y persistir merged JSON en derived/video_features/<videoId>.json
+     - buildLLMPayloadSample(...)
+     - if AUTO_GEN_ENABLED && OPENAI_API_KEY: call autogenRuntime.request({task:"transcript_classifier_v1", payload})
+     - validate LLM output:
+       - evidenceSegments segmentIndex debe existir
+       - snippet debe ser substring del texto del segmento sample correspondiente
+       - brand debe aparecer en snippet; si no, descartar sponsor entry + warning
+     - merge into derived JSON and persist
+4) Extender autogen_worker.py:
+   - handler task == "transcript_classifier_v1"
+   - usar SYSTEM PROMPT fijo del bloque “PROMPT AUTOGEN — TranscriptClassifierAgent v1”
+5) Integración en exportService:
+   - en apps/api/src/services/exportService.ts, en el loop por video:
+     - tras obtener transcript (y/o tras escribir raw transcript jsonl), ejecutar transcriptFeaturesAgent
+     - persistir derived/video_features/<videoId>.json (merge)
    - SSE:
-     - NO agregar nuevo stage si no es necesario; reusa "writing_json" con percent incremental.
-     - Si agregas stage, actualiza apps/web/src/types.ts + reducer + tests.
-
-5) Persistencia:
-   - Asegurar carpeta exports/<channel>/derived/video_features/
-   - ensureInsideRoot para derived.
-   - Escritura atómica: write temp + rename.
-
+     - NO agregar nuevo stage (preferido). Usa "writing_json" con percent incremental o emite warning.
 6) Tests:
-   - apps/api/tests/descriptionDeterministic.test.ts:
-     - timestamps, urls, domain_counts, hashtags, mentions
-     - disclosure flags + evidence spans
-     - title_desc_overlap_jaccard
-   - apps/api/tests/descriptionFeaturesAgent.test.ts:
-     - con AutoGen deshabilitado: llm=null + warnings, deterministic ok
-     - con autogenRuntime mock: verifica merge de llm
-   - Export integration test:
-     - derived/video_features/<videoId>.json contiene descriptionFeatures
-
+   - apps/api/tests/transcriptDeterministic.test.ts:
+     - hook_keyword_hit_time (con timestamps)
+     - wpm windows
+     - markers counts + evidence
+     - sentiment lexicon scoring determinista
+   - apps/api/tests/transcriptFeaturesAgent.test.ts:
+     - AutoGen disabled -> llm=null, deterministic ok
+     - mock autogenRuntime -> sponsor/cta/storyArc merge y validación de evidence
+   - actualizar export integration test:
+     - derived/video_features/<id>.json contiene transcriptFeatures
 7) Docs:
-   - docs/DATA_CONTRACTS.md: agregar descriptionFeatures al derived schema
-   - AI Context Pack: mention new task "description_classifier_v1"
+   - docs/DATA_CONTRACTS.md: extender derived schema con transcriptFeatures
+   - AI Context Pack: mencionar task "transcript_classifier_v1" y assets (stopwords/lexicons)
 
-PROMPT AUTOGEN — DescriptionClassifierAgent v1:
-(usa EXACTAMENTE el bloque del siguiente apartado; no inventes otro)
+PROMPT AUTOGEN — TranscriptClassifierAgent v1:
+(usar EXACTAMENTE el bloque del siguiente apartado; no inventar otro)
 
 Entrega:
 - pnpm test verde
-- export job genera derived con descriptionFeatures para cada video
-- sin pasos nuevos en frontend
+- export job genera transcriptFeatures para cada video
+- sin pasos nuevos fuera del frontend
