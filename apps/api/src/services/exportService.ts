@@ -28,6 +28,7 @@ import {
   type ChannelModelSummary,
   type VideoPerformanceFeatures
 } from "../derived/performanceNormalization.js";
+import { runOrchestrator } from "../analysis/orchestratorService.js";
 
 export type ExportVideoStage =
   | "queue"
@@ -1010,7 +1011,7 @@ export async function exportSelectedVideos(
       callbacks.onVideoProgress?.({
         videoId: video.videoId,
         stage: "writing_json",
-        percent: 98 + Math.floor(((index + 1) / performanceProgressDenominator) * 1)
+        percent: 92 + Math.floor(((index + 1) / performanceProgressDenominator) * 2)
       });
     }
 
@@ -1027,14 +1028,6 @@ export async function exportSelectedVideos(
       ({ warnings: _, rawTranscriptArtifactPath: __, derivedVideoFeaturesArtifactPath: ___, ...video }) => video
     );
     const thumbnailAvailability = await collectThumbnailAvailability(exportsRoot, channelFolderPath, processedVideos);
-    for (const item of processedVideos) {
-      callbacks.onVideoProgress?.({
-        videoId: item.videoId,
-        stage: "writing_json",
-        percent: 100
-      });
-    }
-
     const channelJson: ExportPayload = {
       exportVersion: EXPORT_VERSION,
       exportedAt,
@@ -1049,6 +1042,45 @@ export async function exportSelectedVideos(
     const channelFilePath = path.resolve(channelFolderPath, "channel.json");
     ensureInsideRoot(exportsRoot, channelFilePath);
     await fs.writeFile(channelFilePath, JSON.stringify(channelJson, null, 2), "utf-8");
+
+    for (const item of processedVideos) {
+      callbacks.onVideoProgress?.({
+        videoId: item.videoId,
+        stage: "writing_json",
+        percent: 95
+      });
+    }
+
+    let orchestratorArtifactPaths: string[] = [];
+    for (const item of processedVideos) {
+      callbacks.onVideoProgress?.({
+        videoId: item.videoId,
+        stage: "writing_json",
+        percent: 98
+      });
+    }
+    try {
+      const orchestratorResult = await runOrchestrator({
+        exportRoot: exportsRoot,
+        channelId: request.channelId,
+        channelName: request.channelName,
+        timeframe: request.timeframe,
+        jobId
+      });
+      orchestratorArtifactPaths = orchestratorResult.artifactPaths;
+      for (const warning of orchestratorResult.warnings) {
+        addWarning(warning);
+      }
+    } catch (error) {
+      addWarning(`Channel orchestrator failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+    for (const item of processedVideos) {
+      callbacks.onVideoProgress?.({
+        videoId: item.videoId,
+        stage: "writing_json",
+        percent: 100
+      });
+    }
 
     const rawPack = await writeRawPack({
       exportsRoot,
@@ -1094,7 +1126,8 @@ export async function exportSelectedVideos(
       ...thumbnailArtifactPaths,
       ...rawPack.artifactPaths,
       ...derivedArtifactPaths,
-      channelModelsArtifactPath
+      channelModelsArtifactPath,
+      ...orchestratorArtifactPaths
     ];
     const artifactSet = new Set(
       artifactPaths.map((artifactPath) => toSafeRelativePath(channelFolderPath, artifactPath))

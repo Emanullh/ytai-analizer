@@ -41,15 +41,21 @@ function parsePositiveInt(value: string | undefined, defaultValue: number): numb
   return parsed;
 }
 
-function parseReasoningEffort(value: string | undefined): "low" | "medium" | "high" {
+function parseReasoningEffort(
+  value: string | undefined,
+  defaultValue: "low" | "medium" | "high"
+): "low" | "medium" | "high" {
   const normalized = value?.trim().toLowerCase();
+  if (normalized === "low") {
+    return "low";
+  }
   if (normalized === "medium") {
     return "medium";
   }
   if (normalized === "high") {
     return "high";
   }
-  return "low";
+  return defaultValue;
 }
 
 export const env = {
@@ -69,7 +75,12 @@ export const env = {
   autoGenModelTitle: process.env.AUTO_GEN_MODEL_TITLE?.trim() || "gpt-5.2",
   autoGenModelDescription: process.env.AUTO_GEN_MODEL_DESCRIPTION?.trim() || "gpt-5.2",
   autoGenModelThumbnail: process.env.AUTO_GEN_MODEL_THUMBNAIL?.trim() || "gpt-5.2",
-  autoGenReasoningEffort: parseReasoningEffort(process.env.AUTO_GEN_REASONING_EFFORT),
+  autoGenModelOrchestrator: process.env.AUTO_GEN_MODEL_ORCHESTRATOR?.trim() || "gpt-5.2-pro",
+  autoGenReasoningEffort: parseReasoningEffort(process.env.AUTO_GEN_REASONING_EFFORT, "low"),
+  autoGenReasoningEffortOrchestrator: parseReasoningEffort(
+    process.env.AUTO_GEN_REASONING_EFFORT_ORCHESTRATOR,
+    "medium"
+  ),
   autoGenTimeoutSec: parsePositiveInt(process.env.AUTO_GEN_TIMEOUT_SEC, 60),
   thumbOcrEnabled: parseBoolean(process.env.THUMB_OCR_ENABLED, true),
   thumbOcrLangs: process.env.THUMB_OCR_LANGS?.trim() || "eng",

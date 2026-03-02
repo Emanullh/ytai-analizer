@@ -347,7 +347,10 @@ describe("export jobs + SSE progress", () => {
         "raw/channel.json",
         "raw/videos.jsonl",
         "manifest.json",
+        "analysis/orchestrator_input.json",
+        "analysis/playbook.json",
         "derived/channel_models.json",
+        "derived/templates.json",
         "derived/video_features/video0000011.json",
         "derived/video_features/video0000022.json"
       ])
@@ -471,6 +474,28 @@ describe("export jobs + SSE progress", () => {
       path.join(statusBody.exportPath as string, "derived", "channel_models.json"),
       "utf-8"
     );
+    const playbookRaw = await fs.readFile(path.join(statusBody.exportPath as string, "analysis", "playbook.json"), "utf-8");
+    const templatesRaw = await fs.readFile(path.join(statusBody.exportPath as string, "derived", "templates.json"), "utf-8");
+    await fs.access(path.join(statusBody.exportPath as string, "analysis", "orchestrator_input.json"));
+
+    const playbook = JSON.parse(playbookRaw) as {
+      schemaVersion: string;
+      warnings: string[];
+      insights: unknown[];
+    };
+    const templates = JSON.parse(templatesRaw) as {
+      schemaVersion: string;
+      warnings: string[];
+      titleTemplates: unknown[];
+    };
+
+    expect(playbook.schemaVersion).toBe("analysis.playbook.v1");
+    expect(templates.schemaVersion).toBe("derived.templates.v1");
+    expect(Array.isArray(playbook.insights)).toBe(true);
+    expect(Array.isArray(templates.titleTemplates)).toBe(true);
+    expect(playbook.warnings.some((warning) => warning.includes("Channel orchestrator LLM skipped"))).toBe(true);
+    expect(templates.warnings.some((warning) => warning.includes("Channel orchestrator LLM skipped"))).toBe(true);
+
     const channelModels = JSON.parse(channelModelsRaw) as {
       schemaVersion: string;
       channelId: string;

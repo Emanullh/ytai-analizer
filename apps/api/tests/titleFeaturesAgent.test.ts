@@ -29,7 +29,7 @@ describe("titleFeaturesAgent", () => {
 
   it("returns deterministic output and warnings when AutoGen is disabled", async () => {
     process.env.AUTO_GEN_ENABLED = "false";
-    delete process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "";
 
     const { computeTitleFeaturesBundle } = await import("../src/derived/titleFeaturesAgent.js");
 

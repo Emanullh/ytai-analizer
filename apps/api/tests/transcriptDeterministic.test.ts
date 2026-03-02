@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TranscriptArtifact } from "../src/derived/transcriptArtifacts.js";
 
 function buildArtifact(segments: TranscriptArtifact["segments"]): TranscriptArtifact {
@@ -21,7 +21,8 @@ describe("transcriptDeterministic", () => {
   const originalEnv = { ...process.env };
 
   beforeEach(() => {
-    delete process.env.OPENAI_API_KEY;
+    vi.resetModules();
+    process.env.OPENAI_API_KEY = "";
   });
 
   afterEach(() => {

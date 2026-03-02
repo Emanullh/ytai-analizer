@@ -80,11 +80,17 @@ interface AutoGenThumbnailTaskRequest extends AutoGenBaseTaskRequest {
   };
 }
 
+interface AutoGenChannelOrchestratorTaskRequest extends AutoGenBaseTaskRequest {
+  task: "channel_orchestrator_v1";
+  payload: Record<string, unknown>;
+}
+
 export type AutoGenTaskRequest =
   | AutoGenTitleTaskRequest
   | AutoGenDescriptionTaskRequest
   | AutoGenTranscriptTaskRequest
-  | AutoGenThumbnailTaskRequest;
+  | AutoGenThumbnailTaskRequest
+  | AutoGenChannelOrchestratorTaskRequest;
 
 interface AutoGenInFlightTask {
   id: string;
@@ -133,10 +139,17 @@ function resolveAutoGenModel(request: AutoGenTaskRequest): string {
   if (request.task === "thumbnail_classifier_v1") {
     return env.autoGenModelThumbnail;
   }
+  if (request.task === "channel_orchestrator_v1") {
+    return env.autoGenModelOrchestrator;
+  }
   return env.autoGenModelDescription;
 }
 
 function normalizeAutoGenPayload(request: AutoGenTaskRequest): AutoGenTaskRequest["payload"] {
+  if (request.task === "channel_orchestrator_v1") {
+    return request.payload && typeof request.payload === "object" ? request.payload : {};
+  }
+
   if (request.task === "transcript_classifier_v1") {
     return {
       videoId: request.payload.videoId,
@@ -289,7 +302,8 @@ class AutoGenWorkerClient {
           OPENAI_API_KEY: env.openAiApiKey,
           AUTO_GEN_MODEL_TITLE: env.autoGenModelTitle,
           AUTO_GEN_MODEL_DESCRIPTION: env.autoGenModelDescription,
-          AUTO_GEN_MODEL_THUMBNAIL: env.autoGenModelThumbnail
+          AUTO_GEN_MODEL_THUMBNAIL: env.autoGenModelThumbnail,
+          AUTO_GEN_MODEL_ORCHESTRATOR: env.autoGenModelOrchestrator
         }
       });
 

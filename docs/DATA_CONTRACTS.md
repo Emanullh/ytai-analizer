@@ -623,6 +623,109 @@ Reglas:
 - predictor `durationSec` se excluye o imputa conservadoramente cuando falta.
 - `fit.notes` contiene warnings operativos (por ejemplo `n < 5` o missing duration).
 
+### 3.7 Analysis Playbook v1
+
+Ruta:
+
+- `exports/<channel_folder>/analysis/playbook.json`
+
+Formato:
+
+```json
+{
+  "schemaVersion": "analysis.playbook.v1",
+  "generatedAt": "2026-03-02T12:00:00.000Z",
+  "channel": {
+    "channelId": "UC1234567890123456789012",
+    "channelName": "Canal Demo",
+    "timeframe": "6m",
+    "jobId": "uuid"
+  },
+  "warnings": [],
+  "insights": [
+    {
+      "id": "insight-1",
+      "title": "Texto en miniatura alto + residual positivo",
+      "summary": "El cohorte con texto grande mostró mediana superior",
+      "supported_by": ["video1", "video2"],
+      "evidence_fields": [
+        "thumbnailFeatures.deterministic.textAreaRatio",
+        "thumbnailFeatures.deterministic.hasBigText",
+        "performance.residual"
+      ]
+    }
+  ],
+  "rules": [],
+  "keys": [],
+  "evidence": {
+    "cohorts": [],
+    "drivers": [],
+    "exemplars": {}
+  }
+}
+```
+
+Reglas de validación anti-alucinación:
+
+- `schemaVersion` fijo: `analysis.playbook.v1`.
+- todo `supported_by[]` debe existir en `rows[].videoId` del `orchestrator_input`.
+- todo `evidence_fields[]` debe ser un path válido en el row plano (`performance.*`, `titleFeatures.*`, `thumbnailFeatures.*`, etc.).
+- si falla validación de salida LLM, se degrada a fallback determinista (sin romper export).
+
+### 3.8 Derived Templates v1
+
+Ruta:
+
+- `exports/<channel_folder>/derived/templates.json`
+
+Formato:
+
+```json
+{
+  "schemaVersion": "derived.templates.v1",
+  "generatedAt": "2026-03-02T12:00:00.000Z",
+  "channel": {
+    "channelId": "UC1234567890123456789012",
+    "channelName": "Canal Demo",
+    "timeframe": "6m",
+    "jobId": "uuid"
+  },
+  "warnings": [],
+  "titleTemplates": [
+    {
+      "id": "title-1",
+      "template": "How to {outcome} in {time}",
+      "when_to_use": "Cuando el gancho se entrega en los primeros 30s",
+      "supported_by": ["video1"],
+      "evidence_fields": [
+        "titleFeatures.deterministic.question_mark_count",
+        "transcriptFeatures.deterministic.promise_delivery_30s_score"
+      ]
+    }
+  ],
+  "thumbnailTemplates": [],
+  "scriptTemplates": []
+}
+```
+
+Reglas:
+
+- `schemaVersion` fijo: `derived.templates.v1`.
+- mismas reglas anti-alucinación para `supported_by` y `evidence_fields`.
+- con LLM deshabilitado/fallido: se escribe estructura vacía + `warnings`.
+
+### 3.9 Orchestrator Input Audit v1 (opcional)
+
+Ruta:
+
+- `exports/<channel_folder>/analysis/orchestrator_input.json`
+
+Contenido:
+
+- payload reducido sin transcript completo (rows planos + cohorts + drivers + exemplars + channel model).
+- `schemaVersion`: `analysis.orchestrator_input.v1`.
+- fuente de evidencia para validar `supported_by`/`evidence_fields`.
+
 ## 4) Contratos internos de pipeline
 
 ### 4.1 Transcript pipeline
@@ -712,7 +815,10 @@ Desde `apps/api/src/services/exportService.ts`:
 - crea thumbnails en `exports/<canal>/thumbnails/`
 - escribe `exports/<canal>/channel.json`
 - escribe `exports/<canal>/manifest.json`
+- escribe `exports/<canal>/analysis/orchestrator_input.json`
+- escribe `exports/<canal>/analysis/playbook.json`
 - escribe `exports/<canal>/derived/video_features/<videoId>.json`
+- escribe `exports/<canal>/derived/templates.json`
 - escribe `exports/<canal>/raw/channel.json`
 - escribe `exports/<canal>/raw/videos.jsonl`
 - escribe `exports/<canal>/raw/transcripts/<videoId>.jsonl`
@@ -727,6 +833,8 @@ Sanitización de folder de canal:
 ## 6) Cobertura de tests ligada a contratos
 
 - `apps/api/tests/exportJobs.test.ts`: valida flujo jobs + SSE + `channel.json` + `manifest.json` + `raw/*`
+- `apps/api/tests/orchestratorDeterministic.test.ts`: cohorts, rankings y drivers deterministas
+- `apps/api/tests/orchestratorService.test.ts`: fallback + validación anti-alucinación + persistencia
 - `apps/api/tests/transcriptPipeline.test.ts`: captions vs fallback ASR
 - `apps/api/tests/transcriptService.test.ts`: retry/missing/error de captions
 - `apps/api/tests/asrRuntime.test.ts`: resolución de python path (`ASR_PYTHON_PATH`, venv, fallback)

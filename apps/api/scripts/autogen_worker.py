@@ -211,6 +211,109 @@ RULES:
 Now wait for the multimodal input and respond with ONLY the JSON output.
 """
 
+CHANNEL_ORCHESTRATOR_SYSTEM_PROMPT = """ChannelOrchestratorAgent v1
+
+You are the final channel research orchestrator. You must output ONLY valid JSON (no markdown, no prose).
+You will receive deterministic evidence already computed from a YouTube export.
+
+CRITICAL RULES:
+1) Do not compute new statistics, rankings, or correlations.
+2) Use only evidence present in the input payload.
+3) Every claim in insights/rules/templates must include:
+   - supported_by: array of videoIds from input rows
+   - evidence_fields: array of valid dotted paths from row fields
+4) Never reference a videoId that is not in input rows.
+5) Never invent evidence fields.
+
+OUTPUT JSON (exact top-level shape):
+{
+  "playbook": {
+    "schemaVersion": "analysis.playbook.v1",
+    "generatedAt": "ISO-8601 string",
+    "channel": {
+      "channelId": "string",
+      "channelName": "string",
+      "timeframe": "1m|6m|1y",
+      "jobId": "string"
+    },
+    "warnings": ["string"],
+    "insights": [
+      {
+        "id": "string",
+        "title": "string",
+        "summary": "string",
+        "supported_by": ["videoId"],
+        "evidence_fields": ["performance.residual"]
+      }
+    ],
+    "rules": [
+      {
+        "id": "string",
+        "name": "string",
+        "recommendation": "string",
+        "supported_by": ["videoId"],
+        "evidence_fields": ["titleFeatures.deterministic.has_number"]
+      }
+    ],
+    "keys": [
+      {
+        "id": "string",
+        "label": "string",
+        "rationale": "string",
+        "supported_by": ["videoId"],
+        "evidence_fields": ["thumbnailFeatures.deterministic.textAreaRatio"]
+      }
+    ],
+    "evidence": {
+      "cohorts": [],
+      "drivers": [],
+      "exemplars": {}
+    }
+  },
+  "templates": {
+    "schemaVersion": "derived.templates.v1",
+    "generatedAt": "ISO-8601 string",
+    "channel": {
+      "channelId": "string",
+      "channelName": "string",
+      "timeframe": "1m|6m|1y",
+      "jobId": "string"
+    },
+    "warnings": ["string"],
+    "titleTemplates": [
+      {
+        "id": "string",
+        "template": "string",
+        "when_to_use": "string",
+        "supported_by": ["videoId"],
+        "evidence_fields": ["titleFeatures.deterministic.question_mark_count"]
+      }
+    ],
+    "thumbnailTemplates": [
+      {
+        "id": "string",
+        "template": "string",
+        "when_to_use": "string",
+        "supported_by": ["videoId"],
+        "evidence_fields": ["thumbnailFeatures.llm.archetype"]
+      }
+    ],
+    "scriptTemplates": [
+      {
+        "id": "string",
+        "template": "string",
+        "when_to_use": "string",
+        "supported_by": ["videoId"],
+        "evidence_fields": ["transcriptFeatures.deterministic.promise_delivery_30s_score"]
+      }
+    ]
+  }
+}
+
+If evidence is weak, return fewer items and include warnings.
+Return strict JSON only.
+"""
+
 PROMISE_LABELS = {
     "howto/tutorial",
     "review",
@@ -698,6 +801,118 @@ def coerce_thumbnail_result(raw: Any) -> Dict[str, Any]:
     }
 
 
+def _normalize_supported_by(raw: Any) -> List[str]:
+    if not isinstance(raw, list):
+        return []
+    normalized: List[str] = []
+    for item in raw:
+        if isinstance(item, str) and item.strip():
+            normalized.append(item.strip())
+    return normalized
+
+
+def _normalize_evidence_fields(raw: Any) -> List[str]:
+    if not isinstance(raw, list):
+        return []
+    normalized: List[str] = []
+    for item in raw:
+        if isinstance(item, str) and item.strip():
+            normalized.append(item.strip())
+    return normalized
+
+
+def _normalize_claim_list(raw: Any, default_prefix: str) -> List[Dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            continue
+        claim_id = item.get("id")
+        title = item.get("title")
+        summary = item.get("summary")
+        template = item.get("template")
+        name = item.get("name")
+        recommendation = item.get("recommendation")
+        label = item.get("label")
+        rationale = item.get("rationale")
+        when_to_use = item.get("when_to_use")
+        normalized_item: Dict[str, Any] = {
+            "id": str(claim_id).strip() if isinstance(claim_id, str) and claim_id.strip() else f"{default_prefix}-{index + 1}",
+            "supported_by": _normalize_supported_by(item.get("supported_by")),
+            "evidence_fields": _normalize_evidence_fields(item.get("evidence_fields")),
+        }
+        if isinstance(title, str) and title.strip():
+            normalized_item["title"] = title.strip()
+        if isinstance(summary, str) and summary.strip():
+            normalized_item["summary"] = summary.strip()
+        if isinstance(template, str) and template.strip():
+            normalized_item["template"] = template.strip()
+        if isinstance(name, str) and name.strip():
+            normalized_item["name"] = name.strip()
+        if isinstance(recommendation, str) and recommendation.strip():
+            normalized_item["recommendation"] = recommendation.strip()
+        if isinstance(label, str) and label.strip():
+            normalized_item["label"] = label.strip()
+        if isinstance(rationale, str) and rationale.strip():
+            normalized_item["rationale"] = rationale.strip()
+        if isinstance(when_to_use, str) and when_to_use.strip():
+            normalized_item["when_to_use"] = when_to_use.strip()
+        normalized.append(normalized_item)
+    return normalized
+
+
+def coerce_channel_orchestrator_result(raw: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
+    source = raw if isinstance(raw, dict) else {}
+    playbook_raw = source.get("playbook")
+    templates_raw = source.get("templates")
+
+    channel_input = payload.get("channel")
+    channel_fallback = channel_input if isinstance(channel_input, dict) else {}
+    generated_at = str(source.get("generatedAt", "")) if isinstance(source.get("generatedAt"), str) else ""
+    if not generated_at:
+        generated_at = payload.get("generatedAt") if isinstance(payload.get("generatedAt"), str) else ""
+    if not generated_at:
+        generated_at = ""
+
+    playbook_source = playbook_raw if isinstance(playbook_raw, dict) else {}
+    templates_source = templates_raw if isinstance(templates_raw, dict) else {}
+
+    playbook = {
+        "schemaVersion": "analysis.playbook.v1",
+        "generatedAt": str(playbook_source.get("generatedAt", generated_at)),
+        "channel": playbook_source.get("channel")
+        if isinstance(playbook_source.get("channel"), dict)
+        else channel_fallback,
+        "warnings": [str(item) for item in playbook_source.get("warnings", []) if isinstance(item, str)]
+        if isinstance(playbook_source.get("warnings"), list)
+        else [],
+        "insights": _normalize_claim_list(playbook_source.get("insights"), "insight"),
+        "rules": _normalize_claim_list(playbook_source.get("rules"), "rule"),
+        "keys": _normalize_claim_list(playbook_source.get("keys"), "key"),
+        "evidence": playbook_source.get("evidence") if isinstance(playbook_source.get("evidence"), dict) else {},
+    }
+
+    templates = {
+        "schemaVersion": "derived.templates.v1",
+        "generatedAt": str(templates_source.get("generatedAt", generated_at)),
+        "channel": templates_source.get("channel")
+        if isinstance(templates_source.get("channel"), dict)
+        else channel_fallback,
+        "warnings": [str(item) for item in templates_source.get("warnings", []) if isinstance(item, str)]
+        if isinstance(templates_source.get("warnings"), list)
+        else [],
+        "titleTemplates": _normalize_claim_list(templates_source.get("titleTemplates"), "title-template"),
+        "thumbnailTemplates": _normalize_claim_list(templates_source.get("thumbnailTemplates"), "thumbnail-template"),
+        "scriptTemplates": _normalize_claim_list(templates_source.get("scriptTemplates"), "script-template"),
+    }
+
+    return {
+        "playbook": playbook,
+        "templates": templates,
+    }
+
+
 def extract_text_from_agent_result(run_result: Any) -> str:
     if isinstance(run_result, str):
         return run_result
@@ -1022,6 +1237,49 @@ async def classify_thumbnail(request: Dict[str, Any]) -> Dict[str, Any]:
     return coerce_thumbnail_result(parsed)
 
 
+async def classify_channel_orchestrator(request: Dict[str, Any]) -> Dict[str, Any]:
+    payload = request.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("missing payload")
+
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        raise ValueError("payload.rows is required")
+
+    model_client = build_model_client(request, "AUTO_GEN_MODEL_ORCHESTRATOR")
+    agent = AssistantAgent(
+        name="ChannelOrchestratorAgent",
+        model_client=model_client,
+        system_message=CHANNEL_ORCHESTRATOR_SYSTEM_PROMPT,
+    )
+
+    user_prompt = json.dumps(
+        {
+            "task": "channel_orchestrator_v1",
+            "payload": payload,
+            "requiredOutput": {
+                "playbook": "analysis.playbook.v1",
+                "templates": "derived.templates.v1",
+                "mandatoryEvidence": ["supported_by", "evidence_fields"],
+            },
+        },
+        ensure_ascii=False,
+    )
+
+    try:
+        run_result = await agent.run(task=user_prompt)
+        content = extract_text_from_agent_result(run_result)
+        parsed = parse_agent_json(content)
+    finally:
+        close_method = getattr(model_client, "close", None)
+        if callable(close_method):
+            maybe_coroutine = close_method()
+            if asyncio.iscoroutine(maybe_coroutine):
+                await maybe_coroutine
+
+    return coerce_channel_orchestrator_result(parsed, payload)
+
+
 async def classify_request(request: Dict[str, Any]) -> Dict[str, Any]:
     task = request.get("task")
     if task == "title_classifier_v1":
@@ -1032,6 +1290,8 @@ async def classify_request(request: Dict[str, Any]) -> Dict[str, Any]:
         return await classify_transcript(request)
     if task == "thumbnail_classifier_v1":
         return await classify_thumbnail(request)
+    if task == "channel_orchestrator_v1":
+        return await classify_channel_orchestrator(request)
     raise ValueError(f"unsupported task '{task}'")
 
 

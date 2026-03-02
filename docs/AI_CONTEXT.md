@@ -100,7 +100,9 @@ Fuente de verdad:
 - `AUTO_GEN_MODEL_TITLE` (default `gpt-5.2`)
 - `AUTO_GEN_MODEL_DESCRIPTION` (default `gpt-5.2`)
 - `AUTO_GEN_MODEL_THUMBNAIL` (default `gpt-5.2`)
+- `AUTO_GEN_MODEL_ORCHESTRATOR` (default `gpt-5.2-pro`)
 - `AUTO_GEN_REASONING_EFFORT` (default `low`)
+- `AUTO_GEN_REASONING_EFFORT_ORCHESTRATOR` (default `medium`)
 - `AUTO_GEN_TIMEOUT_SEC` (default `60`)
 - `THUMB_OCR_ENABLED` (default `true`)
 - `THUMB_OCR_LANGS` (default `eng`; soporta `eng+spa`)
@@ -216,8 +218,11 @@ Export (`apps/api/src/services/exportService.ts`) escribe en:
 
 - `exports/<channel_sanitizado>/channel.json`
 - `exports/<channel_sanitizado>/thumbnails/<videoId>.jpg`
+- `exports/<channel_sanitizado>/analysis/orchestrator_input.json`
+- `exports/<channel_sanitizado>/analysis/playbook.json`
 - `exports/<channel_sanitizado>/derived/video_features/<videoId>.json`
 - `exports/<channel_sanitizado>/derived/channel_models.json`
+- `exports/<channel_sanitizado>/derived/templates.json`
 
 Temporal de ASR:
 
