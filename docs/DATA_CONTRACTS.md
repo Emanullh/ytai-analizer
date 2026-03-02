@@ -183,6 +183,8 @@ Definidos en:
 
 `percent` es opcional (hoy no siempre se usa).
 
+Con pipeline concurrente, `percent` puede avanzar en saltos más granulares (sub-steps intercalados), pero sigue siendo opcional y no rompe contrato.
+
 `stage` enum:
 
 - `queue`
@@ -193,6 +195,11 @@ Definidos en:
 - `done`
 - `warning`
 - `failed`
+
+Política de stage cuando hay tareas simultáneas:
+
+- `last-change-wins`: el backend emite el stage según el último cambio relevante.
+- `transcribing` solo se emite cuando corre fetch de transcript real (captions/ASR), no en cache hit completo.
 
 ### 2.3 `job_progress`
 
@@ -225,6 +232,19 @@ Notas de correlación:
 ```json
 { "message": "error detail" }
 ```
+
+### 2.7 Variables ENV de concurrencia (backend)
+
+Definidas en `apps/api/src/config/env.ts` y documentadas en `apps/api/.env.example`:
+
+- `EXPORT_VIDEO_CONCURRENCY` (default `3`)
+- `EXPORT_HTTP_CONCURRENCY` (default `6`)
+- `EXPORT_ASR_CONCURRENCY` (default `LOCAL_ASR_MAX_CONCURRENCY`, típico `1`)
+- `EXPORT_OCR_CONCURRENCY` (default `2`)
+- `EXPORT_LLM_CONCURRENCY` (default `2`)
+- `EXPORT_EMBEDDINGS_CONCURRENCY` (default `2`)
+- `EXPORT_FS_CONCURRENCY` (default `6`)
+- `EXPORT_FAIL_FAST` (default `false`)
 
 ## 3) Contrato `channel.json` (export)
 
@@ -866,6 +886,9 @@ Contenido:
 
 ## 4) Contratos internos de pipeline
 
+`apps/api/src/services/taskScheduler.ts` aplica límites de concurrencia por tipo (`video/http/asr/ocr/llm/embeddings/fs`).
+`apps/api/src/services/exportPlan.ts` construye/valida DAG por video antes de ejecutar tareas concurrentes.
+
 ### 4.1 Transcript pipeline
 
 `apps/api/src/services/transcriptPipeline.ts`:
@@ -890,6 +913,22 @@ getTranscriptWithFallback(videoId, options?) => {
 Garantía:
 
 - siempre retorna `transcript` string (posible `""`)
+
+### 4.1.1 DAG por video (export)
+
+Dependencias explícitas (runtime + plan validator):
+
+- `cache_check` primero.
+- `transcript_fetch -> transcript_derived`.
+- `transcript_fetch -> write_raw_transcript`.
+- `thumbnail_download -> thumbnail_derived`.
+- `description_derived` depende solo de metadata (`title/description`).
+- estrategia de título fijada: `title_derived` espera transcript (`waitForTranscript=true`).
+
+Fallback seguro:
+
+- si `validatePlan(...)` detecta deps faltantes o ciclos, el video cae a ejecución secuencial y se emite warning.
+- no se rompen endpoints ni contrato SSE.
 
 ### 4.2 ASR local
 

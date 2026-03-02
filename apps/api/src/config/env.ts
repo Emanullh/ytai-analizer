@@ -59,6 +59,11 @@ function parseReasoningEffort(
 }
 
 export const env = {
+  localAsrMaxConcurrency: parsePositiveInt(process.env.LOCAL_ASR_MAX_CONCURRENCY, 1),
+  exportAsrConcurrency: parsePositiveInt(
+    process.env.EXPORT_ASR_CONCURRENCY,
+    parsePositiveInt(process.env.LOCAL_ASR_MAX_CONCURRENCY, 1)
+  ),
   port: parsePort(process.env.PORT),
   youtubeApiKey: process.env.YOUTUBE_API_KEY?.trim() ?? "",
   openAiApiKey: process.env.OPENAI_API_KEY?.trim() ?? "",
@@ -67,10 +72,16 @@ export const env = {
   localAsrModel: process.env.LOCAL_ASR_MODEL?.trim() || "large-v3-turbo",
   localAsrComputeType: process.env.LOCAL_ASR_COMPUTE_TYPE?.trim() || "auto",
   localAsrLanguage: process.env.LOCAL_ASR_LANGUAGE?.trim() || "auto",
-  localAsrMaxConcurrency: parsePositiveInt(process.env.LOCAL_ASR_MAX_CONCURRENCY, 1),
   localAsrTimeoutSec: parsePositiveInt(process.env.LOCAL_ASR_TIMEOUT_SEC, 900),
   localAsrBeamSize: parsePositiveInt(process.env.LOCAL_ASR_BEAM_SIZE, 5),
   youtubeAudioDownloadTimeoutSec: parsePositiveInt(process.env.YOUTUBE_AUDIO_DOWNLOAD_TIMEOUT_SEC, 300),
+  exportVideoConcurrency: parsePositiveInt(process.env.EXPORT_VIDEO_CONCURRENCY, 3),
+  exportHttpConcurrency: parsePositiveInt(process.env.EXPORT_HTTP_CONCURRENCY, 6),
+  exportOcrConcurrency: parsePositiveInt(process.env.EXPORT_OCR_CONCURRENCY, 2),
+  exportLlmConcurrency: parsePositiveInt(process.env.EXPORT_LLM_CONCURRENCY, 2),
+  exportEmbeddingsConcurrency: parsePositiveInt(process.env.EXPORT_EMBEDDINGS_CONCURRENCY, 2),
+  exportFsConcurrency: parsePositiveInt(process.env.EXPORT_FS_CONCURRENCY, 6),
+  exportFailFast: parseBoolean(process.env.EXPORT_FAIL_FAST, false),
   autoGenEnabled: parseBoolean(process.env.AUTO_GEN_ENABLED, true),
   autoGenModelTitle: process.env.AUTO_GEN_MODEL_TITLE?.trim() || "gpt-5.2",
   autoGenModelDescription: process.env.AUTO_GEN_MODEL_DESCRIPTION?.trim() || "gpt-5.2",

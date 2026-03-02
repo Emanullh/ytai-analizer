@@ -82,6 +82,12 @@ function isSafeRelativeArtifact(artifactPath: string): boolean {
   return true;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 describe("export jobs + SSE progress", () => {
   let app: FastifyInstance;
   let originalCwd = process.cwd();
@@ -89,6 +95,10 @@ describe("export jobs + SSE progress", () => {
   const originalAutoGenEnabled = process.env.AUTO_GEN_ENABLED;
   const originalOpenAiApiKey = process.env.OPENAI_API_KEY;
   const originalThumbOcrEnabled = process.env.THUMB_OCR_ENABLED;
+  const originalLocalAsrEnabled = process.env.LOCAL_ASR_ENABLED;
+  const originalExportVideoConcurrency = process.env.EXPORT_VIDEO_CONCURRENCY;
+  const originalExportHttpConcurrency = process.env.EXPORT_HTTP_CONCURRENCY;
+  const originalExportAsrConcurrency = process.env.EXPORT_ASR_CONCURRENCY;
 
   beforeEach(async () => {
     originalCwd = process.cwd();
@@ -96,7 +106,11 @@ describe("export jobs + SSE progress", () => {
     process.chdir(tempDir);
     process.env.AUTO_GEN_ENABLED = "false";
     process.env.THUMB_OCR_ENABLED = "false";
+    process.env.LOCAL_ASR_ENABLED = "true";
     delete process.env.OPENAI_API_KEY;
+    process.env.EXPORT_VIDEO_CONCURRENCY = "3";
+    process.env.EXPORT_HTTP_CONCURRENCY = "6";
+    process.env.EXPORT_ASR_CONCURRENCY = "1";
 
     getSelectedVideoDetailsMock.mockReset();
     getVideoDetailsMock.mockReset();
@@ -129,6 +143,26 @@ describe("export jobs + SSE progress", () => {
       process.env.THUMB_OCR_ENABLED = originalThumbOcrEnabled;
     } else {
       delete process.env.THUMB_OCR_ENABLED;
+    }
+    if (typeof originalLocalAsrEnabled === "string") {
+      process.env.LOCAL_ASR_ENABLED = originalLocalAsrEnabled;
+    } else {
+      delete process.env.LOCAL_ASR_ENABLED;
+    }
+    if (typeof originalExportVideoConcurrency === "string") {
+      process.env.EXPORT_VIDEO_CONCURRENCY = originalExportVideoConcurrency;
+    } else {
+      delete process.env.EXPORT_VIDEO_CONCURRENCY;
+    }
+    if (typeof originalExportHttpConcurrency === "string") {
+      process.env.EXPORT_HTTP_CONCURRENCY = originalExportHttpConcurrency;
+    } else {
+      delete process.env.EXPORT_HTTP_CONCURRENCY;
+    }
+    if (typeof originalExportAsrConcurrency === "string") {
+      process.env.EXPORT_ASR_CONCURRENCY = originalExportAsrConcurrency;
+    } else {
+      delete process.env.EXPORT_ASR_CONCURRENCY;
     }
   });
 
@@ -1041,5 +1075,236 @@ describe("export jobs + SSE progress", () => {
     const summaryRaw = await fs.readFile(summaryPath, "utf-8");
     const summary = JSON.parse(summaryRaw) as { status: string };
     expect(summary.status).toBe("failed");
+  });
+
+  it("processes videos faster with EXPORT_VIDEO_CONCURRENCY=2 than sequential mode", async () => {
+    const runScenario = async (videoConcurrency: number): Promise<number> => {
+      await app.close();
+      vi.resetModules();
+
+      process.env.EXPORT_VIDEO_CONCURRENCY = String(videoConcurrency);
+      process.env.EXPORT_HTTP_CONCURRENCY = "8";
+      process.env.EXPORT_ASR_CONCURRENCY = "4";
+      process.env.LOCAL_ASR_ENABLED = "false";
+      process.env.AUTO_GEN_ENABLED = "false";
+      process.env.THUMB_OCR_ENABLED = "false";
+      delete process.env.OPENAI_API_KEY;
+
+      getSelectedVideoDetailsMock.mockReset();
+      getVideoDetailsMock.mockReset();
+      getChannelDetailsMock.mockReset();
+      downloadToBufferMock.mockReset();
+      getTranscriptWithFallbackMock.mockReset();
+
+      const videos = Array.from({ length: 4 }, (_, index) => {
+        const id = `par${String(index + 1).padStart(8, "0")}`;
+        return {
+          videoId: id,
+          title: `Video ${index + 1}`,
+          publishedAt: "2025-01-01T00:00:00.000Z",
+          viewCount: 100 + index,
+          thumbnailUrl: `https://img.example/${id}.jpg`
+        };
+      });
+
+      getSelectedVideoDetailsMock.mockResolvedValue({
+        warnings: [],
+        videos
+      });
+      getVideoDetailsMock.mockResolvedValue({
+        warnings: [],
+        videos: videos.map((video) => ({
+          videoId: video.videoId,
+          title: video.title,
+          description: `Description ${video.videoId}`,
+          publishedAt: video.publishedAt,
+          durationSec: 120,
+          categoryId: "22",
+          tags: [],
+          madeForKids: false,
+          liveBroadcastContent: "none",
+          statistics: {
+            viewCount: video.viewCount,
+            likeCount: 10,
+            commentCount: 4
+          },
+          thumbnails: {
+            high: { url: video.thumbnailUrl, width: 480, height: 360 }
+          },
+          thumbnailOriginalUrl: video.thumbnailUrl
+        }))
+      });
+      getChannelDetailsMock.mockResolvedValue({
+        channelId: "UC1234567890123456789012",
+        channelName: "Canal Concurrency",
+        channelStats: { subscriberCount: 1_000 },
+        warnings: []
+      });
+      downloadToBufferMock.mockImplementation(async () => {
+        await sleep(80);
+        return Buffer.from("thumb");
+      });
+      getTranscriptWithFallbackMock.mockImplementation(async () => {
+        await sleep(80);
+        return {
+          transcript: "transcript",
+          status: "ok",
+          source: "captions"
+        };
+      });
+
+      const { buildServer } = await import("../src/server.js");
+      app = await buildServer();
+
+      const startedAt = Date.now();
+      const createResponse = await app.inject({
+        method: "POST",
+        url: "/export/jobs",
+        payload: {
+          channelId: "UC1234567890123456789012",
+          channelName: "Canal Concurrency",
+          sourceInput: "https://www.youtube.com/@concurrency",
+          timeframe: "6m",
+          selectedVideoIds: videos.map((video) => video.videoId)
+        }
+      });
+      expect(createResponse.statusCode).toBe(200);
+      const { jobId } = createResponse.json() as { jobId: string };
+
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        const statusResponse = await app.inject({
+          method: "GET",
+          url: `/export/jobs/${jobId}`
+        });
+        const status = statusResponse.json() as { status: string };
+        if (status.status === "done") {
+          return Date.now() - startedAt;
+        }
+        if (status.status === "failed") {
+          throw new Error("job failed unexpectedly in concurrency benchmark");
+        }
+        await sleep(25);
+      }
+
+      throw new Error("job timeout in concurrency benchmark");
+    };
+
+    const sequentialMs = await runScenario(1);
+    const parallelMs = await runScenario(2);
+
+    expect(parallelMs).toBeLessThan(sequentialMs);
+  });
+
+  it("enforces EXPORT_ASR_CONCURRENCY=1 so ASR transcript tasks do not overlap", async () => {
+    await app.close();
+    vi.resetModules();
+
+    process.env.EXPORT_VIDEO_CONCURRENCY = "3";
+    process.env.EXPORT_HTTP_CONCURRENCY = "6";
+    process.env.EXPORT_ASR_CONCURRENCY = "1";
+    process.env.LOCAL_ASR_ENABLED = "true";
+    process.env.AUTO_GEN_ENABLED = "false";
+    process.env.THUMB_OCR_ENABLED = "false";
+    delete process.env.OPENAI_API_KEY;
+
+    getSelectedVideoDetailsMock.mockReset();
+    getVideoDetailsMock.mockReset();
+    getChannelDetailsMock.mockReset();
+    downloadToBufferMock.mockReset();
+    getTranscriptWithFallbackMock.mockReset();
+
+    const videos = Array.from({ length: 4 }, (_, index) => {
+      const id = `asr${String(index + 1).padStart(8, "0")}`;
+      return {
+        videoId: id,
+        title: `Video ${index + 1}`,
+        publishedAt: "2025-01-01T00:00:00.000Z",
+        viewCount: 100 + index,
+        thumbnailUrl: `https://img.example/${id}.jpg`
+      };
+    });
+
+    getSelectedVideoDetailsMock.mockResolvedValue({
+      warnings: [],
+      videos
+    });
+    getVideoDetailsMock.mockResolvedValue({
+      warnings: [],
+      videos: videos.map((video) => ({
+        videoId: video.videoId,
+        title: video.title,
+        description: `Description ${video.videoId}`,
+        publishedAt: video.publishedAt,
+        durationSec: 120,
+        categoryId: "22",
+        tags: [],
+        madeForKids: false,
+        liveBroadcastContent: "none",
+        statistics: {
+          viewCount: video.viewCount,
+          likeCount: 10,
+          commentCount: 4
+        },
+        thumbnails: {
+          high: { url: video.thumbnailUrl, width: 480, height: 360 }
+        },
+        thumbnailOriginalUrl: video.thumbnailUrl
+      }))
+    });
+    getChannelDetailsMock.mockResolvedValue({
+      channelId: "UC1234567890123456789012",
+      channelName: "Canal ASR",
+      channelStats: { subscriberCount: 1_000 },
+      warnings: []
+    });
+    downloadToBufferMock.mockResolvedValue(Buffer.from("thumb"));
+
+    let activeAsr = 0;
+    let maxActiveAsr = 0;
+    getTranscriptWithFallbackMock.mockImplementation(async () => {
+      activeAsr += 1;
+      maxActiveAsr = Math.max(maxActiveAsr, activeAsr);
+      await sleep(60);
+      activeAsr -= 1;
+      return {
+        transcript: "transcript",
+        status: "ok",
+        source: "asr"
+      };
+    });
+
+    const { buildServer } = await import("../src/server.js");
+    app = await buildServer();
+
+    const createResponse = await app.inject({
+      method: "POST",
+      url: "/export/jobs",
+      payload: {
+        channelId: "UC1234567890123456789012",
+        channelName: "Canal ASR",
+        sourceInput: "https://www.youtube.com/@asr",
+        timeframe: "6m",
+        selectedVideoIds: videos.map((video) => video.videoId)
+      }
+    });
+    expect(createResponse.statusCode).toBe(200);
+    const { jobId } = createResponse.json() as { jobId: string };
+
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      const statusResponse = await app.inject({
+        method: "GET",
+        url: `/export/jobs/${jobId}`
+      });
+      const status = statusResponse.json() as { status: string };
+      if (status.status === "done") {
+        break;
+      }
+      if (status.status === "failed") {
+        throw new Error("job failed unexpectedly in ASR concurrency test");
+      }
+      await sleep(25);
+    }
+
+    expect(maxActiveAsr).toBe(1);
   });
 });

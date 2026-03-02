@@ -172,6 +172,22 @@ Stages por video:
 - `warning`
 - `failed`
 
+Concurrencia configurable por ENV (scheduler interno, `apps/api/src/services/taskScheduler.ts`):
+
+- `EXPORT_VIDEO_CONCURRENCY` (default `3`): videos simultáneos.
+- `EXPORT_HTTP_CONCURRENCY` (default `6`): descargas/API HTTP (thumbnail/captions).
+- `EXPORT_ASR_CONCURRENCY` (default `LOCAL_ASR_MAX_CONCURRENCY`, usualmente `1`): tareas ASR.
+- `EXPORT_OCR_CONCURRENCY` (default `2`): OCR de thumbnails.
+- `EXPORT_LLM_CONCURRENCY` (default `2`): tareas AutoGen/LLM.
+- `EXPORT_EMBEDDINGS_CONCURRENCY` (default `2`): embeddings.
+- `EXPORT_FS_CONCURRENCY` (default `6`): escrituras/operaciones filesystem.
+- `EXPORT_FAIL_FAST` (default `false`): aborta el job en el primer error recuperable.
+
+Política de stage SSE con tareas simultáneas:
+
+- strategy `last-change-wins`: cuando transcript y thumbnail corren al mismo tiempo, el stage visible sigue el último cambio relevante emitido por backend.
+- `transcribing` solo se emite cuando hay fetch real de transcript (captions/ASR), no en cache hit completo.
+
 ### 5.3 Transcript pipeline (captions + fallback local ASR)
 
 Orquestación: `apps/api/src/services/transcriptPipeline.ts`
@@ -217,6 +233,21 @@ Detalles:
   - `apps/api/src/derived/assets/transcript-sentiment-lexicon.json`
   - `apps/api/src/derived/assets/transcript-emotions.json`
 - fallos de LLM/embeddings no rompen el export; quedan como warning y `llm: null`
+
+DAG por video (validado por `apps/api/src/services/exportPlan.ts`):
+
+- `cache_check` primero.
+- en paralelo si aplica:
+  - `transcript_fetch` (captions + fallback ASR),
+  - `thumbnail_download`.
+- dependencias obligatorias:
+  - `transcript -> transcript_derived`,
+  - `thumbnail_download -> thumbnail_derived`,
+  - `transcript -> write_raw_transcript`.
+- estrategia elegida para título:
+  - `title_derived` usa `waitForTranscript=true` (no rama parcial sin coverage).
+- `description_derived` puede correr sin esperar transcript/thumbnail.
+- si el validador de plan falla (deps faltantes/ciclos), el video cae a modo secuencial con warning.
 
 ### 5.5 Export Cache Persistente (filesystem)
 
@@ -297,6 +328,10 @@ Recomputación cruzada (siempre fresh por corrida):
 
 - `performanceNormalization` por conjunto exportado (afecta `performance.*` y `derived/channel_models.json`)
 - `orchestratorDeterministic` y `orchestratorService` (`analysis/orchestrator_input.json`, `analysis/playbook.json`, `derived/templates.json`)
+
+Regla de barrera cross-video:
+
+- `performanceNormalization` + `orchestrator*` arrancan solo cuando termina el subset completo de videos del job.
 
 ## 8) Frontend: estado y modal de progreso
 
