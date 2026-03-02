@@ -78,13 +78,23 @@
       "name": "projects-dashboard",
       "frontend": [
         "apps/web/src/pages/ProjectsList.tsx",
-        "apps/web/src/pages/ProjectDetail.tsx"
+        "apps/web/src/pages/ProjectDetail.tsx",
+        "apps/web/src/components/playbook/PlaybookView.tsx",
+        "apps/web/src/components/templates/TemplatesView.tsx",
+        "apps/web/src/components/model/ChannelModelView.tsx",
+        "apps/web/src/components/Tooltip.tsx",
+        "apps/web/src/lib/getByPath.ts"
       ],
       "backend": [
         "apps/api/src/server.ts",
         "apps/api/src/services/projectsService.ts"
       ],
-      "source": "exports/*"
+      "source": "exports/*",
+      "notes": [
+        "Artifact tabs load lazily (playbook/templates/model).",
+        "Fallback Raw JSON collapsable only in debug.",
+        "evidence_fields drill-down resolves values per videoId via getByPath."
+      ]
     }
   ],
   "endpoints": [
@@ -124,7 +134,11 @@
     },
     "derived": {
       "videoFeatures": "exports/<channel>/derived/video_features/<videoId>.json",
-      "channelModels": "exports/<channel>/derived/channel_models.json"
+      "channelModels": "exports/<channel>/derived/channel_models.json",
+      "templates": "exports/<channel>/derived/templates.json"
+    },
+    "analysis": {
+      "playbook": "exports/<channel>/analysis/playbook.json"
     },
     "cache": {
       "path": "exports/<channel>/.cache/index.json",

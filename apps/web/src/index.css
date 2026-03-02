@@ -20,4 +20,33 @@
   code {
     font-family: "IBM Plex Mono", "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    letter-spacing: -0.01em;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply btn bg-teal-600 text-white hover:bg-teal-700;
+  }
+
+  .btn-secondary {
+    @apply btn bg-slate-900 text-white hover:bg-slate-800;
+  }
+
+  .btn-ghost {
+    @apply btn bg-slate-100 text-slate-700 hover:bg-slate-200;
+  }
+
+  .panel {
+    @apply rounded-2xl border border-slate-200 bg-white shadow-sm;
+  }
 }

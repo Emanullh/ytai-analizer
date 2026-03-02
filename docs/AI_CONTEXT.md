@@ -54,6 +54,11 @@ Frontend:
 - `apps/web/src/pages/AnalyzePage.tsx`
 - `apps/web/src/pages/ProjectsList.tsx`
 - `apps/web/src/pages/ProjectDetail.tsx`
+- `apps/web/src/components/playbook/PlaybookView.tsx`
+- `apps/web/src/components/templates/TemplatesView.tsx`
+- `apps/web/src/components/model/ChannelModelView.tsx`
+- `apps/web/src/components/Tooltip.tsx`
+- `apps/web/src/lib/getByPath.ts`
 - `apps/web/src/exportJobState.ts`
 - `apps/web/src/types.ts`
 - `apps/web/vite.config.ts`
@@ -211,6 +216,22 @@ Worker ASR:
 - Mapa de módulos y responsabilidades: `docs/REPO_MAP.md`
 - evitar recomputar trabajo pesado por video (captions/ASR, OCR, embeddings, AutoGen)
 - soportar reuse parcial por subset de videos
+
+## 10) Dashboard semántico de Projects
+
+- `ProjectDetail` ya no depende de JSON dump por defecto para artifacts de canal.
+- Render semántico por tabs:
+  - `Overview`: KPIs, warnings y top videos.
+  - `Playbook`: insights/rules/keys/evidence con hints.
+  - `Templates`: title/thumbnail/script templates con hints.
+  - `Model`: baseline + coeficientes + fit del modelo de canal.
+  - `Jobs`: historial de jobs.
+- Los artifacts (`playbook`, `templates`, `channel_models`) se cargan lazy al abrir cada tab.
+- Hay fallback `Raw JSON` colapsable en modo debug (`import.meta.env.DEV`) para compatibilidad futura de schema.
+- `evidence_fields` soporta drill-down auditable:
+  - click en campo de evidencia -> panel lateral
+  - resolución de path con `getByPath`
+  - valores por `videoId` usando `/projects/:projectId/videos/:videoId` cacheado en frontend
 
 Reglas operativas:
 

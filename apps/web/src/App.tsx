@@ -13,7 +13,7 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_20%_0%,#e8f6f3_0%,#f8fafc_45%,#f8fafc_100%)] text-slate-900">
       <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/90 backdrop-blur">
-        <div className="mx-auto flex w-full max-w-7xl items-center justify-between px-4 py-3 sm:px-6 lg:px-8">
+        <div className="mx-auto flex w-full max-w-6xl items-center justify-between px-4 py-3 sm:px-6">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">ytai-analizer</p>
             <p className="text-sm text-slate-700">Analyze + Projects Dashboard</p>

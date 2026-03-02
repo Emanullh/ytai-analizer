@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { createInitialExportModalState, reduceExportModalState } from "../exportJobState";
 import { AnalyzeResponse, ExportJobCreateResponse, ExportSseEvent, ExportVideoStage, Timeframe, VideoItem } from "../types";
+import Tooltip from "../components/Tooltip";
 
 const timeframeOptions: Array<{ label: string; value: Timeframe }> = [
   { label: "Último mes", value: "1m" },
@@ -17,6 +18,17 @@ const stageLabelByKey: Record<ExportVideoStage, string> = {
   done: "Completado",
   warning: "Completado con warning",
   failed: "Falló"
+};
+
+const stageHintByKey: Record<ExportVideoStage, string> = {
+  queue: "Video en cola antes de iniciar procesamiento.",
+  downloading_audio: "Descarga de audio para captions/ASR.",
+  transcribing: "Extracción de transcript (captions o ASR).",
+  downloading_thumbnail: "Descarga/procesamiento de miniatura.",
+  writing_json: "Escritura de artifacts raw/derived.",
+  done: "Video exportado sin incidencias.",
+  warning: "Video exportado, con warning en alguna etapa.",
+  failed: "Video no pudo exportarse."
 };
 
 function formatViews(views: number): string {
@@ -225,8 +237,8 @@ export default function AnalyzePage() {
   }, []);
 
   return (
-    <div className="mx-auto flex w-full max-w-7xl flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
-      <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+    <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 px-4 py-6 sm:px-6">
+      <section className="panel p-5">
         <h1 className="text-2xl font-semibold text-slate-900">YTAI Analyzer</h1>
         <p className="mt-1 text-sm text-slate-600">Analiza videos por canal y exporta los seleccionados.</p>
 
@@ -258,11 +270,7 @@ export default function AnalyzePage() {
             </select>
           </label>
 
-          <button
-            type="submit"
-            disabled={status !== "idle"}
-            className="rounded-xl bg-teal-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-teal-700 disabled:cursor-not-allowed disabled:opacity-50"
-          >
+          <button type="submit" disabled={status !== "idle"} className="btn-primary">
             {status === "analyzing" ? "Analizando..." : "Analizar"}
           </button>
         </form>
@@ -292,13 +300,13 @@ export default function AnalyzePage() {
       </section>
 
       {result ? (
-        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <section className="panel p-5">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <h2 className="text-lg font-semibold text-slate-900">Videos</h2>
             <button
               disabled={!hasSelection || status !== "idle"}
               onClick={handleExport}
-              className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+              className="btn-secondary"
             >
               {status === "exporting" ? "Exportando..." : "Exportar seleccionados"}
             </button>
@@ -341,12 +349,12 @@ export default function AnalyzePage() {
 
       {exportModalState.isOpen ? (
         <div className="fixed inset-x-3 bottom-3 z-50 mx-auto w-full max-w-2xl sm:inset-x-6 sm:bottom-6" role="dialog" aria-modal="false" aria-label="Progreso de exportación">
-          <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl shadow-slate-900/20">
+          <section className="panel p-4 shadow-2xl shadow-slate-900/20">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="text-base font-semibold text-slate-900">Progreso de export</h3>
               <button
                 type="button"
-                className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-50"
+                className="btn-ghost !rounded-lg !px-3 !py-1.5 !text-xs !font-medium"
                 onClick={() => dispatchExportModal({ type: "close" })}
                 disabled={exportModalState.status === "starting"}
               >
@@ -369,11 +377,29 @@ export default function AnalyzePage() {
                     <span className="truncate text-slate-700" title={videoTitleById.get(videoId) ?? videoId}>
                       {videoTitleById.get(videoId) ?? videoId}
                     </span>
-                    <span className={`rounded-full px-2 py-0.5 font-medium ${stageBadgeClasses(stage)}`}>
-                      {stageLabelByKey[stage]}
-                    </span>
+                    <Tooltip content={stageHintByKey[stage]}>
+                      <span tabIndex={0} className={`cursor-help rounded-full px-2 py-0.5 font-medium ${stageBadgeClasses(stage)}`}>
+                        {stageLabelByKey[stage]}
+                      </span>
+                    </Tooltip>
                   </div>
                 ))}
+              </div>
+
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Stages</p>
+                <div className="mt-2 grid gap-1 sm:grid-cols-2">
+                  {Object.entries(stageLabelByKey).map(([key, label]) => (
+                    <div key={key} className="flex items-center justify-between gap-2 rounded-lg bg-white px-2 py-1.5 text-xs">
+                      <span className="text-slate-700">{label}</span>
+                      <Tooltip content={stageHintByKey[key as ExportVideoStage]}>
+                        <span tabIndex={0} className="cursor-help rounded-full border border-slate-300 px-1.5 text-slate-500">
+                          ?
+                        </span>
+                      </Tooltip>
+                    </div>
+                  ))}
+                </div>
               </div>
 
               {exportModalState.warnings.length ? (

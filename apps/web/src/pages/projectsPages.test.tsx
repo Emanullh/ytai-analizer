@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import ProjectDetail from "./ProjectDetail";
@@ -8,6 +8,7 @@ import ProjectsList from "./ProjectsList";
 
 afterEach(() => {
   vi.restoreAllMocks();
+  cleanup();
 });
 
 describe("Projects pages", () => {
@@ -133,7 +134,7 @@ describe("Projects pages", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText("Video Uno")).toBeInTheDocument();
+      expect(screen.getAllByText("Video Uno").length).toBeGreaterThan(0);
     });
     expect(screen.getByText("Videos (1)")).toBeInTheDocument();
   });

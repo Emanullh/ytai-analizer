@@ -119,15 +119,33 @@ Rutas frontend:
 - `apps/web/src/exportJobState.ts`: reducer del modal de progreso.
 - `apps/web/src/types.ts`: contratos compartidos de API/SSE.
 
-## 3.3 Infra web
+## 3.3 UI semántica Projects Dashboard
+
+- `apps/web/src/components/Tooltip.tsx`: tooltip reusable accesible (hover + focus + escape).
+- `apps/web/src/components/StatCard.tsx`: tarjetas de KPIs con hint contextual.
+- `apps/web/src/components/Badge.tsx`: badges de estado/variant.
+- `apps/web/src/components/Section.tsx`: bloque semántico de sección.
+- `apps/web/src/components/KeyValueTable.tsx`: tabla key/value para metadata y coeficientes.
+- `apps/web/src/components/Collapsible.tsx`: bloques colapsables para payloads extensos.
+- `apps/web/src/components/playbook/PlaybookView.tsx`: render semántico de `analysis.playbook.v1`.
+- `apps/web/src/components/templates/TemplatesView.tsx`: render semántico de `derived.templates.v1`.
+- `apps/web/src/components/model/ChannelModelView.tsx`: render semántico de `derived.channel_models.v1`.
+- `apps/web/src/lib/getByPath.ts`: navegación segura por path (`a.b.c`, `rows[0].x`) para drill-down.
+- `apps/web/src/lib/artifactUtils.ts`: guards/parsers para artifacts.
+
+## 3.4 Infra web
 
 - `apps/web/vite.config.ts`: proxy `/api` hacia `http://localhost:3001`.
 - `apps/web/src/index.css`: estilos base.
 
-## 3.4 Tests web
+## 3.5 Tests web
 
 - `apps/web/src/exportJobState.test.ts`
 - `apps/web/src/pages/projectsPages.test.tsx`
+- `apps/web/src/lib/getByPath.test.ts`
+- `apps/web/src/components/Tooltip.test.tsx`
+- `apps/web/src/components/playbook/PlaybookView.test.tsx`
+- `apps/web/src/components/model/ChannelModelView.test.tsx`
 
 ## 4) scripts (root)
 
