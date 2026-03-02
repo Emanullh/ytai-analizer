@@ -7,8 +7,14 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
-from autogen_agentchat.agents import AssistantAgent
-from autogen_ext.models.openai import OpenAIChatCompletionClient
+AUTOGEN_IMPORT_ERROR: str | None = None
+try:
+    from autogen_agentchat.agents import AssistantAgent
+    from autogen_ext.models.openai import OpenAIChatCompletionClient
+except Exception as import_error:  # pragma: no cover - depends on external runtime env
+    AUTOGEN_IMPORT_ERROR = str(import_error) or import_error.__class__.__name__
+    AssistantAgent = Any  # type: ignore[assignment]
+    OpenAIChatCompletionClient = Any  # type: ignore[assignment]
 
 TITLE_SYSTEM_PROMPT = """You are a strict classification agent. You must output ONLY valid JSON (no markdown, no prose).
 Task: classify a YouTube video title into closed taxonomies with confidence and evidence spans.
@@ -512,6 +518,19 @@ def log(message: str) -> None:
 def emit(payload: Dict[str, Any]) -> None:
     sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
     sys.stdout.flush()
+
+
+def ensure_autogen_available() -> None:
+    if AUTOGEN_IMPORT_ERROR is None:
+        return
+
+    requirements_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "requirements-autogen.txt")
+    python_bin = sys.executable or "python"
+    raise RuntimeError(
+        "AutoGen python dependencies are missing. "
+        f"Install them with: {python_bin} -m pip install -r {requirements_path}. "
+        f"Original import error: {AUTOGEN_IMPORT_ERROR}"
+    )
 
 
 def clamp_01(value: Any) -> float:
@@ -1378,6 +1397,8 @@ def parse_agent_json(content: str) -> Any:
 
 
 def build_model_client(request: Dict[str, Any], env_model_var: str) -> OpenAIChatCompletionClient:
+    ensure_autogen_available()
+
     provider = str(request.get("provider", "openai")).strip().lower() or "openai"
     if provider != "openai":
         raise ValueError(f"unsupported provider '{provider}'")

@@ -1,170 +1,145 @@
-Tarea: Implementar logging/tracing completo (event log + error log) para export jobs con trazabilidad end-to-end
+Tarea: Paralelizar el pipeline de export de forma segura (concurrency configurable por ENV) + validación de qué tareas pueden correr en paralelo
 
 Contexto:
-- Export flow asíncrono con SSE:
-  - POST /api/export/jobs -> jobId
-  - GET /api/export/jobs/:jobId/events -> stream SSE + replay
-- Backend coordina en:
-  - apps/api/src/server.ts
-  - apps/api/src/services/exportJobService.ts
-  - apps/api/src/services/exportService.ts
-- Side effects: filesystem bajo exports/<channel>/...
-- Hay múltiples sub-sistemas con riesgo de fallo:
-  - YouTube API, transcriptPipeline (captions/ASR), ASR worker, AutoGen worker, OCR, embeddings, cache service, orquestador
-- Requisito: “saber en qué momento falla” y poder reproducir/debuggear después, sin cambiar UX ni agregar endpoints nuevos.
+- Export job asíncrono con SSE en apps/api/src/services/exportJobService.ts + exportService.ts
+- Por video se ejecuta un pipeline con steps típicos:
+  - (A) cache_check
+  - (B) transcript (captions + fallback ASR local)
+  - (C) download thumbnail
+  - (D) derived features:
+      - title (det + embeddings opcionales + llm opcional)
+      - description (det + llm opcional)
+      - transcript (det + embeddings opcionales + llm opcional)
+      - thumbnail (det + OCR opcional + llm opcional)
+  - (E) write raw + derived JSON
+- Luego cross-video (siempre fresh):
+  - performanceNormalization (determinista)
+  - orchestratorDeterministic + orchestratorService (LLM opcional)
+- Requisito: identificar qué es paralelizable y ejecutarlo concurrentemente.
+- La cantidad de concurrent tasks debe definirse por env.
 
 Objetivo:
-Agregar un sistema de logs estructurados y persistentes por job, con:
-1) Event timeline (todas las etapas, timings, inputs clave, decisiones cache hit/miss, etc.)
-2) Error log (errores con stacktrace, categoría, contexto, correlación con step/video)
-3) Correlation IDs (jobId + videoId + stepId + requestId) para unir eventos.
-4) Persistencia en disco:
-   exports/<channel>/logs/
-     job_<jobId>.events.jsonl
-     job_<jobId>.errors.jsonl
-     job_<jobId>.summary.json
-   y/o dentro de exports/<channel>/analysis/ si prefieres, pero debe ser consistente y documentado.
+1) Implementar un “Task Scheduler” interno con concurrencia configurable por env:
+   - concurrencia por “tipo de tarea” y/o global
+2) Paralelizar:
+   - Entre videos: procesar múltiples videos en paralelo (con límites)
+   - Dentro de un video: paralelizar steps independientes (con límites) sin romper dependencias
+3) Mantener compatibilidad:
+   - mismos endpoints, mismo flujo UI
+   - SSE stages existentes (queue, transcribing, downloading_thumbnail, writing_json, etc.)
+4) No saturar recursos:
+   - ASR local en GPU debe seguir con concurrency bajo (default 1)
+   - OCR puede ser pesado (default 1-2)
+   - LLM/embeddings deben limitarse (default 2-4)
+   - Descargas HTTP (thumbnail/captions/youtube api) puede ser mayor (default 4-8)
+5) Debe existir validación explícita (documentada y testeada) de dependencias por step.
 
-No romper contratos:
-- No cambiar SSE event names obligatoriamente.
-- Se permite EMITIR warnings SSE adicionales (ya existe "warning") para reflejar fallos y que el usuario vea algo.
-- No agregar pasos extra en frontend.
+Nuevas variables ENV (apps/api/.env.example + env.ts):
+- EXPORT_VIDEO_CONCURRENCY (default 3)                 // cuántos videos simultáneos
+- EXPORT_HTTP_CONCURRENCY (default 6)                   // descargas/YouTube API/captions
+- EXPORT_ASR_CONCURRENCY (default 1)                    // ya existe LOCAL_ASR_MAX_CONCURRENCY, usarlo o mapear
+- EXPORT_OCR_CONCURRENCY (default 2)
+- EXPORT_LLM_CONCURRENCY (default 2)
+- EXPORT_EMBEDDINGS_CONCURRENCY (default 2)
+- EXPORT_FS_CONCURRENCY (default 6)                     // writes (JSON/thumbnails), puede ser 1 si prefieres
+- EXPORT_FAIL_FAST (default false)                      // si true, abortar job ante el primer error (hoy debe ser false)
 
-Diseño (recomendado):
-A) Logger estructurado por job (JSONL)
-- JSONL por performance y append-only.
-- Cada línea: 1 evento.
-- Campos comunes obligatorios:
-  - ts (ISO)
-  - level: trace|debug|info|warn|error
-  - jobId
-  - stepId (uuid corto o incremental)
-  - scope: "exportJob"|"exportService"|"youtube"|"transcript"|"asr"|"autogen"|"ocr"|"embeddings"|"cache"|"orchestrator"|"fs"
-  - action: string (ej "video_start", "cache_hit", "download_thumbnail", "asr_request", ...)
-  - videoId (opcional)
-  - stage (opcional, de los stages actuales)
-  - msg (string corto)
-  - data (object pequeño, redaccionado)
-- Para errores:
-  - error: { name, message, stack, code?, cause? }
-  - retry: { attempt, max, willRetry }
-
-B) Redacción / privacidad (no filtrar secretos)
-- Nunca loggear:
-  - API keys (YOUTUBE_API_KEY, OPENAI_API_KEY)
-  - prompts completos del LLM (puedes loggear hash + tamaño)
-- Sí loggear:
-  - modelos (AUTO_GEN_MODEL_*, embedding model)
-  - flags enabled/disabled
-  - sizes/counts/timings
-  - file paths RELATIVOS (no absolutos) bajo exports/<channel>/...
-
-C) Summary final por job
-- Escribir job_<jobId>.summary.json al finalizar (done/failed):
-  - startedAt, finishedAt, durationMs
-  - status done|failed
-  - exportedCount
-  - warningsCount, errorsCount
-  - perStageTimingsMs (aggregate)
-  - perVideo: status + timings + cacheHit type + transcriptStatus + llmUsed flags
-  - lastError (si failed) con scope/action/videoId
+Reglas de paralelización (debe quedar en código + docs):
+A) Dependencias por video (DAG):
+- transcript -> transcript-derived (transcript features) requiere transcript
+- thumbnail download -> thumbnail-derived requiere thumbnail local
+- title-derived requiere title + (opcional) transcript para coverage; pero si transcript no listo aún:
+  - computar title deterministic parcial (sin coverage) y completar luego cuando transcript esté listo (upgrade)
+  - o declarar dependencia titleDerived.waitForTranscript=true (decidir una sola estrategia y documentar)
+- description-derived requiere description (ya se obtiene de raw/videos.jsonl o YouTube metadata)
+- write raw transcripts requiere transcript result
+- write derived puede hacerse incremental cuando cada sub-feature esté lista (merge)
+B) Entre videos:
+- Los videos son independientes excepto por recursos compartidos (rate limits, GPU, OCR).
+- performanceNormalization + orchestrator deben correr solo cuando todos los videos del subset hayan terminado.
 
 Implementación requerida:
-1) Crear módulo base:
-- apps/api/src/observability/jobLogger.ts
-  - createJobLogger({exportRootAbs, channelFolder, jobId}): JobLogger
-  - logger.event({level, scope, action, stage?, videoId?, msg?, data?})
-  - logger.error({scope, action, stage?, videoId?, err, data?, retry?})
-  - logger.flush() (opcional)
-  - logger.close()
-  - logger.summary({status, ...})
+1) Introducir un scheduler ligero (sin dependencias pesadas):
+- Preferido: usar `p-limit` y colas por tipo.
+  - Crear apps/api/src/services/taskScheduler.ts
+    - createScheduler({video, http, asr, ocr, llm, embeddings, fs}): Scheduler
+    - scheduler.run("http", fn) / scheduler.run("llm", fn) etc.
+    - scheduler.runVideo(videoId, fn) aplica límite de videos
+  - Alternativa: implementación propia con semáforos (Promise queue).
+2) Modificar exportService.ts para:
+- Procesar videos usando scheduler.runVideo(videoId, async ()=> pipelineVideo(videoId))
+- Dentro de pipelineVideo:
+  - arrancar tareas paralelas cuando sea seguro:
+    a) cache_check (primero, sync)
+    b) en paralelo (según cache):
+       - transcript: scheduler.run("http" + "asr") ya interno
+       - thumbnail download: scheduler.run("http")
+       - description deterministic: inmediato
+       - title deterministic básico: inmediato
+    c) cuando transcript termina:
+       - title coverage + transcriptFeatures deterministic: scheduler.run("embeddings" opcional)
+       - transcript LLM (autogen): scheduler.run("llm") (si enabled)
+       - escribir raw transcript JSONL: scheduler.run("fs")
+    d) cuando thumbnail termina:
+       - OCR: scheduler.run("ocr") (si enabled)
+       - thumbnail LLM (autogen multimodal): scheduler.run("llm") (si enabled)
+       - escribir thumbnail + update cache: scheduler.run("fs")
+    e) derived merge/writes:
+       - cada sub-feature al completarse hace merge incremental y write atómico via scheduler.run("fs")
+- Debe quedar una función clara que defina el DAG (documentarla en comments).
+3) Integración con Export Cache:
+- Si cache hit full:
+  - pipelineVideo solo “revalida existencia” y emite eventos mínimos (fs checks bajo scheduler.fs)
+- Si cache partial:
+  - solo schedule de tasks faltantes según invalidación granular
+4) SSE/Progress:
+- Mantener stages existentes:
+  - transcribing -> solo cuando transcript task esté ejecutándose
+  - downloading_thumbnail -> cuando download thumbnail está ejecutándose
+  - writing_json -> cuando hay writes/merge/orchestrator
+- Para paralelismo:
+  - Asegurar que video_progress percent y stage no se contradigan:
+    - si transcript y thumbnail corren a la vez, elegir stage por prioridad:
+      transcribing > downloading_thumbnail > writing_json
+    - o emitir stage según “último cambio relevante” (documentar)
+- Emite warnings si se detecta “backpressure” (colas largas) opcional.
 
-- Debe abrir 2 write streams:
-  - events.jsonl
-  - errors.jsonl
-  append-only, fsync razonable (flush en puntos clave).
-
-2) Integración en exportJobService (alto nivel):
-- Al crear job: log event "job_created"
-- Al iniciar running: "job_started" + snapshot config (sin secretos):
-  - exportVersion, timeframe, AUTO_GEN_ENABLED, LOCAL_ASR_ENABLED, THUMB_OCR_ENABLED, embeddingModel, llmModels, cacheEnabled
-- Al finalizar: "job_done"/"job_failed" con summary + escribir summary.json
-
-3) Integración en exportService (bajo nivel, por video):
-Añadir eventos en puntos críticos:
-- video_start (con videoId)
-- cache_check_start / cache_hit_full / cache_hit_partial / cache_miss
-  - data: reasons[], invalidationFlags, willCompute:{...}
-- transcript_start / captions_attempt / captions_result / asr_attempt / asr_result
-  - data: transcriptSource, transcriptStatus, segmentsCount, transcriptLen
-- thumbnail_download_start / thumbnail_download_done
-  - data: urlDomain, bytes, ms
-- ocr_start / ocr_done (si THUMB_OCR_ENABLED)
-  - data: ocrWordCount, textAreaRatio, ms
-- embeddings_start / embeddings_done (si OPENAI_API_KEY)
-  - data: model, inputChars, ms
-- autogen_task_start / autogen_task_done (por task: description/transcript/thumbnail/orchestrator)
-  - data: taskName, model, reasoningEffort, inputBytes, outputBytes, ms, ok
-- derived_write_start / derived_write_done
-- raw_write_start / raw_write_done
-- orchestrator_start / orchestrator_done
-- video_done (con timings agregados)
-- En cada catch:
-  - logger.error(...) con err + scope + action + stage + videoId + retry info
-  - emitir SSE warning (ya existe) con message corto y correlacionable:
-    "ERR <scope>/<action> stepId=<...> (see logs/job_<jobId>.errors.jsonl)"
-
-4) Correlation IDs y stepIds
-- Implementar helper:
-  - apps/api/src/observability/ids.ts
-    - newStepId()
-- Cada operación relevante genera stepId y se propaga (en data/event).
-- Cuando llames workers (ASR/AutoGen) ya existe id uuid:
-  - loggear mapping: workerRequestId <-> stepId.
-
-5) Manejo de errores y clasificación
-- Implementar classifyError(err) -> { code, kind }:
-  - network_timeout, rate_limited, invalid_response, fs_error, worker_crash, schema_validation_failed, etc.
-- Guardar code/kind en error log para filtros.
-
-6) “Debug bundle” opcional (sin secretos)
-- En caso de job_failed, crear:
-  exports/<channel>/logs/job_<jobId>.debug_bundle.json
-  con:
-  - manifest/artifacts list
-  - last 200 events
-  - last 50 errors
-  - env snapshot sin secretos
-  Esto acelera reporte de bugs.
-
-7) Tests
-- apps/api/tests/jobLogger.test.ts:
-  - escribe eventos/errors y produce JSONL válido
-  - summary.json correcto
+Validación de paralelización (obligatoria):
+5) Implementar un “plan validator”:
+- apps/api/src/services/exportPlan.ts
+  - buildVideoPlan(videoContext): retorna lista de tasks con deps:
+    [{id, type, deps[], produces[], consumes[]}]
+  - validatePlan(tasks):
+    - no cycles
+    - no dep missing
+    - tasks paralelas no comparten recursos exclusivos (ej ASR GPU) más allá del límite
+- En runtime:
+  - loggear el plan (resumen) al inicio del job
+  - si validatePlan falla -> fallback a modo secuencial + warning (no romper)
+6) Tests:
+- apps/api/tests/taskScheduler.test.ts:
+  - respeta límites de concurrencia (usar contadores/locks)
+- apps/api/tests/exportPlan.test.ts:
+  - DAG válido, sin ciclos, deps correctas
 - apps/api/tests/exportJobs.test.ts:
-  - al ejecutar export job, verificar que:
-    - existe logs/job_<jobId>.events.jsonl
-    - existe logs/job_<jobId>.errors.jsonl (puede estar vacío pero archivo existe)
-    - summary.json existe y status==done
-  - simular fallo (mock transcriptPipeline throw):
-    - status failed
-    - errors.jsonl contiene entry con scope/transcript
-    - SSE warning emitido con stepId
-
-8) Docs
-- Actualizar AI Context Pack + DATA_CONTRACTS.md:
-  - describir carpeta exports/<channel>/logs/
-  - describir formato JSONL y cómo buscar errores:
-    - grep stepId
-    - filtrar por videoId
-  - especificar que no incluye secretos.
+  - con env EXPORT_VIDEO_CONCURRENCY=2, verificar que se ejecutan 2 videos en paralelo:
+    - mock tasks con delays y medir que el tiempo total disminuye vs secuencial
+  - con ASR_CONCURRENCY=1, verificar que no hay dos transcribes ASR simultáneos (mock lock)
+7) Docs:
+- AI Context Pack:
+  - explicar env vars de concurrencia
+  - explicar DAG y qué corre en paralelo
+  - explicar prioridades de stage SSE cuando hay tareas simultáneas
+- DATA_CONTRACTS:
+  - no cambia contrato, pero documenta que percent puede ser más granular.
 
 Restricciones:
-- No introducir dependencia pesada (preferir fs streams nativos).
-- No loggear prompts completos; solo hashes.
-- No cambiar UX ni agregar endpoints; todo integrado al flujo export existente.
+- No agregar endpoints.
+- No cambiar UX.
+- Debe ser estable en macOS y Windows.
+- Debe degradar a secuencial si hay error de plan o recursos.
 
 Entrega:
-- Logging persistente por job con eventos y errores.
-- Mensajes SSE warning con stepId para correlacionar con logs.
+- Pipeline concurrente configurable por env.
+- Validación explícita del plan (DAG) y fallback seguro.
 - Tests verdes.

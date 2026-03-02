@@ -129,6 +129,16 @@ function resolveAutoGenPythonPath(): string {
     return fromAsrEnv;
   }
 
+  const venvRelativePath =
+    process.platform === "win32" ? path.join(".venv-asr", "Scripts", "python.exe") : path.join(".venv-asr", "bin", "python");
+  const rootCandidates = [process.cwd(), path.resolve(process.cwd(), ".."), path.resolve(process.cwd(), "..", "..")];
+  for (const rootCandidate of rootCandidates) {
+    const venvPython = path.resolve(rootCandidate, venvRelativePath);
+    if (existsSync(venvPython)) {
+      return venvPython;
+    }
+  }
+
   return process.platform === "win32" ? "python" : "python3";
 }
 
@@ -269,7 +279,19 @@ class AutoGenWorkerClient {
       return;
     }
 
-    await this.ensureWorker();
+    try {
+      await this.ensureWorker();
+    } catch (error) {
+      while (this.queue.length) {
+        const queuedTask = this.queue.shift();
+        if (!queuedTask) {
+          continue;
+        }
+        clearTimeout(queuedTask.timeout);
+        queuedTask.reject(error);
+      }
+      return;
+    }
 
     const task = this.queue.shift();
     if (!task || !this.worker) {
@@ -286,7 +308,14 @@ class AutoGenWorkerClient {
       reasoningEffort: task.request.reasoningEffort ?? env.autoGenReasoningEffort
     };
 
-    this.worker.stdin.write(`${JSON.stringify(requestPayload)}\n`);
+    this.worker.stdin.write(`${JSON.stringify(requestPayload)}\n`, (error?: Error | null) => {
+      if (!error) {
+        return;
+      }
+
+      this.rejectTask(task.id, new AutoGenWorkerCrashedError(`AutoGen worker stdin write failed: ${error.message}`));
+      this.terminateWorker();
+    });
   }
 
   private async ensureWorker(): Promise<void> {
@@ -325,6 +354,12 @@ class AutoGenWorkerClient {
           // eslint-disable-next-line no-console
           console.error(`[autogen] ${message}`);
         }
+      });
+
+      child.stdin.on("error", (error: NodeJS.ErrnoException) => {
+        const reason = `AutoGen worker stdin error (${error.code ?? "UNKNOWN"}): ${error.message}`;
+        this.worker = null;
+        this.rejectAllInFlight(new AutoGenWorkerCrashedError(reason));
       });
 
       child.once("spawn", () => resolve());

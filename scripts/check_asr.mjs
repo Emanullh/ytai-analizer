@@ -27,7 +27,8 @@ function resolvePythonPath() {
 }
 
 const pythonPath = resolvePythonPath();
-const check = spawnSync(pythonPath, ["-c", "import faster_whisper"], {
+const modulesToCheck = ["faster_whisper", "autogen_agentchat", "autogen_ext"];
+const check = spawnSync(pythonPath, ["-c", modulesToCheck.map((moduleName) => `import ${moduleName}`).join("; ")], {
   cwd: repoRoot,
   encoding: "utf-8"
 });
@@ -43,11 +44,11 @@ if (check.status !== 0) {
   const stdout = check.stdout?.trim();
   const message = stderr || stdout || "unknown error";
   // eslint-disable-next-line no-console
-  console.error(`[asr:check] faster_whisper import failed using ${pythonPath}`);
+  console.error(`[asr:check] Python dependency import check failed using ${pythonPath}`);
   // eslint-disable-next-line no-console
   console.error(`[asr:check] ${message}`);
   process.exit(1);
 }
 
 // eslint-disable-next-line no-console
-console.log(`[asr:check] OK using ${pythonPath}`);
+console.log(`[asr:check] OK using ${pythonPath} (${modulesToCheck.join(", ")})`);

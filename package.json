@@ -11,8 +11,10 @@
     "dev": "concurrently -n api,web -c yellow,cyan \"pnpm -C apps/api dev\" \"pnpm -C apps/web dev\"",
     "build": "pnpm -r --filter './apps/*' run build",
     "test": "pnpm -r --filter './apps/*' --if-present run test",
-    "asr:setup": "node scripts/setup_asr.mjs",
-    "asr:check": "node scripts/check_asr.mjs"
+    "python:setup": "node scripts/setup_asr.mjs",
+    "python:check": "node scripts/check_asr.mjs",
+    "asr:setup": "pnpm python:setup",
+    "asr:check": "pnpm python:check"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

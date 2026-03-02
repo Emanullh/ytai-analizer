@@ -34,11 +34,11 @@ pnpm install
 cp apps/api/.env.example apps/api/.env
 ```
 
-3. Preparar ASR local (recomendado):
+3. Preparar entorno Python local (ASR + AutoGen):
 
 ```bash
-pnpm asr:setup
-pnpm asr:check
+pnpm python:setup
+pnpm python:check
 ```
 
 ## ASR local (Whisper)
@@ -56,8 +56,8 @@ brew install ffmpeg
 2. Setup recomendado (automático):
 
 ```bash
-pnpm asr:setup
-pnpm asr:check
+pnpm python:setup
+pnpm python:check
 ```
 
 3. Setup manual equivalente:
@@ -67,6 +67,7 @@ python3 -m venv .venv-asr
 source .venv-asr/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r apps/api/scripts/requirements-asr.txt
+python -m pip install -r apps/api/scripts/requirements-autogen.txt
 ```
 
 ### Windows
@@ -75,8 +76,8 @@ python -m pip install -r apps/api/scripts/requirements-asr.txt
 2. Setup recomendado (automático):
 
 ```powershell
-pnpm asr:setup
-pnpm asr:check
+pnpm python:setup
+pnpm python:check
 ```
 
 3. Setup manual equivalente:
@@ -86,6 +87,7 @@ python -m venv .venv-asr
 .\.venv-asr\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -r apps/api/scripts/requirements-asr.txt
+python -m pip install -r apps/api/scripts/requirements-autogen.txt
 ```
 
 4. CUDA opcional (RTX):
@@ -98,7 +100,7 @@ python -m pip install -r apps/api/scripts/requirements-asr.txt
 Si ves `error: externally-managed-environment`, significa que `pip` está intentando instalar en el Python administrado por Homebrew/sistema.
 
 Solución en este repo:
-- usar `pnpm asr:setup` o
+- usar `pnpm python:setup` o
 - crear/activar `.venv-asr` y luego instalar requirements dentro de ese venv.
 
 No uses `--break-system-packages`.
@@ -180,8 +182,8 @@ El JSON final siempre escribe `transcript` como string.
 
 ```bash
 pnpm install
-pnpm asr:setup
-pnpm asr:check
+pnpm python:setup
+pnpm python:check
 pnpm dev
 pnpm test
 ```
