@@ -303,6 +303,17 @@ describe("export jobs + SSE progress", () => {
     expect(statusBody.completed).toBe(statusBody.total);
     expect(statusBody.exportPath).toBeTruthy();
 
+    const logsFolderPath = path.join(statusBody.exportPath as string, "logs");
+    const eventsLogPath = path.join(logsFolderPath, `job_${createJobPayload.jobId}.events.jsonl`);
+    const errorsLogPath = path.join(logsFolderPath, `job_${createJobPayload.jobId}.errors.jsonl`);
+    const summaryLogPath = path.join(logsFolderPath, `job_${createJobPayload.jobId}.summary.json`);
+    await fs.access(eventsLogPath);
+    await fs.access(errorsLogPath);
+    await fs.access(summaryLogPath);
+    const summaryRaw = await fs.readFile(summaryLogPath, "utf-8");
+    const summary = JSON.parse(summaryRaw) as { status: string };
+    expect(summary.status).toBe("done");
+
     const exportedJsonRaw = await fs.readFile(path.join(statusBody.exportPath as string, "channel.json"), "utf-8");
     const exportedJson = JSON.parse(exportedJsonRaw) as {
       exportVersion: string;
@@ -916,7 +927,7 @@ describe("export jobs + SSE progress", () => {
     );
   });
 
-  it("continues export with warning when transcript pipeline throws (ASR health-check failure)", async () => {
+  it("fails job and writes transcript-scoped error log when transcript snapshot read fails", async () => {
     getSelectedVideoDetailsMock.mockResolvedValue({
       warnings: [],
       videos: [
@@ -963,7 +974,21 @@ describe("export jobs + SSE progress", () => {
       warnings: []
     });
     downloadToBufferMock.mockResolvedValue(Buffer.from("thumbnail"));
-    getTranscriptWithFallbackMock.mockRejectedValue(new Error("Local ASR disabled: unable to import faster_whisper"));
+    getTranscriptWithFallbackMock.mockResolvedValue({
+      transcript: "transcript test",
+      status: "ok",
+      source: "captions"
+    });
+
+    const transcriptPathAsDirectory = path.join(
+      tempDir,
+      "exports",
+      "Canal_Demo_Jobs",
+      "raw",
+      "transcripts",
+      "video0000099.jsonl"
+    );
+    await fs.mkdir(transcriptPathAsDirectory, { recursive: true });
 
     const createJobResponse = await app.inject({
       method: "POST",
@@ -988,19 +1013,33 @@ describe("export jobs + SSE progress", () => {
     expect(eventsResponse.statusCode).toBe(200);
     const events = parseSsePayload(eventsResponse.body);
     expect(events.some((event) => event.event === "warning")).toBe(true);
-    expect(events.at(-1)?.event).toBe("job_done");
+    expect(events.at(-1)?.event).toBe("job_failed");
 
     const warningEvent = events.find((event) => event.event === "warning");
-    expect(warningEvent?.data.message).toContain("Transcript pipeline failed");
+    expect(typeof warningEvent?.data.message).toBe("string");
+    expect((warningEvent?.data.message as string) || "").toContain("stepId=");
 
     const jobStatusResponse = await app.inject({
       method: "GET",
       url: `/export/jobs/${createJobPayload.jobId}`
     });
     expect(jobStatusResponse.statusCode).toBe(200);
-    const statusBody = jobStatusResponse.json() as { status: string; completed: number; total: number };
-    expect(statusBody.status).toBe("done");
-    expect(statusBody.completed).toBe(1);
-    expect(statusBody.total).toBe(1);
+    const statusBody = jobStatusResponse.json() as { status: string; completed: number; total: number; error?: string };
+    expect(statusBody.status).toBe("failed");
+    expect(typeof statusBody.error).toBe("string");
+
+    const logsFolderPath = path.join(tempDir, "exports", "Canal_Demo_Jobs", "logs");
+    const errorsLogPath = path.join(logsFolderPath, `job_${createJobPayload.jobId}.errors.jsonl`);
+    const summaryPath = path.join(logsFolderPath, `job_${createJobPayload.jobId}.summary.json`);
+    const errorsRaw = await fs.readFile(errorsLogPath, "utf-8");
+    const errors = errorsRaw
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(errors.some((entry) => entry.scope === "transcript")).toBe(true);
+    const summaryRaw = await fs.readFile(summaryPath, "utf-8");
+    const summary = JSON.parse(summaryRaw) as { status: string };
+    expect(summary.status).toBe("failed");
   });
 });

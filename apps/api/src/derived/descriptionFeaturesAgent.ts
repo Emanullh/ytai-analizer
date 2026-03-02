@@ -96,6 +96,9 @@ export interface PersistDescriptionFeaturesArgs extends ComputeDescriptionFeatur
     deterministic?: boolean;
     llm?: boolean;
   };
+  trace?: {
+    onAutoGenWorkerRequestId?: (workerRequestId: string) => void;
+  };
 }
 
 export interface PersistDescriptionFeaturesResult extends ComputeDescriptionFeaturesResult {
@@ -247,6 +250,7 @@ async function callAutoGenDescriptionClassifier(input: {
   description: string;
   urlsWithSpans: UrlWithSpan[];
   languageHint: "auto" | "en" | "es";
+  onAutoGenWorkerRequestId?: (workerRequestId: string) => void;
 }): Promise<{ value: DescriptionLlmResultV1 | null; warnings: string[] }> {
   if (!env.autoGenEnabled) {
     return {
@@ -263,8 +267,8 @@ async function callAutoGenDescriptionClassifier(input: {
   }
 
   try {
-    const raw = await requestAutoGenTask({
-      task: "description_classifier_v1",
+    const requestPayload = {
+      task: "description_classifier_v1" as const,
       payload: {
         videoId: input.videoId,
         title: input.title,
@@ -272,10 +276,13 @@ async function callAutoGenDescriptionClassifier(input: {
         urlsWithSpans: input.urlsWithSpans.slice(0, 10),
         languageHint: input.languageHint
       },
-      provider: "openai",
+      provider: "openai" as const,
       model: env.autoGenModelDescription,
       reasoningEffort: env.autoGenReasoningEffort
-    });
+    };
+    const raw = input.onAutoGenWorkerRequestId
+      ? await requestAutoGenTask(requestPayload, { onWorkerRequestId: input.onAutoGenWorkerRequestId })
+      : await requestAutoGenTask(requestPayload);
 
     return {
       value: normalizeDescriptionLlmResult(raw, input.description),
@@ -424,7 +431,8 @@ export async function persistDescriptionFeaturesArtifact(
       title: args.title,
       description: args.description,
       urlsWithSpans,
-      languageHint: args.languageHint ?? "auto"
+      languageHint: args.languageHint ?? "auto",
+      onAutoGenWorkerRequestId: args.trace?.onAutoGenWorkerRequestId
     });
     llm = llmResult.value;
     warnings.push(...llmResult.warnings);

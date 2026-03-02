@@ -92,6 +92,10 @@ export type AutoGenTaskRequest =
   | AutoGenThumbnailTaskRequest
   | AutoGenChannelOrchestratorTaskRequest;
 
+export interface AutoGenTaskRequestOptions {
+  onWorkerRequestId?: (workerRequestId: string) => void;
+}
+
 interface AutoGenInFlightTask {
   id: string;
   request: AutoGenTaskRequest;
@@ -232,22 +236,23 @@ class AutoGenWorkerClient {
     this.terminateWorker();
   }
 
-  async requestWithRetry(request: AutoGenTaskRequest): Promise<unknown> {
+  async requestWithRetry(request: AutoGenTaskRequest, options: AutoGenTaskRequestOptions = {}): Promise<unknown> {
     try {
-      return await this.enqueue(request);
+      return await this.enqueue(request, options);
     } catch (error) {
       if (!(error instanceof AutoGenWorkerCrashedError)) {
         throw error;
       }
 
       await this.restartWorker();
-      return this.enqueue(request);
+      return this.enqueue(request, options);
     }
   }
 
-  private async enqueue(request: AutoGenTaskRequest): Promise<unknown> {
+  private async enqueue(request: AutoGenTaskRequest, options: AutoGenTaskRequestOptions): Promise<unknown> {
     return new Promise<unknown>((resolve, reject) => {
       const id = randomUUID();
+      options.onWorkerRequestId?.(id);
       const timeoutMs = env.autoGenTimeoutSec * 1_000;
       const timeout = setTimeout(() => {
         this.rejectTask(id, new Error(`AutoGen worker timeout after ${env.autoGenTimeoutSec}s`));
@@ -417,6 +422,9 @@ export function stopAutoGenWorker(): void {
   autoGenWorkerClient.stop();
 }
 
-export async function requestAutoGenTask(request: AutoGenTaskRequest): Promise<unknown> {
-  return autoGenWorkerClient.requestWithRetry(request);
+export async function requestAutoGenTask(
+  request: AutoGenTaskRequest,
+  options: AutoGenTaskRequestOptions = {}
+): Promise<unknown> {
+  return autoGenWorkerClient.requestWithRetry(request, options);
 }

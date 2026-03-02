@@ -155,6 +155,12 @@ Eventos SSE emitidos:
 - `job_done`
 - `job_failed`
 
+Correlación runtime:
+
+- warnings técnicos pueden incluir `stepId`:
+  - `ERR <scope>/<action> stepId=<id> (see logs/job_<jobId>.errors.jsonl)`
+- esto permite unir SSE con logs persistentes por job.
+
 Stages por video:
 
 - `queue`
@@ -245,6 +251,10 @@ Reglas operativas:
 Export (`apps/api/src/services/exportService.ts`) escribe en:
 
 - `exports/<channel_sanitizado>/channel.json`
+- `exports/<channel_sanitizado>/logs/job_<jobId>.events.jsonl`
+- `exports/<channel_sanitizado>/logs/job_<jobId>.errors.jsonl`
+- `exports/<channel_sanitizado>/logs/job_<jobId>.summary.json`
+- `exports/<channel_sanitizado>/logs/job_<jobId>.debug_bundle.json` (solo si `job_failed`)
 - `exports/<channel_sanitizado>/thumbnails/<videoId>.jpg`
 - `exports/<channel_sanitizado>/raw/channel.json`
 - `exports/<channel_sanitizado>/raw/videos.jsonl`
@@ -264,6 +274,7 @@ Temporal de ASR:
 Protección de path traversal:
 
 - `ensureInsideRoot(...)` en `exportService.ts` para garantizar escritura bajo `exports/`.
+- logs JSONL redaccionan secretos; no incluyen API keys ni prompts completos.
 
 ## 7) Formato de export (resumen)
 

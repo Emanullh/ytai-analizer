@@ -1,181 +1,170 @@
-Tarea: Implementar cache persistente de export/análisis para reutilizar artifacts y evitar recomputación (sin cambios de UX ni pasos extra en frontend)
+Tarea: Implementar logging/tracing completo (event log + error log) para export jobs con trazabilidad end-to-end
 
-Contexto (repo actual):
-- Export flow asíncrono con SSE: POST /api/export/jobs + EventSource + stages existentes.
-- Export produce (por canal/job) múltiples artifacts en exports/<channel_folder>/:
-  - channel.json, manifest.json, raw/*, thumbnails/*, derived/video_features/*, derived/channel_models.json,
-    analysis/orchestrator_input.json, analysis/playbook.json, derived/templates.json
-- Derived Features Agents se ejecutan en exportService.ts por video.
-- Fallos LLM/embeddings no rompen el export; se registran warnings.
+Contexto:
+- Export flow asíncrono con SSE:
+  - POST /api/export/jobs -> jobId
+  - GET /api/export/jobs/:jobId/events -> stream SSE + replay
+- Backend coordina en:
+  - apps/api/src/server.ts
+  - apps/api/src/services/exportJobService.ts
+  - apps/api/src/services/exportService.ts
+- Side effects: filesystem bajo exports/<channel>/...
+- Hay múltiples sub-sistemas con riesgo de fallo:
+  - YouTube API, transcriptPipeline (captions/ASR), ASR worker, AutoGen worker, OCR, embeddings, cache service, orquestador
+- Requisito: “saber en qué momento falla” y poder reproducir/debuggear después, sin cambiar UX ni agregar endpoints nuevos.
 
 Objetivo:
-Cuando se ejecuta un nuevo export para el mismo canal/timeframe (y/o subconjunto de videos):
-1) Reutilizar lo ya calculado/descargado (thumbnails, transcripts, derived per-video) si siguen válidos.
-2) Evitar recomputar trabajo pesado “por video” (captions/ASR, OCR, embeddings, AutoGen classifiers) si existe cache válido.
-3) Recalcular solo:
-   - lo que depende del conjunto seleccionado o “data cruzada”: performance normalization, cohorts/drivers, orchestrator_input, playbook, templates (porque cambian por selección/timeframe).
-4) Mantener el mismo flujo UI (sin nuevos pasos), mismos endpoints, mismos stages. Se permiten más eventos warning/info (pero sin cambiar contratos).
-5) El cache debe ser determinista, auditable y seguro (sin path traversal).
+Agregar un sistema de logs estructurados y persistentes por job, con:
+1) Event timeline (todas las etapas, timings, inputs clave, decisiones cache hit/miss, etc.)
+2) Error log (errores con stacktrace, categoría, contexto, correlación con step/video)
+3) Correlation IDs (jobId + videoId + stepId + requestId) para unir eventos.
+4) Persistencia en disco:
+   exports/<channel>/logs/
+     job_<jobId>.events.jsonl
+     job_<jobId>.errors.jsonl
+     job_<jobId>.summary.json
+   y/o dentro de exports/<channel>/analysis/ si prefieres, pero debe ser consistente y documentado.
 
-Definición de “cache”:
-- Cache persistente en filesystem dentro de exports/ usando una carpeta de canal “stable”:
-  exports/<channel_folder>/.cache/
-- La cache se indexa por:
-  - channelId
-  - exportVersion (1.1 actual)
-  - timeframe
-  - videoId
-  - fingerprints de inputs relevantes (ej: hash del thumbnail, transcriptSource, model configs)
-- Debe soportar “partial reuse”:
-  - si el usuario exporta un subconjunto, reutiliza los videos ya cacheados y procesa solo los faltantes.
+No romper contratos:
+- No cambiar SSE event names obligatoriamente.
+- Se permite EMITIR warnings SSE adicionales (ya existe "warning") para reflejar fallos y que el usuario vea algo.
+- No agregar pasos extra en frontend.
 
-Requisitos funcionales:
-A) Cache Index
-1) Crear archivo:
-   exports/<channel_folder>/.cache/index.json
-   con schema:
-   {
-     "schemaVersion": "cache.index.v1",
-     "channelId": "...",
-     "channelFolder": "...",
-     "updatedAt": "ISO",
-     "exportVersion": "1.1",
-     "timeframes": {
-       "1m": { "videos": { "<videoId>": CacheEntry } },
-       "6m": { "videos": { "<videoId>": CacheEntry } },
-       "1y": { "videos": { "<videoId>": CacheEntry } }
-     }
-   }
+Diseño (recomendado):
+A) Logger estructurado por job (JSONL)
+- JSONL por performance y append-only.
+- Cada línea: 1 evento.
+- Campos comunes obligatorios:
+  - ts (ISO)
+  - level: trace|debug|info|warn|error
+  - jobId
+  - stepId (uuid corto o incremental)
+  - scope: "exportJob"|"exportService"|"youtube"|"transcript"|"asr"|"autogen"|"ocr"|"embeddings"|"cache"|"orchestrator"|"fs"
+  - action: string (ej "video_start", "cache_hit", "download_thumbnail", "asr_request", ...)
+  - videoId (opcional)
+  - stage (opcional, de los stages actuales)
+  - msg (string corto)
+  - data (object pequeño, redaccionado)
+- Para errores:
+  - error: { name, message, stack, code?, cause? }
+  - retry: { attempt, max, willRetry }
 
-2) CacheEntry por video:
-   {
-     "videoId": "...",
-     "lastUpdatedAt": "ISO",
-     "inputs": {
-       "titleHash": "sha1",
-       "descriptionHash": "sha1",
-       "thumbnailHash": "sha1",
-       "transcriptHash": "sha1",
-       "transcriptSource": "captions|asr|none",
-       "asrConfigHash": "sha1",               // (model/computeType/lang/beam)
-       "ocrConfigHash": "sha1",               // (langs/downscaleWidth)
-       "embeddingModel": "text-embedding-3-large",
-       "llmModels": {
-         "title": "gpt-5.2",
-         "description": "gpt-5.2",
-         "transcript": "gpt-5.2",
-         "thumbnail": "gpt-5.2"
-       }
-     },
-     "artifacts": {
-       "rawTranscriptPath": "raw/transcripts/<videoId>.jsonl",
-       "thumbnailPath": "thumbnails/<videoId>.jpg",
-       "derivedVideoFeaturesPath": "derived/video_features/<videoId>.json"
-     },
-     "status": {
-       "rawTranscript": "ok|missing|error",
-       "thumbnail": "ok|failed",
-       "derived": "ok|partial|error",
-       "warnings": ["..."]
-     }
-   }
+B) Redacción / privacidad (no filtrar secretos)
+- Nunca loggear:
+  - API keys (YOUTUBE_API_KEY, OPENAI_API_KEY)
+  - prompts completos del LLM (puedes loggear hash + tamaño)
+- Sí loggear:
+  - modelos (AUTO_GEN_MODEL_*, embedding model)
+  - flags enabled/disabled
+  - sizes/counts/timings
+  - file paths RELATIVOS (no absolutos) bajo exports/<channel>/...
 
-B) Reglas de validez (cache hits)
-Un video se considera “cache hit” para evitar recomputación pesada si:
-1) Existen en disco:
-   - thumbnailPath
-   - raw/transcripts/<videoId>.jsonl
-   - derived/video_features/<videoId>.json
-2) El CacheEntry coincide con inputs actuales:
-   - titleHash/descriptionHash iguales (desde raw/videos.jsonl actual o video details actuales)
-   - thumbnailHash igual (hash del archivo jpg) O si falta, recalcular y guardar
-   - transcriptHash igual (hash del contenido transcript string o jsonl)
-   - asrConfigHash/ocrConfigHash iguales a env/config actual (si cambian, recalcular SOLO esa parte afectada)
-   - llmModels/embeddingModel iguales (si cambian, recalcular SOLO los campos que dependan del modelo)
-3) Si falta OPENAI_API_KEY o AUTO_GEN_ENABLED=false en la corrida actual:
-   - NO invalidar cache existente que ya tenga llm outputs.
-   - Simplemente reutilizar lo existente.
-4) Si antes llm era null y ahora hay API key, permitir “upgrade”:
-   - Recalcular SOLO llm subfields faltantes (titleFeatures.llm, transcriptFeatures.llm, thumbnailFeatures.llm)
-   - Sin recalcular deterministic.
+C) Summary final por job
+- Escribir job_<jobId>.summary.json al finalizar (done/failed):
+  - startedAt, finishedAt, durationMs
+  - status done|failed
+  - exportedCount
+  - warningsCount, errorsCount
+  - perStageTimingsMs (aggregate)
+  - perVideo: status + timings + cacheHit type + transcriptStatus + llmUsed flags
+  - lastError (si failed) con scope/action/videoId
 
-C) Integración con exportService (sin endpoints nuevos)
-1) En apps/api/src/services/exportService.ts:
-   - Antes de procesar cada video, consultar cache:
-     - si hit completo -> no re-descargar thumbnail, no re-transcribir, no re-correr OCR, no re-llamar AutoGen, no re-embeddings.
-       Solo asegurar que los artifacts estén presentes y listos.
-     - si hit parcial -> ejecutar solo las partes faltantes y actualizar derived JSON (merge).
-     - si miss -> ejecutar pipeline completo actual.
-2) Al finalizar export:
-   - SIEMPRE recalcular “cross-video”:
-     - performanceNormalization (residual/percentile) depende del conjunto
-     - orchestratorDeterministic (cohorts/drivers/exemplars) depende del conjunto
-     - orchestratorService (playbook/templates) depende del conjunto
-   - Estos outputs se escriben en analysis/ y derived/templates.json (siempre fresh).
-3) SSE:
-   - Mantener stages actuales.
-   - Para cache hits, emitir video_progress stage "writing_json" con percent pequeño y/o warning informativo tipo:
-     warning: {videoId, message:"cache hit: reused transcript/thumbnail/derived"}
-   - No introducir stage nuevo.
+Implementación requerida:
+1) Crear módulo base:
+- apps/api/src/observability/jobLogger.ts
+  - createJobLogger({exportRootAbs, channelFolder, jobId}): JobLogger
+  - logger.event({level, scope, action, stage?, videoId?, msg?, data?})
+  - logger.error({scope, action, stage?, videoId?, err, data?, retry?})
+  - logger.flush() (opcional)
+  - logger.close()
+  - logger.summary({status, ...})
 
-D) Manejo de paths y seguridad
-- Toda lectura/escritura debe pasar por ensureInsideRoot(...) con root exports/
-- Prohibir cualquier path absoluto o con '..' en index.json
-- Escrituras atómicas:
-  - index.json y derivados: write temp + rename
+- Debe abrir 2 write streams:
+  - events.jsonl
+  - errors.jsonl
+  append-only, fsync razonable (flush en puntos clave).
 
-E) Implementación técnica (apps/api)
-1) Crear servicio cache:
-   - apps/api/src/services/exportCacheService.ts
-     API sugerida:
-     - loadCacheIndex(exportRoot): CacheIndex
-     - saveCacheIndex(exportRoot, index)
-     - computeHashes({title, description, transcriptText, thumbnailFilePath, envConfig}): HashBundle
-     - checkVideoCache({timeframe, videoId, currentHashes}): {hit:"full"|"partial"|"miss", reasons[], entry?}
-     - updateVideoCacheEntry(...)
-2) Crear helpers:
-   - apps/api/src/utils/hash.ts (sha1/sha256)
-   - apps/api/src/utils/fileExists.ts
-3) Ajustar agentes para soportar “partial compute”:
-   - titleFeaturesAgent:
-     - si deterministic ya existe en derived -> skip
-     - si llm null y ahora se puede -> compute only llm
-   - transcriptFeaturesAgent:
-     - compute deterministic only if missing; embeddings only if missing; llm only if missing
-   - thumbnailFeaturesAgent:
-     - OCR only if missing or ocrConfig changed; imageStats if missing; llm only if missing
-   - descriptionFeaturesAgent:
-     - deterministic only if missing; llm only if missing (si se usa)
-4) Ajustar exportService:
-   - Introducir “plan” por video:
-     - needThumbnailDownload, needTranscript, needDerivedParts: {titleDet, titleLLM, ...}
-   - Ejecutar solo lo necesario.
-   - Actualizar cache entry al final de cada video (aunque el job falle a mitad, cache parcial útil).
+2) Integración en exportJobService (alto nivel):
+- Al crear job: log event "job_created"
+- Al iniciar running: "job_started" + snapshot config (sin secretos):
+  - exportVersion, timeframe, AUTO_GEN_ENABLED, LOCAL_ASR_ENABLED, THUMB_OCR_ENABLED, embeddingModel, llmModels, cacheEnabled
+- Al finalizar: "job_done"/"job_failed" con summary + escribir summary.json
 
-F) Tests
-1) apps/api/tests/exportCacheService.test.ts:
-   - cache hit/miss/partial con distintos hashes/configs
-   - upgrade path (antes llm null -> después llm presente)
-   - cambio de ocrConfig invalida solo thumbnailFeatures.deterministic.ocr* (no todo)
-2) apps/api/tests/exportJobs.test.ts:
-   - correr export 1 (genera todo)
-   - correr export 2 (mismo canal/timeframe/subset) y verificar:
-     - NO se llaman funciones pesadas (mock transcriptPipeline/localAsr/ocr/autogenRuntime)
-     - se regeneran outputs cross-video (channel_models/playbook/templates) con timestamps nuevos
-3) Validar que los artifacts “fresh” cambian y los per-video se reutilizan.
+3) Integración en exportService (bajo nivel, por video):
+Añadir eventos en puntos críticos:
+- video_start (con videoId)
+- cache_check_start / cache_hit_full / cache_hit_partial / cache_miss
+  - data: reasons[], invalidationFlags, willCompute:{...}
+- transcript_start / captions_attempt / captions_result / asr_attempt / asr_result
+  - data: transcriptSource, transcriptStatus, segmentsCount, transcriptLen
+- thumbnail_download_start / thumbnail_download_done
+  - data: urlDomain, bytes, ms
+- ocr_start / ocr_done (si THUMB_OCR_ENABLED)
+  - data: ocrWordCount, textAreaRatio, ms
+- embeddings_start / embeddings_done (si OPENAI_API_KEY)
+  - data: model, inputChars, ms
+- autogen_task_start / autogen_task_done (por task: description/transcript/thumbnail/orchestrator)
+  - data: taskName, model, reasoningEffort, inputBytes, outputBytes, ms, ok
+- derived_write_start / derived_write_done
+- raw_write_start / raw_write_done
+- orchestrator_start / orchestrator_done
+- video_done (con timings agregados)
+- En cada catch:
+  - logger.error(...) con err + scope + action + stage + videoId + retry info
+  - emitir SSE warning (ya existe) con message corto y correlacionable:
+    "ERR <scope>/<action> stepId=<...> (see logs/job_<jobId>.errors.jsonl)"
 
-G) Documentación
+4) Correlation IDs y stepIds
+- Implementar helper:
+  - apps/api/src/observability/ids.ts
+    - newStepId()
+- Cada operación relevante genera stepId y se propaga (en data/event).
+- Cuando llames workers (ASR/AutoGen) ya existe id uuid:
+  - loggear mapping: workerRequestId <-> stepId.
+
+5) Manejo de errores y clasificación
+- Implementar classifyError(err) -> { code, kind }:
+  - network_timeout, rate_limited, invalid_response, fs_error, worker_crash, schema_validation_failed, etc.
+- Guardar code/kind en error log para filtros.
+
+6) “Debug bundle” opcional (sin secretos)
+- En caso de job_failed, crear:
+  exports/<channel>/logs/job_<jobId>.debug_bundle.json
+  con:
+  - manifest/artifacts list
+  - last 200 events
+  - last 50 errors
+  - env snapshot sin secretos
+  Esto acelera reporte de bugs.
+
+7) Tests
+- apps/api/tests/jobLogger.test.ts:
+  - escribe eventos/errors y produce JSONL válido
+  - summary.json correcto
+- apps/api/tests/exportJobs.test.ts:
+  - al ejecutar export job, verificar que:
+    - existe logs/job_<jobId>.events.jsonl
+    - existe logs/job_<jobId>.errors.jsonl (puede estar vacío pero archivo existe)
+    - summary.json existe y status==done
+  - simular fallo (mock transcriptPipeline throw):
+    - status failed
+    - errors.jsonl contiene entry con scope/transcript
+    - SSE warning emitido con stepId
+
+8) Docs
 - Actualizar AI Context Pack + DATA_CONTRACTS.md:
-  - describir exports/<channel>/.cache/index.json
-  - explicar reglas de reutilización e invalidación
-  - explicar “cross-video always recompute”
+  - describir carpeta exports/<channel>/logs/
+  - describir formato JSONL y cómo buscar errores:
+    - grep stepId
+    - filtrar por videoId
+  - especificar que no incluye secretos.
 
 Restricciones:
-- Sin nuevos endpoints.
-- Sin requerir que el usuario haga pasos manuales en UI.
-- Mantener compatibilidad con contratos actuales.
-- No usar DB externa: solo filesystem.
+- No introducir dependencia pesada (preferir fs streams nativos).
+- No loggear prompts completos; solo hashes.
+- No cambiar UX ni agregar endpoints; todo integrado al flujo export existente.
 
 Entrega:
-- Implementación completa + tests + docs.
-- Export 2x sobre mismo canal debe ser mucho más rápido (cache hits) y solo recalcular cross-video analysis.
+- Logging persistente por job con eventos y errores.
+- Mensajes SSE warning con stepId para correlacionar con logs.
+- Tests verdes.

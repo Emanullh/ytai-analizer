@@ -16,6 +16,7 @@ export interface LocalAsrRequest {
   outputMp3Path: string;
   language?: string;
   onStage?: (stage: LocalAsrStage) => void;
+  onWorkerRequestId?: (workerRequestId: string) => void;
 }
 
 export interface LocalAsrResult {
@@ -201,6 +202,7 @@ class LocalAsrWorkerClient {
   private async enqueue(request: LocalAsrRequest): Promise<LocalAsrResult> {
     return new Promise<LocalAsrResult>((resolve, reject) => {
       const id = randomUUID();
+      request.onWorkerRequestId?.(id);
       const timeoutMs = env.localAsrTimeoutSec * 1_000;
       const timeout = setTimeout(() => {
         this.rejectTask(id, new Error(`Local ASR timeout after ${env.localAsrTimeoutSec}s`));

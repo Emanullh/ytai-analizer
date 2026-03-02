@@ -8,6 +8,7 @@ export interface TranscriptPipelineOptions {
   outputMp3Path?: string;
   language?: string;
   onLocalAsrStage?: (stage: LocalAsrStage) => void;
+  onLocalAsrWorkerRequestId?: (workerRequestId: string) => void;
 }
 
 export interface TranscriptPipelineDependencies {
@@ -17,6 +18,7 @@ export interface TranscriptPipelineDependencies {
     outputMp3Path: string;
     language?: string;
     onStage?: (stage: LocalAsrStage) => void;
+    onWorkerRequestId?: (workerRequestId: string) => void;
   }) => Promise<LocalAsrResult>;
   localAsrEnabled: boolean | (() => boolean);
 }
@@ -37,12 +39,13 @@ const defaultDependencies: TranscriptPipelineDependencies = {
       timeoutMs: 12_000,
       maxRetries: 1
     }),
-  localAsrProvider: async ({ videoId, outputMp3Path, language, onStage }) =>
+  localAsrProvider: async ({ videoId, outputMp3Path, language, onStage, onWorkerRequestId }) =>
     transcribeWithLocalAsr({
       videoId,
       outputMp3Path,
       language,
-      onStage
+      onStage,
+      onWorkerRequestId
     }),
   localAsrEnabled: isLocalAsrEnabled
 };
@@ -105,7 +108,8 @@ export async function getTranscriptWithFallback(
     videoId,
     outputMp3Path: options.outputMp3Path,
     language: options.language,
-    onStage: options.onLocalAsrStage
+    onStage: options.onLocalAsrStage,
+    onWorkerRequestId: options.onLocalAsrWorkerRequestId
   });
 
   if (localAsr.status === "ok" && localAsr.transcript.trim()) {

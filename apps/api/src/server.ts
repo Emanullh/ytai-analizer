@@ -62,7 +62,7 @@ export async function buildServer() {
       return reply.status(400).send({ error: payload.error.issues[0]?.message ?? "Invalid request body" });
     }
 
-    const result = exportJobService.createJob(payload.data);
+    const result = exportJobService.createJob(payload.data, { requestId: request.id });
     return reply.send(result);
   });
 

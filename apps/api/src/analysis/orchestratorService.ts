@@ -63,6 +63,7 @@ export interface RunOrchestratorArgs {
   channelName: string;
   timeframe: Timeframe;
   jobId: string;
+  onAutoGenWorkerRequestId?: (workerRequestId: string) => void;
 }
 
 export interface RunOrchestratorResult {
@@ -343,13 +344,16 @@ export async function runOrchestrator(args: RunOrchestratorArgs): Promise<RunOrc
 
   let llmOutput: OrchestratorLlmOutput = {};
   try {
-    const raw = await requestAutoGenTask({
-      task: "channel_orchestrator_v1",
+    const requestPayload = {
+      task: "channel_orchestrator_v1" as const,
       payload: deterministic.orchestratorInput as unknown as Record<string, unknown>,
-      provider: "openai",
+      provider: "openai" as const,
       model: env.autoGenModelOrchestrator,
       reasoningEffort: env.autoGenReasoningEffortOrchestrator
-    });
+    };
+    const raw = args.onAutoGenWorkerRequestId
+      ? await requestAutoGenTask(requestPayload, { onWorkerRequestId: args.onAutoGenWorkerRequestId })
+      : await requestAutoGenTask(requestPayload);
     llmOutput = normalizeLlmArtifacts(raw);
   } catch (error) {
     warnings.push(`Channel orchestrator LLM failed: ${error instanceof Error ? error.message : "unknown error"}`);

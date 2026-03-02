@@ -104,6 +104,9 @@ export interface PersistTranscriptFeaturesArgs extends ComputeTranscriptFeatures
     deterministic?: boolean;
     llm?: boolean;
   };
+  trace?: {
+    onAutoGenWorkerRequestId?: (workerRequestId: string) => void;
+  };
 }
 
 export interface ComputeTranscriptFeaturesResult {
@@ -459,6 +462,7 @@ async function callAutoGenTranscriptClassifier(args: {
   title: string;
   languageHint?: "auto" | "en" | "es";
   transcriptArtifact: TranscriptArtifact;
+  onAutoGenWorkerRequestId?: (workerRequestId: string) => void;
 }): Promise<{ value: TranscriptLlmResultV1 | null; warnings: string[] }> {
   if (!env.autoGenEnabled) {
     return {
@@ -489,13 +493,16 @@ async function callAutoGenTranscriptClassifier(args: {
   }
 
   try {
-    const raw = await requestAutoGenTask({
-      task: "transcript_classifier_v1",
+    const requestPayload = {
+      task: "transcript_classifier_v1" as const,
       payload,
-      provider: "openai",
+      provider: "openai" as const,
       model: env.autoGenModelDescription,
       reasoningEffort: env.autoGenReasoningEffort
-    });
+    };
+    const raw = args.onAutoGenWorkerRequestId
+      ? await requestAutoGenTask(requestPayload, { onWorkerRequestId: args.onAutoGenWorkerRequestId })
+      : await requestAutoGenTask(requestPayload);
 
     const normalized = normalizeTranscriptLlmResult(raw, payload.segmentsSample);
     return {
@@ -678,7 +685,8 @@ export async function persistTranscriptFeaturesArtifact(
       videoId: args.videoId,
       title: args.title,
       languageHint: args.languageHint,
-      transcriptArtifact
+      transcriptArtifact,
+      onAutoGenWorkerRequestId: args.trace?.onAutoGenWorkerRequestId
     });
     llm = llmResult.value;
     warnings.push(...llmResult.warnings);

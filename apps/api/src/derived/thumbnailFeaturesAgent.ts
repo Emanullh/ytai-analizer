@@ -167,6 +167,9 @@ export interface PersistThumbnailFeaturesArgs extends ComputeThumbnailFeaturesAr
     deterministicMode?: "full" | "ocr_only";
     llm?: boolean;
   };
+  trace?: {
+    onAutoGenWorkerRequestId?: (workerRequestId: string) => void;
+  };
 }
 
 export interface ComputeThumbnailFeaturesResult {
@@ -747,6 +750,7 @@ async function callAutoGenThumbnailClassifier(args: {
   title: string;
   thumbnailAbsPath: string;
   deterministic: ThumbnailDeterministicFeatures;
+  onAutoGenWorkerRequestId?: (workerRequestId: string) => void;
 }): Promise<{ value: ThumbnailLlmResultV1 | null; warnings: string[] }> {
   if (!env.autoGenEnabled) {
     return {
@@ -801,13 +805,16 @@ async function callAutoGenThumbnailClassifier(args: {
   });
 
   try {
-    const raw = await requestAutoGenTask({
-      task: "thumbnail_classifier_v1",
+    const requestPayload = {
+      task: "thumbnail_classifier_v1" as const,
       payload,
-      provider: "openai",
+      provider: "openai" as const,
       model: env.autoGenModelThumbnail,
       reasoningEffort: env.autoGenReasoningEffort
-    });
+    };
+    const raw = args.onAutoGenWorkerRequestId
+      ? await requestAutoGenTask(requestPayload, { onWorkerRequestId: args.onAutoGenWorkerRequestId })
+      : await requestAutoGenTask(requestPayload);
 
     const normalized = normalizeLlmResult(raw);
     return {
@@ -913,7 +920,8 @@ export async function persistThumbnailFeaturesArtifact(
       videoId: args.videoId,
       title: args.title,
       thumbnailAbsPath: args.thumbnailAbsPath,
-      deterministic
+      deterministic,
+      onAutoGenWorkerRequestId: args.trace?.onAutoGenWorkerRequestId
     });
     llm = llmResult.value;
     warnings.push(...llmResult.warnings);

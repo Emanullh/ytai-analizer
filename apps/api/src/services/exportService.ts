@@ -1,7 +1,10 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { URL } from "node:url";
 import { env } from "../config/env.js";
+import type { JobLogger, JobLogScope } from "../observability/jobLogger.js";
+import { newStepId } from "../observability/ids.js";
 import { ExportPayload, Timeframe, TimeframeResolved } from "../types.js";
 import {
   getChannelDetails,
@@ -65,6 +68,9 @@ export interface ExportProgressCallbacks {
   onVideoProgress?: (payload: { videoId: string; stage: ExportVideoStage; percent?: number }) => void;
   onJobProgress?: (payload: { completed: number; total: number }) => void;
   onWarning?: (payload: { videoId?: string; message: string }) => void;
+  jobId?: string;
+  jobLogger?: JobLogger;
+  requestId?: string;
 }
 
 interface ExportDependencies {
@@ -225,7 +231,7 @@ interface DerivedChannelModelsArtifactV1 {
   model: ChannelModelSummary;
 }
 
-const EXPORT_VERSION = "1.1";
+export const EXPORT_VERSION = "1.1";
 const TRANSCRIPT_CONCURRENCY = 4;
 
 const defaultDependencies: ExportDependencies = {
@@ -459,6 +465,100 @@ function toLanguageHint(language: string | undefined): "auto" | "en" | "es" {
     return "es";
   }
   return "auto";
+}
+
+function toRelativeExportPath(channelFolderPath: string, absolutePath: string): string {
+  const relative = path.relative(channelFolderPath, absolutePath).split(path.sep).join(path.posix.sep);
+  if (!relative || relative === "." || relative.startsWith("..") || path.isAbsolute(relative)) {
+    return "<invalid>";
+  }
+  return relative;
+}
+
+function elapsedMs(startedAtMs: number): number {
+  return Math.max(0, Date.now() - startedAtMs);
+}
+
+function estimateSizeBytes(value: unknown): number {
+  try {
+    return Buffer.byteLength(JSON.stringify(value), "utf-8");
+  } catch {
+    return 0;
+  }
+}
+
+function extractDomain(urlRaw: string): string | null {
+  if (!urlRaw.trim()) {
+    return null;
+  }
+  try {
+    return new URL(urlRaw).hostname;
+  } catch {
+    return null;
+  }
+}
+
+function logEvent(
+  callbacks: ExportProgressCallbacks,
+  input: {
+    level?: "trace" | "debug" | "info" | "warn" | "error";
+    scope: JobLogScope;
+    action: string;
+    stage?: ExportVideoStage;
+    videoId?: string;
+    msg: string;
+    data?: Record<string, unknown>;
+    stepId?: string;
+  }
+): string {
+  const stepId = input.stepId ?? newStepId();
+  callbacks.jobLogger?.event({
+    level: input.level,
+    stepId,
+    scope: input.scope,
+    action: input.action,
+    ...(input.stage ? { stage: input.stage } : {}),
+    ...(input.videoId ? { videoId: input.videoId } : {}),
+    msg: input.msg,
+    data: input.data,
+    requestId: callbacks.requestId
+  });
+  return stepId;
+}
+
+function logErrorAndWarn(
+  callbacks: ExportProgressCallbacks,
+  input: {
+    scope: JobLogScope;
+    action: string;
+    stage?: ExportVideoStage;
+    videoId?: string;
+    err: unknown;
+    msg: string;
+    data?: Record<string, unknown>;
+    retry?: { attempt: number; max: number; willRetry: boolean };
+  }
+): string {
+  const stepId = newStepId();
+  const errorLog = callbacks.jobLogger?.error({
+    stepId,
+    scope: input.scope,
+    action: input.action,
+    ...(input.stage ? { stage: input.stage } : {}),
+    ...(input.videoId ? { videoId: input.videoId } : {}),
+    err: input.err,
+    msg: input.msg,
+    data: input.data,
+    retry: input.retry,
+    requestId: callbacks.requestId
+  });
+  const jobRef = callbacks.jobId ?? "<jobId>";
+  const warningMessage = `ERR ${input.scope}/${input.action} stepId=${errorLog?.stepId ?? stepId} (see logs/job_${jobRef}.errors.jsonl)`;
+  callbacks.onWarning?.({
+    ...(input.videoId ? { videoId: input.videoId } : {}),
+    message: warningMessage
+  });
+  return stepId;
 }
 
 function buildTranscriptArtifactRecords(input: {
@@ -740,16 +840,52 @@ export async function exportSelectedVideos(
   callbacks: ExportProgressCallbacks = {},
   dependencies: ExportDependencies = defaultDependencies
 ): Promise<{ folderPath: string; warnings: string[]; exportedCount: number }> {
+  const jobStepId = logEvent(callbacks, {
+    scope: "exportService",
+    action: "export_start",
+    msg: "Export started",
+    data: {
+      channelId: request.channelId,
+      selectedVideoIds: request.selectedVideoIds.length,
+      timeframe: request.timeframe
+    }
+  });
   const warnings: string[] = [];
   const addWarning = (message: string, videoId?: string) => {
     warnings.push(message);
+    logEvent(callbacks, {
+      level: "warn",
+      scope: "exportService",
+      action: "warning",
+      ...(videoId ? { videoId } : {}),
+      msg: message
+    });
     callbacks.onWarning?.({ videoId, message });
   };
   const emitInfo = (message: string, videoId?: string) => {
+    logEvent(callbacks, {
+      level: "info",
+      scope: "exportService",
+      action: "info",
+      ...(videoId ? { videoId } : {}),
+      msg: message
+    });
     callbacks.onWarning?.({ videoId, message });
   };
 
+  logEvent(callbacks, {
+    scope: "youtube",
+    action: "selected_videos_fetch_start",
+    stepId: jobStepId,
+    msg: "Fetching selected videos metadata"
+  });
   const details = await dependencies.getSelectedVideoDetails(request.channelId, request.timeframe, request.selectedVideoIds);
+  logEvent(callbacks, {
+    scope: "youtube",
+    action: "selected_videos_fetch_done",
+    msg: "Selected videos metadata fetched",
+    data: { total: details.videos.length, warnings: details.warnings.length }
+  });
   for (const warning of details.warnings) {
     addWarning(warning);
   }
@@ -777,12 +913,33 @@ export async function exportSelectedVideos(
 
   await fs.mkdir(thumbnailsFolderPath, { recursive: true });
   await fs.mkdir(tempAudioPath, { recursive: true });
+  logEvent(callbacks, {
+    scope: "fs",
+    action: "raw_write_start",
+    msg: "Initializing raw export paths",
+    data: { rawFolder: toRelativeExportPath(channelFolderPath, rawPaths.rawFolderPath) }
+  });
   await initializeRawPaths(exportsRoot, rawPaths);
+  logEvent(callbacks, {
+    scope: "fs",
+    action: "raw_write_done",
+    msg: "Raw export paths ready"
+  });
+  logEvent(callbacks, {
+    scope: "cache",
+    action: "cache_check_start",
+    msg: "Loading cache index"
+  });
   const cacheIndex = await loadCacheIndex({
     exportsRoot,
     channelFolderPath,
     channelId: request.channelId,
     exportVersion: EXPORT_VERSION
+  });
+  logEvent(callbacks, {
+    scope: "cache",
+    action: "cache_check_done",
+    msg: "Cache index loaded"
   });
   let cacheSaveChain = Promise.resolve();
   const enqueueCacheEntryUpdate = async (videoId: string, entry: ReturnType<typeof buildCacheEntry>) => {
@@ -806,6 +963,16 @@ export async function exportSelectedVideos(
     dependencies.getVideoDetails(details.videos.map((video) => video.videoId)),
     dependencies.getChannelDetails(request.channelId)
   ]);
+  logEvent(callbacks, {
+    scope: "youtube",
+    action: "video_details_done",
+    msg: "Video/channel enrichment fetched",
+    data: {
+      videos: videoDetailsResult.videos.length,
+      videoWarnings: videoDetailsResult.warnings.length,
+      channelWarnings: channelDetailsResult.warnings.length
+    }
+  });
   for (const warning of videoDetailsResult.warnings) {
     addWarning(warning);
   }
@@ -829,6 +996,25 @@ export async function exportSelectedVideos(
       TRANSCRIPT_CONCURRENCY,
       async (video): Promise<ProcessedVideo> => {
         const videoWarnings: string[] = [];
+        const videoStageTimingsMs: Record<string, number> = {};
+        const videoStartedAtMs = Date.now();
+        const markStageTiming = (stageName: string, startedAtMs: number): void => {
+          videoStageTimingsMs[stageName] = Number(
+            ((videoStageTimingsMs[stageName] ?? 0) + elapsedMs(startedAtMs)).toFixed(3)
+          );
+        };
+
+        logEvent(callbacks, {
+          scope: "exportService",
+          action: "video_start",
+          videoId: video.videoId,
+          stage: "queue",
+          msg: "Video export started",
+          data: {
+            title: video.title,
+            publishedAt: video.publishedAt
+          }
+        });
         const enrichedVideo = videoDetailsById.get(video.videoId);
         if (!enrichedVideo) {
           const warning = `Metadata enrichment missing for ${video.videoId}`;
@@ -847,7 +1033,26 @@ export async function exportSelectedVideos(
         ensureInsideRoot(exportsRoot, transcriptAbsolutePath);
         const titleForFeatures = enrichedVideo?.title || video.title;
         const descriptionForFeatures = enrichedVideo?.description ?? "";
-        const transcriptSnapshot = await readTranscriptSnapshot(transcriptAbsolutePath, video.videoId);
+        logEvent(callbacks, {
+          scope: "cache",
+          action: "cache_check_start",
+          videoId: video.videoId,
+          msg: "Checking cache for video"
+        });
+        let transcriptSnapshot: TranscriptSnapshot | null = null;
+        try {
+          transcriptSnapshot = await readTranscriptSnapshot(transcriptAbsolutePath, video.videoId);
+        } catch (error) {
+          logErrorAndWarn(callbacks, {
+            scope: "transcript",
+            action: "transcript_snapshot_read",
+            stage: "transcribing",
+            videoId: video.videoId,
+            err: error,
+            msg: "Failed to read transcript snapshot"
+          });
+          throw error;
+        }
         const initialHashes = await computeHashes({
           title: titleForFeatures,
           description: descriptionForFeatures,
@@ -863,6 +1068,43 @@ export async function exportSelectedVideos(
           videoId: video.videoId,
           currentHashes: initialHashes
         });
+        if (cacheCheck.hit === "full") {
+          logEvent(callbacks, {
+            scope: "cache",
+            action: "cache_hit_full",
+            videoId: video.videoId,
+            msg: "Cache hit full",
+            data: {
+              reasons: cacheCheck.reasons,
+              invalidationFlags: cacheCheck.reasons,
+              willCompute: cacheCheck.plan
+            }
+          });
+        } else if (cacheCheck.hit === "partial") {
+          logEvent(callbacks, {
+            scope: "cache",
+            action: "cache_hit_partial",
+            videoId: video.videoId,
+            msg: "Cache hit partial",
+            data: {
+              reasons: cacheCheck.reasons,
+              invalidationFlags: cacheCheck.reasons,
+              willCompute: cacheCheck.plan
+            }
+          });
+        } else {
+          logEvent(callbacks, {
+            scope: "cache",
+            action: "cache_miss",
+            videoId: video.videoId,
+            msg: "Cache miss",
+            data: {
+              reasons: cacheCheck.reasons,
+              invalidationFlags: cacheCheck.reasons,
+              willCompute: cacheCheck.plan
+            }
+          });
+        }
         let cacheEntryForPersist = buildCacheEntry({
           videoId: video.videoId,
           hashes: initialHashes,
@@ -886,6 +1128,14 @@ export async function exportSelectedVideos(
             emitInfo(`cache partial: ${cacheCheck.reasons.join(", ") || "recompute required fields only"}`, video.videoId);
           }
 
+          const transcriptStartedAtMs = Date.now();
+          const transcriptStepId = logEvent(callbacks, {
+            scope: "transcript",
+            action: "transcript_start",
+            videoId: video.videoId,
+            stage: "transcribing",
+            msg: "Transcript stage started"
+          });
           const needTranscriptFetch = cacheCheck.plan.needTranscriptFetch || !transcriptSnapshot;
           let transcriptResult: TranscriptPipelineResult = {
             transcript: transcriptSnapshot?.transcript ?? "",
@@ -897,6 +1147,24 @@ export async function exportSelectedVideos(
           };
 
           if (needTranscriptFetch) {
+            logEvent(callbacks, {
+              stepId: transcriptStepId,
+              scope: "transcript",
+              action: "captions_attempt",
+              videoId: video.videoId,
+              stage: "transcribing",
+              msg: "Attempting transcript via captions/ASR fallback"
+            });
+            if (env.localAsrEnabled) {
+              logEvent(callbacks, {
+                scope: "asr",
+                action: "asr_attempt",
+                videoId: video.videoId,
+                stage: "transcribing",
+                msg: "ASR fallback may be used"
+              });
+            }
+            let asrWorkerRequestId: string | null = null;
             try {
               transcriptResult = await dependencies.getTranscriptWithFallback(video.videoId, {
                 outputMp3Path,
@@ -906,12 +1174,93 @@ export async function exportSelectedVideos(
                     videoId: video.videoId,
                     stage
                   });
+                  logEvent(callbacks, {
+                    scope: "asr",
+                    action: stage === "downloading_audio" ? "asr_download_audio" : "asr_transcribe",
+                    videoId: video.videoId,
+                    stage,
+                    msg: `ASR stage: ${stage}`
+                  });
+                },
+                onLocalAsrWorkerRequestId: (workerRequestId) => {
+                  asrWorkerRequestId = workerRequestId;
+                  logEvent(callbacks, {
+                    scope: "asr",
+                    action: "asr_request",
+                    videoId: video.videoId,
+                    stage: "transcribing",
+                    msg: "ASR worker request mapped",
+                    data: {
+                      workerRequestId,
+                      stepId: transcriptStepId
+                    }
+                  });
                 }
               });
+              const captionsStatus = transcriptResult.source === "captions" ? "ok" : "miss";
+              logEvent(callbacks, {
+                stepId: transcriptStepId,
+                scope: "transcript",
+                action: "captions_result",
+                videoId: video.videoId,
+                stage: "transcribing",
+                msg: "Captions result",
+                data: {
+                  status: captionsStatus,
+                  transcriptSource: transcriptResult.source,
+                  transcriptStatus: transcriptResult.status
+                }
+              });
+              if (asrWorkerRequestId || transcriptResult.source === "asr" || env.localAsrEnabled) {
+                logEvent(callbacks, {
+                  scope: "asr",
+                  action: "asr_result",
+                  videoId: video.videoId,
+                  stage: "transcribing",
+                  msg: "ASR result",
+                  data: {
+                    workerRequestId: asrWorkerRequestId,
+                    transcriptSource: transcriptResult.source,
+                    transcriptStatus: transcriptResult.status,
+                    model: transcriptResult.asrMeta?.model ?? null,
+                    computeType: transcriptResult.asrMeta?.computeType ?? null
+                  }
+                });
+              }
             } catch (error) {
+              logErrorAndWarn(callbacks, {
+                scope: "transcript",
+                action: "transcript_fetch_failed",
+                stage: "transcribing",
+                videoId: video.videoId,
+                err: error,
+                msg: "Transcript pipeline failed",
+                retry: {
+                  attempt: 1,
+                  max: 1,
+                  willRetry: false
+                }
+              });
               transcriptResult = fallbackTranscriptResult(video.videoId, error);
             }
           }
+
+          logEvent(callbacks, {
+            stepId: transcriptStepId,
+            scope: "transcript",
+            action: "transcript_result",
+            videoId: video.videoId,
+            stage: "transcribing",
+            msg: "Transcript stage finished",
+            data: {
+              transcriptSource: transcriptResult.source,
+              transcriptStatus: transcriptResult.status,
+              segmentsCount: Array.isArray(transcriptResult.segments) ? transcriptResult.segments.length : 0,
+              transcriptLen: transcriptResult.transcript.length,
+              ms: elapsedMs(transcriptStartedAtMs)
+            }
+          });
+          markStageTiming("transcript", transcriptStartedAtMs);
 
           if (transcriptResult.warning) {
             videoWarnings.push(transcriptResult.warning);
@@ -919,6 +1268,7 @@ export async function exportSelectedVideos(
           }
 
           if (cacheCheck.plan.needThumbnailDownload) {
+            const thumbnailStartedAtMs = Date.now();
             callbacks.onVideoProgress?.({
               videoId: video.videoId,
               stage: "downloading_thumbnail"
@@ -926,10 +1276,40 @@ export async function exportSelectedVideos(
 
             const thumbnailOriginalUrl = enrichedVideo?.thumbnailOriginalUrl || video.thumbnailUrl;
             if (thumbnailOriginalUrl) {
+              const domain = extractDomain(thumbnailOriginalUrl);
+              logEvent(callbacks, {
+                scope: "youtube",
+                action: "thumbnail_download_start",
+                videoId: video.videoId,
+                stage: "downloading_thumbnail",
+                msg: "Downloading thumbnail",
+                data: { urlDomain: domain }
+              });
               try {
                 const image = await dependencies.downloadToBuffer(thumbnailOriginalUrl, 12_000);
                 await fs.writeFile(thumbnailAbsolutePath, image);
+                logEvent(callbacks, {
+                  scope: "youtube",
+                  action: "thumbnail_download_done",
+                  videoId: video.videoId,
+                  stage: "downloading_thumbnail",
+                  msg: "Thumbnail downloaded",
+                  data: {
+                    urlDomain: domain,
+                    bytes: image.byteLength,
+                    ms: elapsedMs(thumbnailStartedAtMs),
+                    path: toRelativeExportPath(channelFolderPath, thumbnailAbsolutePath)
+                  }
+                });
               } catch (error) {
+                logErrorAndWarn(callbacks, {
+                  scope: "youtube",
+                  action: "download_thumbnail",
+                  stage: "downloading_thumbnail",
+                  videoId: video.videoId,
+                  err: error,
+                  msg: "Thumbnail download failed"
+                });
                 const warning = `Thumbnail download failed for ${video.videoId}: ${
                   error instanceof Error ? error.message : "unknown error"
                 }`;
@@ -941,11 +1321,23 @@ export async function exportSelectedVideos(
               videoWarnings.push(warning);
               addWarning(warning, video.videoId);
             }
+            markStageTiming("thumbnail_download", thumbnailStartedAtMs);
           }
 
           const transcriptStatus = toTranscriptStatus(transcriptResult.status);
           const sanitizedTranscriptResult = sanitizeTranscript(transcriptResult.transcript);
           if (needTranscriptFetch || !cacheCheck.artifacts.rawTranscriptExists) {
+            const rawWriteStartedAt = Date.now();
+            logEvent(callbacks, {
+              scope: "fs",
+              action: "raw_write_start",
+              videoId: video.videoId,
+              stage: "writing_json",
+              msg: "Writing transcript artifact",
+              data: {
+                path: transcriptRelativePath
+              }
+            });
             const transcriptArtifactRecords = buildTranscriptArtifactRecords({
               videoId: video.videoId,
               result: transcriptResult,
@@ -955,6 +1347,19 @@ export async function exportSelectedVideos(
               createdAt: exportedAt
             });
             await writeJsonLines(transcriptAbsolutePath, transcriptArtifactRecords);
+            logEvent(callbacks, {
+              scope: "fs",
+              action: "raw_write_done",
+              videoId: video.videoId,
+              stage: "writing_json",
+              msg: "Transcript artifact written",
+              data: {
+                path: transcriptRelativePath,
+                lines: transcriptArtifactRecords.length,
+                ms: elapsedMs(rawWriteStartedAt)
+              }
+            });
+            markStageTiming("raw_write_transcript", rawWriteStartedAt);
           }
 
           callbacks.onVideoProgress?.({
@@ -974,6 +1379,34 @@ export async function exportSelectedVideos(
           const languageHint = toLanguageHint(resolveTranscriptLanguage(transcriptResult));
 
           if (cacheCheck.plan.needDerivedParts.thumbnailDeterministic || cacheCheck.plan.needDerivedParts.thumbnailLlm) {
+            const thumbnailFeaturesStartedAt = Date.now();
+            if (cacheCheck.plan.needDerivedParts.thumbnailDeterministic && env.thumbOcrEnabled) {
+              logEvent(callbacks, {
+                scope: "ocr",
+                action: "ocr_start",
+                videoId: video.videoId,
+                stage: "writing_json",
+                msg: "OCR started"
+              });
+            }
+            const thumbnailTaskStepId = cacheCheck.plan.needDerivedParts.thumbnailLlm
+              ? logEvent(callbacks, {
+                  scope: "autogen",
+                  action: "autogen_task_start",
+                  videoId: video.videoId,
+                  stage: "writing_json",
+                  msg: "AutoGen thumbnail task started",
+                  data: {
+                    taskName: "thumbnail",
+                    model: env.autoGenModelThumbnail,
+                    reasoningEffort: env.autoGenReasoningEffort,
+                    inputBytes: estimateSizeBytes({
+                      title: titleForFeatures,
+                      thumbnailLocalPath: thumbnailRelativePath
+                    })
+                  }
+                })
+              : null;
             try {
               const derived = await persistThumbnailFeaturesArtifact({
                 exportsRoot,
@@ -986,15 +1419,104 @@ export async function exportSelectedVideos(
                   deterministic: cacheCheck.plan.needDerivedParts.thumbnailDeterministic,
                   deterministicMode: cacheCheck.plan.needDerivedParts.thumbnailDeterministicMode,
                   llm: cacheCheck.plan.needDerivedParts.thumbnailLlm
-                }
+                },
+                trace: thumbnailTaskStepId
+                  ? {
+                      onAutoGenWorkerRequestId: (workerRequestId) => {
+                        logEvent(callbacks, {
+                          scope: "autogen",
+                          action: "worker_request_map",
+                          videoId: video.videoId,
+                          stage: "writing_json",
+                          msg: "Mapped AutoGen worker request",
+                          data: {
+                            workerRequestId,
+                            stepId: thumbnailTaskStepId
+                          }
+                        });
+                      }
+                    }
+                  : undefined
               });
               derivedVideoFeaturesArtifactPath = derived.artifactAbsolutePath;
+              if (cacheCheck.plan.needDerivedParts.thumbnailDeterministic && env.thumbOcrEnabled) {
+                logEvent(callbacks, {
+                  scope: "ocr",
+                  action: "ocr_done",
+                  videoId: video.videoId,
+                  stage: "writing_json",
+                  msg: "OCR finished",
+                  data: {
+                    ocrWordCount:
+                      (derived.mergedBundle.thumbnailFeatures as { deterministic?: { ocrWordCount?: number } })?.deterministic
+                        ?.ocrWordCount ?? 0,
+                    textAreaRatio:
+                      (derived.mergedBundle.thumbnailFeatures as {
+                        deterministic?: { textAreaRatio?: number };
+                      })?.deterministic?.textAreaRatio ?? 0,
+                    ms: elapsedMs(thumbnailFeaturesStartedAt)
+                  }
+                });
+              }
+              if (thumbnailTaskStepId) {
+                logEvent(callbacks, {
+                  stepId: thumbnailTaskStepId,
+                  scope: "autogen",
+                  action: "autogen_task_done",
+                  videoId: video.videoId,
+                  stage: "writing_json",
+                  msg: "AutoGen thumbnail task finished",
+                  data: {
+                    taskName: "thumbnail",
+                    model: env.autoGenModelThumbnail,
+                    reasoningEffort: env.autoGenReasoningEffort,
+                    inputBytes: estimateSizeBytes({
+                      title: titleForFeatures,
+                      thumbnailLocalPath: thumbnailRelativePath
+                    }),
+                    outputBytes: estimateSizeBytes(derived.mergedBundle.thumbnailFeatures),
+                    ms: elapsedMs(thumbnailFeaturesStartedAt),
+                    ok: true
+                  }
+                });
+              }
+              markStageTiming("thumbnail_features", thumbnailFeaturesStartedAt);
 
               for (const warning of derived.warnings) {
                 videoWarnings.push(warning);
                 addWarning(warning, video.videoId);
               }
             } catch (error) {
+              logErrorAndWarn(callbacks, {
+                scope: "ocr",
+                action: "thumbnail_features",
+                stage: "writing_json",
+                videoId: video.videoId,
+                err: error,
+                msg: "Thumbnail features generation failed"
+              });
+              if (thumbnailTaskStepId) {
+                logEvent(callbacks, {
+                  stepId: thumbnailTaskStepId,
+                  scope: "autogen",
+                  action: "autogen_task_done",
+                  videoId: video.videoId,
+                  stage: "writing_json",
+                  msg: "AutoGen thumbnail task failed",
+                  data: {
+                    taskName: "thumbnail",
+                    model: env.autoGenModelThumbnail,
+                    reasoningEffort: env.autoGenReasoningEffort,
+                    inputBytes: estimateSizeBytes({
+                      title: titleForFeatures,
+                      thumbnailLocalPath: thumbnailRelativePath
+                    }),
+                    outputBytes: 0,
+                    ms: elapsedMs(thumbnailFeaturesStartedAt),
+                    ok: false
+                  }
+                });
+              }
               const warning = `Thumbnail features generation failed for ${video.videoId}: ${
                 error instanceof Error ? error.message : "unknown error"
               }`;
@@ -1010,6 +1532,21 @@ export async function exportSelectedVideos(
           });
 
           if (cacheCheck.plan.needDerivedParts.titleDeterministic || cacheCheck.plan.needDerivedParts.titleLlm) {
+            const titleFeaturesStartedAt = Date.now();
+            const willComputeEmbeddings = cacheCheck.plan.needDerivedParts.titleDeterministic && Boolean(env.openAiApiKey);
+            if (willComputeEmbeddings) {
+              logEvent(callbacks, {
+                scope: "embeddings",
+                action: "embeddings_start",
+                videoId: video.videoId,
+                stage: "writing_json",
+                msg: "Embeddings computation started",
+                data: {
+                  model: "text-embedding-3-small",
+                  inputChars: titleForFeatures.length + sanitizedTranscriptResult.transcript.length
+                }
+              });
+            }
             try {
               const derived = await persistTitleFeaturesArtifact({
                 exportsRoot,
@@ -1026,12 +1563,46 @@ export async function exportSelectedVideos(
                 }
               });
               derivedVideoFeaturesArtifactPath = derived.artifactAbsolutePath;
+              if (willComputeEmbeddings) {
+                logEvent(callbacks, {
+                  scope: "embeddings",
+                  action: "embeddings_done",
+                  videoId: video.videoId,
+                  stage: "writing_json",
+                  msg: "Embeddings computation finished",
+                  data: {
+                    model: "text-embedding-3-small",
+                    inputChars: titleForFeatures.length + sanitizedTranscriptResult.transcript.length,
+                    ms: elapsedMs(titleFeaturesStartedAt)
+                  }
+                });
+              }
+              markStageTiming("title_features", titleFeaturesStartedAt);
 
               for (const warning of derived.warnings) {
                 videoWarnings.push(warning);
                 addWarning(warning, video.videoId);
               }
             } catch (error) {
+              if (willComputeEmbeddings) {
+                logErrorAndWarn(callbacks, {
+                  scope: "embeddings",
+                  action: "embeddings_compute",
+                  stage: "writing_json",
+                  videoId: video.videoId,
+                  err: error,
+                  msg: "Embeddings/title features failed"
+                });
+              } else {
+                logErrorAndWarn(callbacks, {
+                  scope: "exportService",
+                  action: "title_features",
+                  stage: "writing_json",
+                  videoId: video.videoId,
+                  err: error,
+                  msg: "Title features generation failed"
+                });
+              }
               const warning = `Title features generation failed for ${video.videoId}: ${
                 error instanceof Error ? error.message : "unknown error"
               }`;
@@ -1047,6 +1618,25 @@ export async function exportSelectedVideos(
           });
 
           if (cacheCheck.plan.needDerivedParts.descriptionDeterministic || cacheCheck.plan.needDerivedParts.descriptionLlm) {
+            const descriptionStartedAt = Date.now();
+            const descriptionTaskStepId = cacheCheck.plan.needDerivedParts.descriptionLlm
+              ? logEvent(callbacks, {
+                  scope: "autogen",
+                  action: "autogen_task_start",
+                  videoId: video.videoId,
+                  stage: "writing_json",
+                  msg: "AutoGen description task started",
+                  data: {
+                    taskName: "description",
+                    model: env.autoGenModelDescription,
+                    reasoningEffort: env.autoGenReasoningEffort,
+                    inputBytes: estimateSizeBytes({
+                      title: titleForFeatures,
+                      description: descriptionForFeatures
+                    })
+                  }
+                })
+              : null;
             try {
               const derived = await persistDescriptionFeaturesArtifact({
                 exportsRoot,
@@ -1058,15 +1648,85 @@ export async function exportSelectedVideos(
                 compute: {
                   deterministic: cacheCheck.plan.needDerivedParts.descriptionDeterministic,
                   llm: cacheCheck.plan.needDerivedParts.descriptionLlm
-                }
+                },
+                trace: descriptionTaskStepId
+                  ? {
+                      onAutoGenWorkerRequestId: (workerRequestId) => {
+                        logEvent(callbacks, {
+                          scope: "autogen",
+                          action: "worker_request_map",
+                          videoId: video.videoId,
+                          stage: "writing_json",
+                          msg: "Mapped AutoGen worker request",
+                          data: {
+                            workerRequestId,
+                            stepId: descriptionTaskStepId
+                          }
+                        });
+                      }
+                    }
+                  : undefined
               });
               derivedVideoFeaturesArtifactPath = derived.artifactAbsolutePath;
+              if (descriptionTaskStepId) {
+                logEvent(callbacks, {
+                  stepId: descriptionTaskStepId,
+                  scope: "autogen",
+                  action: "autogen_task_done",
+                  videoId: video.videoId,
+                  stage: "writing_json",
+                  msg: "AutoGen description task finished",
+                  data: {
+                    taskName: "description",
+                    model: env.autoGenModelDescription,
+                    reasoningEffort: env.autoGenReasoningEffort,
+                    inputBytes: estimateSizeBytes({
+                      title: titleForFeatures,
+                      description: descriptionForFeatures
+                    }),
+                    outputBytes: estimateSizeBytes(derived.mergedBundle.descriptionFeatures),
+                    ms: elapsedMs(descriptionStartedAt),
+                    ok: true
+                  }
+                });
+              }
+              markStageTiming("description_features", descriptionStartedAt);
 
               for (const warning of derived.warnings) {
                 videoWarnings.push(warning);
                 addWarning(warning, video.videoId);
               }
             } catch (error) {
+              logErrorAndWarn(callbacks, {
+                scope: "autogen",
+                action: "description_features",
+                stage: "writing_json",
+                videoId: video.videoId,
+                err: error,
+                msg: "Description features generation failed"
+              });
+              if (descriptionTaskStepId) {
+                logEvent(callbacks, {
+                  stepId: descriptionTaskStepId,
+                  scope: "autogen",
+                  action: "autogen_task_done",
+                  videoId: video.videoId,
+                  stage: "writing_json",
+                  msg: "AutoGen description task failed",
+                  data: {
+                    taskName: "description",
+                    model: env.autoGenModelDescription,
+                    reasoningEffort: env.autoGenReasoningEffort,
+                    inputBytes: estimateSizeBytes({
+                      title: titleForFeatures,
+                      description: descriptionForFeatures
+                    }),
+                    outputBytes: 0,
+                    ms: elapsedMs(descriptionStartedAt),
+                    ok: false
+                  }
+                });
+              }
               const warning = `Description features generation failed for ${video.videoId}: ${
                 error instanceof Error ? error.message : "unknown error"
               }`;
@@ -1082,6 +1742,22 @@ export async function exportSelectedVideos(
           });
 
           if (cacheCheck.plan.needDerivedParts.transcriptDeterministic || cacheCheck.plan.needDerivedParts.transcriptLlm) {
+            const transcriptFeaturesStartedAt = Date.now();
+            const transcriptTaskStepId = cacheCheck.plan.needDerivedParts.transcriptLlm
+              ? logEvent(callbacks, {
+                  scope: "autogen",
+                  action: "autogen_task_start",
+                  videoId: video.videoId,
+                  stage: "writing_json",
+                  msg: "AutoGen transcript task started",
+                  data: {
+                    taskName: "transcript",
+                    model: env.autoGenModelDescription,
+                    reasoningEffort: env.autoGenReasoningEffort,
+                    inputBytes: sanitizedTranscriptResult.transcript.length
+                  }
+                })
+              : null;
             try {
               const derived = await persistTranscriptFeaturesArtifact({
                 exportsRoot,
@@ -1097,15 +1773,79 @@ export async function exportSelectedVideos(
                 compute: {
                   deterministic: cacheCheck.plan.needDerivedParts.transcriptDeterministic,
                   llm: cacheCheck.plan.needDerivedParts.transcriptLlm
-                }
+                },
+                trace: transcriptTaskStepId
+                  ? {
+                      onAutoGenWorkerRequestId: (workerRequestId) => {
+                        logEvent(callbacks, {
+                          scope: "autogen",
+                          action: "worker_request_map",
+                          videoId: video.videoId,
+                          stage: "writing_json",
+                          msg: "Mapped AutoGen worker request",
+                          data: {
+                            workerRequestId,
+                            stepId: transcriptTaskStepId
+                          }
+                        });
+                      }
+                    }
+                  : undefined
               });
               derivedVideoFeaturesArtifactPath = derived.artifactAbsolutePath;
+              if (transcriptTaskStepId) {
+                logEvent(callbacks, {
+                  stepId: transcriptTaskStepId,
+                  scope: "autogen",
+                  action: "autogen_task_done",
+                  videoId: video.videoId,
+                  stage: "writing_json",
+                  msg: "AutoGen transcript task finished",
+                  data: {
+                    taskName: "transcript",
+                    model: env.autoGenModelDescription,
+                    reasoningEffort: env.autoGenReasoningEffort,
+                    inputBytes: sanitizedTranscriptResult.transcript.length,
+                    outputBytes: estimateSizeBytes(derived.mergedBundle.transcriptFeatures),
+                    ms: elapsedMs(transcriptFeaturesStartedAt),
+                    ok: true
+                  }
+                });
+              }
+              markStageTiming("transcript_features", transcriptFeaturesStartedAt);
 
               for (const warning of derived.warnings) {
                 videoWarnings.push(warning);
                 addWarning(warning, video.videoId);
               }
             } catch (error) {
+              logErrorAndWarn(callbacks, {
+                scope: "autogen",
+                action: "transcript_features",
+                stage: "writing_json",
+                videoId: video.videoId,
+                err: error,
+                msg: "Transcript features generation failed"
+              });
+              if (transcriptTaskStepId) {
+                logEvent(callbacks, {
+                  stepId: transcriptTaskStepId,
+                  scope: "autogen",
+                  action: "autogen_task_done",
+                  videoId: video.videoId,
+                  stage: "writing_json",
+                  msg: "AutoGen transcript task failed",
+                  data: {
+                    taskName: "transcript",
+                    model: env.autoGenModelDescription,
+                    reasoningEffort: env.autoGenReasoningEffort,
+                    inputBytes: sanitizedTranscriptResult.transcript.length,
+                    outputBytes: 0,
+                    ms: elapsedMs(transcriptFeaturesStartedAt),
+                    ok: false
+                  }
+                });
+              }
               const warning = `Transcript features generation failed for ${video.videoId}: ${
                 error instanceof Error ? error.message : "unknown error"
               }`;
@@ -1126,7 +1866,30 @@ export async function exportSelectedVideos(
             transcriptStatus
           };
           const rawVideoRecord = buildRawVideoRecord(video, enrichedVideo, transcriptRef, exportedAtDate, videoWarnings);
+          const rawVideoWriteStartedAt = Date.now();
+          logEvent(callbacks, {
+            scope: "fs",
+            action: "raw_write_start",
+            videoId: video.videoId,
+            stage: "writing_json",
+            msg: "Writing raw video record",
+            data: {
+              path: toRelativeExportPath(channelFolderPath, rawPaths.rawVideosFilePath)
+            }
+          });
           await appendRawVideoRecord(rawVideoRecord);
+          logEvent(callbacks, {
+            scope: "fs",
+            action: "raw_write_done",
+            videoId: video.videoId,
+            stage: "writing_json",
+            msg: "Raw video record written",
+            data: {
+              path: toRelativeExportPath(channelFolderPath, rawPaths.rawVideosFilePath),
+              ms: elapsedMs(rawVideoWriteStartedAt)
+            }
+          });
+          markStageTiming("raw_write_video", rawVideoWriteStartedAt);
 
           const finalHashes = await computeHashes({
             title: titleForFeatures,
@@ -1159,6 +1922,30 @@ export async function exportSelectedVideos(
             }
           });
 
+          markStageTiming("video_total", videoStartedAtMs);
+          logEvent(callbacks, {
+            scope: "exportService",
+            action: "video_done",
+            videoId: video.videoId,
+            stage: videoWarnings.length > 0 ? "warning" : "done",
+            msg: "Video processing finished",
+            data: {
+              status: videoWarnings.length > 0 ? "warning" : "done",
+              cacheHit: cacheCheck.hit,
+              transcriptStatus,
+              transcriptSource: transcriptResult.source,
+              timingsMs: videoStageTimingsMs,
+              llmUsed: {
+                description:
+                  cacheCheck.plan.needDerivedParts.descriptionLlm && Boolean(env.autoGenEnabled && env.openAiApiKey),
+                transcript:
+                  cacheCheck.plan.needDerivedParts.transcriptLlm && Boolean(env.autoGenEnabled && env.openAiApiKey),
+                thumbnail:
+                  cacheCheck.plan.needDerivedParts.thumbnailLlm && Boolean(env.autoGenEnabled && env.openAiApiKey)
+              }
+            }
+          });
+
           return {
             videoId: video.videoId,
             title: video.title,
@@ -1177,6 +1964,14 @@ export async function exportSelectedVideos(
           try {
             await enqueueCacheEntryUpdate(video.videoId, cacheEntryForPersist);
           } catch (error) {
+            logErrorAndWarn(callbacks, {
+              scope: "cache",
+              action: "cache_update",
+              stage: "writing_json",
+              videoId: video.videoId,
+              err: error,
+              msg: "Cache update failed"
+            });
             addWarning(
               `Export cache update failed for ${video.videoId}: ${error instanceof Error ? error.message : "unknown error"}`,
               video.videoId
@@ -1210,6 +2005,14 @@ export async function exportSelectedVideos(
         continue;
       }
 
+      const derivedWriteStartedAt = Date.now();
+      logEvent(callbacks, {
+        scope: "fs",
+        action: "derived_write_start",
+        videoId: video.videoId,
+        stage: "writing_json",
+        msg: "Writing performance-derived artifact"
+      });
       const artifactAbsolutePath = await persistPerformanceFeaturesArtifact({
         exportsRoot,
         channelFolderPath,
@@ -1218,6 +2021,17 @@ export async function exportSelectedVideos(
         performance
       });
       video.derivedVideoFeaturesArtifactPath = artifactAbsolutePath;
+      logEvent(callbacks, {
+        scope: "fs",
+        action: "derived_write_done",
+        videoId: video.videoId,
+        stage: "writing_json",
+        msg: "Performance-derived artifact written",
+        data: {
+          path: toRelativeExportPath(channelFolderPath, artifactAbsolutePath),
+          ms: elapsedMs(derivedWriteStartedAt)
+        }
+      });
 
       callbacks.onVideoProgress?.({
         videoId: video.videoId,
@@ -1226,6 +2040,13 @@ export async function exportSelectedVideos(
       });
     }
 
+    const channelModelsWriteStartedAt = Date.now();
+    logEvent(callbacks, {
+      scope: "fs",
+      action: "derived_write_start",
+      stage: "writing_json",
+      msg: "Writing channel models artifact"
+    });
     const channelModelsArtifactPath = await writeChannelModelsArtifact({
       exportsRoot,
       channelFolderPath,
@@ -1233,6 +2054,16 @@ export async function exportSelectedVideos(
       timeframe: request.timeframe,
       computedAt: exportedAt,
       model: performanceResult.modelSummary
+    });
+    logEvent(callbacks, {
+      scope: "fs",
+      action: "derived_write_done",
+      stage: "writing_json",
+      msg: "Channel models artifact written",
+      data: {
+        path: toRelativeExportPath(channelFolderPath, channelModelsArtifactPath),
+        ms: elapsedMs(channelModelsWriteStartedAt)
+      }
     });
 
     const exportVideos: ExportPayload["videos"] = processedVideos.map(
@@ -1252,7 +2083,27 @@ export async function exportSelectedVideos(
 
     const channelFilePath = path.resolve(channelFolderPath, "channel.json");
     ensureInsideRoot(exportsRoot, channelFilePath);
+    const channelWriteStartedAt = Date.now();
+    logEvent(callbacks, {
+      scope: "fs",
+      action: "raw_write_start",
+      stage: "writing_json",
+      msg: "Writing channel export JSON",
+      data: {
+        path: toRelativeExportPath(channelFolderPath, channelFilePath)
+      }
+    });
     await fs.writeFile(channelFilePath, JSON.stringify(channelJson, null, 2), "utf-8");
+    logEvent(callbacks, {
+      scope: "fs",
+      action: "raw_write_done",
+      stage: "writing_json",
+      msg: "Channel export JSON written",
+      data: {
+        path: toRelativeExportPath(channelFolderPath, channelFilePath),
+        ms: elapsedMs(channelWriteStartedAt)
+      }
+    });
 
     for (const item of processedVideos) {
       callbacks.onVideoProgress?.({
@@ -1270,19 +2121,108 @@ export async function exportSelectedVideos(
         percent: 98
       });
     }
+    const orchestratorStartedAt = Date.now();
+    const orchestratorTaskStepId = logEvent(callbacks, {
+      scope: "orchestrator",
+      action: "orchestrator_start",
+      msg: "Channel orchestrator started"
+    });
+    const autogenOrchestratorStepId = logEvent(callbacks, {
+      scope: "autogen",
+      action: "autogen_task_start",
+      msg: "AutoGen orchestrator task started",
+      data: {
+        taskName: "orchestrator",
+        model: env.autoGenModelOrchestrator,
+        reasoningEffort: env.autoGenReasoningEffortOrchestrator,
+        inputBytes: estimateSizeBytes({
+          channelId: request.channelId,
+          timeframe: request.timeframe,
+          selectedVideos: processedVideos.length
+        })
+      }
+    });
     try {
       const orchestratorResult = await runOrchestrator({
         exportRoot: exportsRoot,
         channelId: request.channelId,
         channelName: request.channelName,
         timeframe: request.timeframe,
-        jobId
+        jobId,
+        onAutoGenWorkerRequestId: (workerRequestId) => {
+          logEvent(callbacks, {
+            scope: "autogen",
+            action: "worker_request_map",
+            msg: "Mapped AutoGen worker request",
+            data: {
+              workerRequestId,
+              stepId: autogenOrchestratorStepId
+            }
+          });
+        }
       });
       orchestratorArtifactPaths = orchestratorResult.artifactPaths;
+      logEvent(callbacks, {
+        stepId: orchestratorTaskStepId,
+        scope: "orchestrator",
+        action: "orchestrator_done",
+        msg: "Channel orchestrator finished",
+        data: {
+          usedLlm: orchestratorResult.usedLlm,
+          artifacts: orchestratorResult.artifactPaths.map((artifactPath) =>
+            toRelativeExportPath(channelFolderPath, artifactPath)
+          ),
+          ms: elapsedMs(orchestratorStartedAt)
+        }
+      });
+      logEvent(callbacks, {
+        stepId: autogenOrchestratorStepId,
+        scope: "autogen",
+        action: "autogen_task_done",
+        msg: "AutoGen orchestrator task finished",
+        data: {
+          taskName: "orchestrator",
+          model: env.autoGenModelOrchestrator,
+          reasoningEffort: env.autoGenReasoningEffortOrchestrator,
+          inputBytes: estimateSizeBytes({
+            channelId: request.channelId,
+            timeframe: request.timeframe,
+            selectedVideos: processedVideos.length
+          }),
+          outputBytes: estimateSizeBytes(orchestratorResult.artifactPaths),
+          ms: elapsedMs(orchestratorStartedAt),
+          ok: orchestratorResult.usedLlm
+        }
+      });
       for (const warning of orchestratorResult.warnings) {
         addWarning(warning);
       }
     } catch (error) {
+      logErrorAndWarn(callbacks, {
+        scope: "orchestrator",
+        action: "orchestrator_run",
+        err: error,
+        msg: "Channel orchestrator failed"
+      });
+      logEvent(callbacks, {
+        stepId: autogenOrchestratorStepId,
+        scope: "autogen",
+        action: "autogen_task_done",
+        msg: "AutoGen orchestrator task failed",
+        data: {
+          taskName: "orchestrator",
+          model: env.autoGenModelOrchestrator,
+          reasoningEffort: env.autoGenReasoningEffortOrchestrator,
+          inputBytes: estimateSizeBytes({
+            channelId: request.channelId,
+            timeframe: request.timeframe,
+            selectedVideos: processedVideos.length
+          }),
+          outputBytes: 0,
+          ms: elapsedMs(orchestratorStartedAt),
+          ok: false
+        }
+      });
       addWarning(`Channel orchestrator failed: ${error instanceof Error ? error.message : "unknown error"}`);
     }
     for (const item of processedVideos) {
@@ -1293,6 +2233,13 @@ export async function exportSelectedVideos(
       });
     }
 
+    const rawPackStartedAt = Date.now();
+    logEvent(callbacks, {
+      scope: "fs",
+      action: "raw_write_start",
+      stage: "writing_json",
+      msg: "Writing raw pack"
+    });
     const rawPack = await writeRawPack({
       exportsRoot,
       channelFolderPath,
@@ -1308,6 +2255,16 @@ export async function exportSelectedVideos(
       channelStats: channelDetailsResult.channelStats,
       transcriptArtifactPaths: processedVideos.map((video) => video.rawTranscriptArtifactPath),
       existingThumbnailVideoIds: thumbnailAvailability.existingVideoIds
+    });
+    logEvent(callbacks, {
+      scope: "fs",
+      action: "raw_write_done",
+      stage: "writing_json",
+      msg: "Raw pack written",
+      data: {
+        artifactsCount: rawPack.artifactPaths.length,
+        ms: elapsedMs(rawPackStartedAt)
+      }
     });
 
     const selectedVideoCount = new Set(request.selectedVideoIds).size;
@@ -1369,7 +2326,27 @@ export async function exportSelectedVideos(
     const manifestPath = path.resolve(channelFolderPath, "manifest.json");
     ensureInsideRoot(exportsRoot, manifestPath);
     manifest.artifacts = [...manifest.artifacts, toSafeRelativePath(channelFolderPath, manifestPath)].sort();
+    const manifestWriteStartedAt = Date.now();
+    logEvent(callbacks, {
+      scope: "fs",
+      action: "raw_write_start",
+      stage: "writing_json",
+      msg: "Writing manifest",
+      data: {
+        path: toRelativeExportPath(channelFolderPath, manifestPath)
+      }
+    });
     await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
+    logEvent(callbacks, {
+      scope: "fs",
+      action: "raw_write_done",
+      stage: "writing_json",
+      msg: "Manifest written",
+      data: {
+        path: toRelativeExportPath(channelFolderPath, manifestPath),
+        ms: elapsedMs(manifestWriteStartedAt)
+      }
+    });
 
     let completed = 0;
     const total = processedVideos.length;
@@ -1383,12 +2360,40 @@ export async function exportSelectedVideos(
       callbacks.onJobProgress?.({ completed, total });
     }
 
+    logEvent(callbacks, {
+      scope: "exportService",
+      action: "export_done",
+      msg: "Export finished",
+      data: {
+        exportedCount: exportVideos.length,
+        warningsCount: warnings.length
+      }
+    });
+
     return {
       folderPath: channelFolderPath,
       warnings,
       exportedCount: exportVideos.length
     };
+  } catch (error) {
+    logErrorAndWarn(callbacks, {
+      scope: "exportService",
+      action: "export_failed",
+      err: error,
+      msg: "Export failed"
+    });
+    throw error;
   } finally {
+    const cleanupStartedAt = Date.now();
     await fs.rm(tempRootPath, { recursive: true, force: true });
+    logEvent(callbacks, {
+      scope: "fs",
+      action: "cleanup_done",
+      msg: "Temporary files cleaned",
+      data: {
+        path: toRelativeExportPath(exportsRoot, tempRootPath),
+        ms: elapsedMs(cleanupStartedAt)
+      }
+    });
   }
 }

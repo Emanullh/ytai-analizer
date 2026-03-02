@@ -208,6 +208,12 @@ Definidos en:
 
 `videoId` puede omitirse en warnings globales.
 
+Notas de correlación:
+
+- el backend puede emitir warnings técnicos con formato:
+  - `ERR <scope>/<action> stepId=<id> (see logs/job_<jobId>.errors.jsonl)`
+- `stepId` permite correlacionar SSE con logs persistentes del job.
+
 ### 2.5 `job_done`
 
 ```json
@@ -314,6 +320,11 @@ Estructura:
 exports/<channel_folder>/
   channel.json
   manifest.json
+  logs/
+    job_<jobId>.events.jsonl
+    job_<jobId>.errors.jsonl
+    job_<jobId>.summary.json
+    job_<jobId>.debug_bundle.json (solo en failed)
   thumbnails/
     <videoId>.jpg
   raw/
@@ -322,6 +333,58 @@ exports/<channel_folder>/
     transcripts/
       <videoId>.jsonl
     thumbnails/ -> ../thumbnails (symlink; fallback: copia)
+```
+
+### 3.5 Observabilidad de jobs (`logs/`)
+
+Ruta:
+
+- `exports/<channel_folder>/logs/`
+
+Archivos:
+
+- `job_<jobId>.events.jsonl`: timeline append-only de eventos.
+- `job_<jobId>.errors.jsonl`: errores estructurados (con stacktrace + clasificación).
+- `job_<jobId>.summary.json`: resumen final (`done|failed`).
+- `job_<jobId>.debug_bundle.json`: bundle de debug cuando el job termina en `failed`.
+
+Campos base por línea JSONL (`events/errors`):
+
+- `ts` (ISO)
+- `level` (`trace|debug|info|warn|error`)
+- `jobId`
+- `requestId`
+- `stepId`
+- `scope`
+- `action`
+- `videoId` (opcional)
+- `stage` (opcional)
+- `msg`
+- `data` (opcional, redaccionada)
+
+Campos extra en `errors.jsonl`:
+
+- `error.name`
+- `error.message`
+- `error.stack`
+- `error.code` (opcional)
+- `error.kind` (clasificación: `network_timeout`, `rate_limited`, `fs_error`, etc.)
+- `error.cause` (opcional)
+- `retry` (opcional)
+
+Privacidad:
+
+- no se registran secretos (`YOUTUBE_API_KEY`, `OPENAI_API_KEY`, tokens, headers auth).
+- prompts completos no se persisten; se permite hash + tamaño.
+
+Búsqueda rápida:
+
+```bash
+# correlacionar warning SSE -> error log
+rg "stepId=<id>" exports/<channel_folder>/logs/job_<jobId>.errors.jsonl
+
+# filtrar por video
+rg "\"videoId\":\"<videoId>\"" exports/<channel_folder>/logs/job_<jobId>.events.jsonl
 ```
 
 #### 3.4.1 `raw/channel.json`
@@ -890,6 +953,10 @@ Desde `apps/api/src/services/exportService.ts`:
 - crea thumbnails en `exports/<canal>/thumbnails/`
 - escribe `exports/<canal>/channel.json`
 - escribe `exports/<canal>/manifest.json`
+- escribe `exports/<canal>/logs/job_<jobId>.events.jsonl`
+- escribe `exports/<canal>/logs/job_<jobId>.errors.jsonl`
+- escribe `exports/<canal>/logs/job_<jobId>.summary.json`
+- escribe `exports/<canal>/logs/job_<jobId>.debug_bundle.json` (si `job_failed`)
 - escribe `exports/<canal>/analysis/orchestrator_input.json`
 - escribe `exports/<canal>/analysis/playbook.json`
 - escribe `exports/<canal>/derived/video_features/<videoId>.json`

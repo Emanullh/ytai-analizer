@@ -65,6 +65,7 @@
         "POST /export/jobs",
         "GET /export/jobs/:jobId/events",
         "SSE events -> reducer",
+        "logs/job_<jobId>.events.jsonl + logs/job_<jobId>.errors.jsonl",
         "derived/video_features/<videoId>.json write",
         "performance normalization (deterministic) per video",
         "derived/channel_models.json write",
@@ -192,6 +193,17 @@
         "llmModelChange": "only affected *.llm section",
         "missingApiKey": "reuse existing llm cache without invalidation"
       }
+    },
+    "jobLogs": {
+      "path": "exports/<channel>/logs/",
+      "files": [
+        "job_<jobId>.events.jsonl",
+        "job_<jobId>.errors.jsonl",
+        "job_<jobId>.summary.json",
+        "job_<jobId>.debug_bundle.json (failed only)"
+      ],
+      "correlationIds": ["jobId", "requestId", "videoId", "stepId"],
+      "secretPolicy": "No API keys or full prompts"
     },
     "sseEvents": [
       "job_started",

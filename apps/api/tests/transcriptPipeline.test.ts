@@ -54,7 +54,8 @@ describe("transcriptPipeline", () => {
       videoId: "video-2",
       outputMp3Path: "/tmp/video-2.mp3",
       language: "es",
-      onStage: undefined
+      onStage: undefined,
+      onWorkerRequestId: undefined
     });
     expect(result).toEqual({
       transcript: "texto local",
