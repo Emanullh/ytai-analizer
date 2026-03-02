@@ -52,6 +52,7 @@ const DETERMINISTIC_SIGNAL_FIELDS = new Set([
   "thumb_ocr_title_overlap_jaccard",
   "hasBigText"
 ]);
+const DETERMINISTIC_SIGNAL_PREFIXES = ["ocrSummary.", "imageStats.", "statsSummary.", "thumbMeta.", "deterministic."] as const;
 
 type ArchetypeLabel = (typeof ARCHETYPE_LABELS)[number];
 type FaceCountBucket = (typeof FACE_COUNT_BUCKETS)[number];
@@ -626,6 +627,31 @@ function normalizeEvidenceSignals(raw: unknown, warnings: string[]): ThumbnailEv
     return [];
   }
 
+  const resolveDeterministicSignalField = (rawFieldName: string): string | null => {
+    if (DETERMINISTIC_SIGNAL_FIELDS.has(rawFieldName)) {
+      return rawFieldName;
+    }
+
+    for (const prefix of DETERMINISTIC_SIGNAL_PREFIXES) {
+      if (rawFieldName.startsWith(prefix)) {
+        const candidate = rawFieldName.slice(prefix.length).trim();
+        if (candidate && DETERMINISTIC_SIGNAL_FIELDS.has(candidate)) {
+          return candidate;
+        }
+      }
+    }
+
+    const dotIndex = rawFieldName.lastIndexOf(".");
+    if (dotIndex >= 0) {
+      const suffix = rawFieldName.slice(dotIndex + 1).trim();
+      if (suffix && DETERMINISTIC_SIGNAL_FIELDS.has(suffix)) {
+        return suffix;
+      }
+    }
+
+    return null;
+  };
+
   return raw
     .map((item) => {
       if (!item || typeof item !== "object") {
@@ -637,7 +663,8 @@ function normalizeEvidenceSignals(raw: unknown, warnings: string[]): ThumbnailEv
       if (!fieldName) {
         return null;
       }
-      if (!DETERMINISTIC_SIGNAL_FIELDS.has(fieldName)) {
+      const resolvedFieldName = resolveDeterministicSignalField(fieldName);
+      if (!resolvedFieldName) {
         warnings.push(`Discarded evidence signal '${fieldName}': unknown deterministic field`);
         return null;
       }
@@ -651,7 +678,7 @@ function normalizeEvidenceSignals(raw: unknown, warnings: string[]): ThumbnailEv
             : null;
 
       return {
-        fieldName,
+        fieldName: resolvedFieldName,
         value
       };
     })

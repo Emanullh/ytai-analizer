@@ -93,6 +93,7 @@ export const env = {
     "medium"
   ),
   autoGenTimeoutSec: parsePositiveInt(process.env.AUTO_GEN_TIMEOUT_SEC, 60),
+  autoGenTimeoutOrchestratorSec: parsePositiveInt(process.env.AUTO_GEN_TIMEOUT_ORCHESTRATOR_SEC, 300),
   thumbOcrEnabled: parseBoolean(process.env.THUMB_OCR_ENABLED, true),
   thumbOcrLangs: process.env.THUMB_OCR_LANGS?.trim() || "eng",
   thumbVisionDownscaleWidth: parsePositiveInt(process.env.THUMB_VISION_DOWNSCALE_WIDTH, 256)

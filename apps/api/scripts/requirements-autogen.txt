@@ -1,3 +1,4 @@
 autogen-agentchat
 autogen-ext[openai]
+openai
 Pillow

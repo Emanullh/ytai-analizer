@@ -104,7 +104,8 @@ describe("thumbnailFeaturesAgent", () => {
       ],
       evidenceRegions: [{ label: "face-box", x: -0.3, y: 0.2, w: 1.4, h: 2 }],
       evidenceSignals: [
-        { fieldName: "brightnessMean", value: 0.33 },
+        { fieldName: "imageStats.brightnessMean", value: 0.33 },
+        { fieldName: "ocrSummary.hasBigText", value: true },
         { fieldName: "", value: 123 }
       ]
     });
@@ -171,6 +172,7 @@ describe("thumbnailFeaturesAgent", () => {
           };
           styleTags: Array<{ label: string }>;
           evidenceRegions: Array<{ x: number; y: number; w: number; h: number }>;
+          evidenceSignals: Array<{ fieldName: string; value: number | string | boolean | null }>;
         } | null;
         warnings: string[];
       };
@@ -189,8 +191,17 @@ describe("thumbnailFeaturesAgent", () => {
       h: 1,
       label: "face-box"
     });
+    expect(written.thumbnailFeatures?.llm?.evidenceSignals).toEqual(
+      expect.arrayContaining([
+        { fieldName: "brightnessMean", value: 0.33 },
+        { fieldName: "hasBigText", value: true }
+      ])
+    );
     expect(
       written.thumbnailFeatures?.warnings.some((warning) => warning.includes("Removed style tag 'face'"))
     ).toBe(true);
+    expect(
+      written.thumbnailFeatures?.warnings.some((warning) => warning.includes("Discarded evidence signal"))
+    ).toBe(false);
   });
 });

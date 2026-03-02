@@ -510,6 +510,29 @@ THUMB_STYLE_TAGS = {
     "diagram-like",
 }
 
+MODEL_ALIASES = {
+    # Keep canonical chat model names for API routing.
+    "gpt-5.2": "gpt-5.2",
+    "gpt-5.2-pro": "gpt-5.2-pro",
+    # Backward compatibility for previously pinned snapshots.
+    "gpt-5.2-2025-12-11": "gpt-5.2",
+    "gpt-5.2-pro-2025-12-11": "gpt-5.2-pro",
+}
+
+GPT_5_2_MODEL_INFO: Dict[str, Any] = {
+    "vision": True,
+    "function_calling": True,
+    "json_output": True,
+    "family": "gpt-5",
+    "structured_output": True,
+    "multiple_system_messages": True,
+}
+
+RESPONSES_ONLY_MODELS: set[str] = {
+    "gpt-5.2-pro",
+    "gpt-5.2-pro-2025-12-11",
+}
+
 
 def log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
@@ -1396,6 +1419,65 @@ def parse_agent_json(content: str) -> Any:
     return json.loads(stripped)
 
 
+def normalize_openai_model(model: str) -> str:
+    normalized = model.strip()
+    if not normalized:
+        return "gpt-5.2"
+    return MODEL_ALIASES.get(normalized.lower(), normalized)
+
+
+def resolve_model_info(model: str) -> Dict[str, Any] | None:
+    normalized = model.strip().lower()
+    if normalized.startswith("gpt-5.2"):
+        return dict(GPT_5_2_MODEL_INFO)
+    return None
+
+
+def resolve_model_capabilities(model_info: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "vision": bool(model_info.get("vision")),
+        "function_calling": bool(model_info.get("function_calling")),
+        "json_output": bool(model_info.get("json_output")),
+    }
+
+
+def is_responses_only_model(model: str) -> bool:
+    return normalize_openai_model(model) in RESPONSES_ONLY_MODELS
+
+
+RESPONSES_API_EFFORT_MAP: Dict[str, str] = {
+    "low": "medium",
+    "medium": "medium",
+    "high": "high",
+}
+
+
+async def call_responses_api(
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    api_key: str,
+    reasoning_effort: str = "medium",
+) -> str:
+    from openai import AsyncOpenAI
+
+    effort = RESPONSES_API_EFFORT_MAP.get(reasoning_effort, "medium")
+    client = AsyncOpenAI(api_key=api_key)
+    try:
+        response = await client.responses.create(
+            model=model,
+            instructions=system_prompt,
+            input=user_prompt,
+            reasoning={"effort": effort},
+        )
+        text = response.output_text
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("Responses API returned empty output")
+        return text
+    finally:
+        await client.close()
+
+
 def build_model_client(request: Dict[str, Any], env_model_var: str) -> OpenAIChatCompletionClient:
     ensure_autogen_available()
 
@@ -1403,7 +1485,10 @@ def build_model_client(request: Dict[str, Any], env_model_var: str) -> OpenAICha
     if provider != "openai":
         raise ValueError(f"unsupported provider '{provider}'")
 
-    model = str(request.get("model", os.environ.get(env_model_var, "gpt-5.2"))).strip() or "gpt-5.2"
+    requested_model = str(request.get("model", os.environ.get(env_model_var, "gpt-5.2"))).strip() or "gpt-5.2"
+    model = normalize_openai_model(requested_model)
+    if model != requested_model:
+        log(f"normalized model alias: {requested_model} -> {model}")
     reasoning_effort = str(request.get("reasoningEffort", "low")).strip().lower() or "low"
     if reasoning_effort not in {"low", "medium", "high"}:
         reasoning_effort = "low"
@@ -1412,15 +1497,46 @@ def build_model_client(request: Dict[str, Any], env_model_var: str) -> OpenAICha
     if not api_key:
         raise ValueError("OPENAI_API_KEY is required")
 
-    client_kwargs: Dict[str, Any] = {"model": model, "api_key": api_key}
-    if reasoning_effort in {"low", "medium", "high"}:
-        client_kwargs["reasoning_effort"] = reasoning_effort
+    model_info = resolve_model_info(model)
+    reasoning_supported = reasoning_effort in {"low", "medium", "high"}
+    base_kwargs: Dict[str, Any] = {"model": model, "api_key": api_key}
+    client_kwargs_candidates: List[Dict[str, Any]] = []
 
-    try:
-        return OpenAIChatCompletionClient(**client_kwargs)
-    except TypeError:
-        client_kwargs.pop("reasoning_effort", None)
-        return OpenAIChatCompletionClient(**client_kwargs)
+    if model_info is not None:
+        model_info_kwargs = dict(base_kwargs)
+        model_info_kwargs["model_info"] = dict(model_info)
+        if reasoning_supported:
+            model_info_with_reasoning_kwargs = dict(model_info_kwargs)
+            model_info_with_reasoning_kwargs["reasoning_effort"] = reasoning_effort
+            client_kwargs_candidates.append(model_info_with_reasoning_kwargs)
+        client_kwargs_candidates.append(model_info_kwargs)
+
+        model_capabilities_kwargs = dict(base_kwargs)
+        model_capabilities_kwargs["model_capabilities"] = resolve_model_capabilities(model_info)
+        if reasoning_supported:
+            model_capabilities_with_reasoning_kwargs = dict(model_capabilities_kwargs)
+            model_capabilities_with_reasoning_kwargs["reasoning_effort"] = reasoning_effort
+            client_kwargs_candidates.append(model_capabilities_with_reasoning_kwargs)
+        client_kwargs_candidates.append(model_capabilities_kwargs)
+
+    if reasoning_supported:
+        reasoning_kwargs = dict(base_kwargs)
+        reasoning_kwargs["reasoning_effort"] = reasoning_effort
+        client_kwargs_candidates.append(reasoning_kwargs)
+
+    client_kwargs_candidates.append(base_kwargs)
+
+    last_error: Exception | None = None
+    for candidate in client_kwargs_candidates:
+        try:
+            return OpenAIChatCompletionClient(**candidate)
+        except (TypeError, ValueError) as error:
+            last_error = error
+            continue
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("failed to initialize OpenAIChatCompletionClient")
 
 
 async def classify_title(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -1710,25 +1826,43 @@ async def classify_channel_orchestrator(request: Dict[str, Any]) -> Dict[str, An
     if not isinstance(rows, list):
         raise ValueError("payload.rows is required")
 
-    model_client = build_model_client(request, "AUTO_GEN_MODEL_ORCHESTRATOR")
-    agent = AssistantAgent(
-        name="ChannelOrchestratorAgent",
-        model_client=model_client,
-        system_message=CHANNEL_ORCHESTRATOR_SYSTEM_PROMPT,
-    )
-
+    requested_model = str(
+        request.get("model", os.environ.get("AUTO_GEN_MODEL_ORCHESTRATOR", "gpt-5.2-pro"))
+    ).strip() or "gpt-5.2-pro"
+    model = normalize_openai_model(requested_model)
     user_prompt = json.dumps(payload, ensure_ascii=False)
 
-    try:
-        run_result = await agent.run(task=user_prompt)
-        content = extract_text_from_agent_result(run_result)
+    if is_responses_only_model(model):
+        api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY is required")
+        reasoning_effort = str(request.get("reasoningEffort", "medium")).strip().lower() or "medium"
+        log(f"channel orchestrator using Responses API (model={model}, effort={reasoning_effort})")
+        content = await call_responses_api(
+            model=model,
+            system_prompt=CHANNEL_ORCHESTRATOR_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            api_key=api_key,
+            reasoning_effort=reasoning_effort,
+        )
         parsed = parse_agent_json(content)
-    finally:
-        close_method = getattr(model_client, "close", None)
-        if callable(close_method):
-            maybe_coroutine = close_method()
-            if asyncio.iscoroutine(maybe_coroutine):
-                await maybe_coroutine
+    else:
+        model_client = build_model_client(request, "AUTO_GEN_MODEL_ORCHESTRATOR")
+        agent = AssistantAgent(
+            name="ChannelOrchestratorAgent",
+            model_client=model_client,
+            system_message=CHANNEL_ORCHESTRATOR_SYSTEM_PROMPT,
+        )
+        try:
+            run_result = await agent.run(task=user_prompt)
+            content = extract_text_from_agent_result(run_result)
+            parsed = parse_agent_json(content)
+        finally:
+            close_method = getattr(model_client, "close", None)
+            if callable(close_method):
+                maybe_coroutine = close_method()
+                if asyncio.iscoroutine(maybe_coroutine):
+                    await maybe_coroutine
 
     return coerce_channel_orchestrator_result(parsed, payload)
 

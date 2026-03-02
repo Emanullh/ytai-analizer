@@ -263,9 +263,12 @@ class AutoGenWorkerClient {
     return new Promise<unknown>((resolve, reject) => {
       const id = randomUUID();
       options.onWorkerRequestId?.(id);
-      const timeoutMs = env.autoGenTimeoutSec * 1_000;
+      const timeoutSec = request.task === "channel_orchestrator_v1"
+        ? env.autoGenTimeoutOrchestratorSec
+        : env.autoGenTimeoutSec;
+      const timeoutMs = timeoutSec * 1_000;
       const timeout = setTimeout(() => {
-        this.rejectTask(id, new Error(`AutoGen worker timeout after ${env.autoGenTimeoutSec}s`));
+        this.rejectTask(id, new Error(`AutoGen worker timeout after ${timeoutSec}s`));
         this.terminateWorker();
       }, timeoutMs);
 
