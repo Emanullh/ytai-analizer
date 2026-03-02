@@ -1,165 +1,148 @@
-Tarea: Implementar Transcript Features Agent (determinista + LLM via AutoGen) integrado al flujo actual de export (sin pasos extra fuera del frontend)
+Tarea: Implementar Thumbnail Vision Features Agent (determinista + LLM vision via AutoGen) integrado al flujo actual de export (sin pasos extra fuera del frontend)
 
-Contexto (repo):
-- Export flow asíncrono con SSE: exportJobService -> exportService
-- Transcript pipeline ya existe (captions + fallback ASR) y export ya guarda transcript string + transcriptStatus.
-- Fase 1 ya generó (o está generando) raw/transcripts/<videoId>.jsonl con meta + segments (si existe).
-- AutoGen runtime ya existe (del primer agente): apps/api/src/services/autogenRuntime.ts y autogen_worker.py.
-- Derived por video existe: exports/<channel>/derived/video_features/<videoId>.json (merge incremental por agentes previos).
+Contexto:
+- Export flow asíncrono con SSE (exportJobService -> exportService)
+- Ya existe AutoGen runtime del primer agente:
+  - apps/api/src/services/autogenRuntime.ts
+  - apps/api/scripts/autogen_worker.py
+  - requirements-autogen.txt y scripts setup ya creados
+- Derived por video existe y se mergea:
+  exports/<channel>/derived/video_features/<videoId>.json
 
 Objetivo:
-Calcular features de transcript con evidencia (segment indices/tiempos) para habilitar análisis posterior (hook/pacing/estructura/sponsor/CTAs) y guardarlas en el template reusable.
+Extraer features de miniatura (thumbnail) para cada video exportado y persistirlas en el template reusable.
 
-Salida (template fijo):
+Salida (template fijo, extendiendo sin romper campos existentes):
 En exports/<channel>/derived/video_features/<videoId>.json agregar:
-"transcriptFeatures": {
+"thumbnailFeatures": {
   "deterministic": { ... },
   "llm": { ... | null },
   "warnings": [...]
 }
-Sin romper titleFeatures/descriptionFeatures existentes (merge).
 
-IMPORTANTE: Qué se calcula SIN AutoGen (determinista) y NO debe ir al prompt del agente
-Implementar en TypeScript y NO llamar LLM para:
+IMPORTANTE: Qué se calcula SIN AutoGen (determinista) y NO debe ir al prompt LLM
+Implementar en TypeScript (Node) y NO llamar LLM para:
 
-A) Hook / entrega de promesa (medible):
-1) hook_keyword_hit_time_sec:
-   - tokens importantes del título (min len>=3, sin stopwords ES/EN)
-   - buscar primer segmento (por orden de tiempo) que contiene algún token
-   - si hay startSec: usar ese startSec; si no, set null + warning
-   - evidence:
-     - matchedToken
-     - segmentIndex i
-     - snippet (subcadena del segmento)
-2) title_keyword_coverage:
-   - % tokens importantes del título presentes en transcript completo
-   - evidence: {titleTokens[], hitTokens[]}
-3) title_keyword_early_coverage_30s:
-   - si hay timestamps, usar texto de segmentos con start<30
-   - si no hay timestamps, usar primer N chars (ej 800) como proxy + warning
-4) promise_delivery_30s_score (determinista con embeddings, NO AutoGen):
-   - cosine( embed(title), embed(text_first_30s) )
-   - usar OpenAI embeddings si OPENAI_API_KEY; modelo default text-embedding-3-large
-   - si no hay API key, set null + warning
+A) File/metadata:
+- thumbnailLocalPath (relativo ya existe en channel.json)
+- fileSizeBytes (fs.stat)
+- imageWidth, imageHeight (leer encabezado)
+- aspectRatio = width/height
 
-B) Pacing (sin video):
-- wpm_overall:
-  - si hay timestamps: totalWords / (durationSec/60) usando:
-    - preferir durationSec del metadata video (raw/videos.jsonl) si existe
-    - si no existe, usar lastSegmentEndSec si disponible
-    - si no, set null + warning
-- wpm_0_30, wpm_30_120, wpm_last_30:
-  - si hay timestamps y durationSec: calcular por ventanas
-  - si no hay timestamps: null + warning
-- wpm_variance:
-  - varianza por ventanas (0-30,30-120,rest) si disponibles
-- segment_length_stats:
-  - chars y words por segmento: median, p90 (si segments>0)
-- silence_gap_stats:
-  - si timestamps confiables: gaps entre endSec y next.startSec: mean, p90, max (clamp >=0)
+B) OCR determinista (NO LLM):
+- Usar tesseract.js (WASM, cross-platform) en apps/api:
+  - extraer ocrText (string)
+  - ocrConfidenceMean (0..1)
+  - ocrBoxes[] con:
+    { x, y, w, h, confidence, text } en pixeles
+- Derivados:
+  - ocrCharCount, ocrWordCount
+  - textAreaRatio = sum(boxArea)/imageArea (clamp 0..1)
+- Guardar evidencia:
+  - ocrBoxes (limit 50: top por confidence o por area)
 
-C) Estructura retórica por reglas + conteos (determinista):
-- step_markers_count: patrones ("step 1","paso 1","primero","luego","por último", etc.)
-- list_markers_count: ("top","x things","3 reasons","razones", etc.)
-- contrast_markers_count: ("but","however","sin embargo","aunque", etc.)
-- story_markers_count: ("when","then","al final","entonces", etc.)
-Guardar evidence como topMatches[] con {segmentIndex, match, snippet}.
+C) Métricas visuales deterministas (NO LLM):
+- brightnessMean (0..1), contrastStd (0..1) sobre luminancia
+- colorfulness (Hasler–Süsstrunk) aproximado
+- sharpnessLaplacianVar (varianza del Laplacian sobre grayscale)
+- edgeDensity (Sobel magnitude > threshold) / pixelCount
+Implementación recomendada:
+- usar `sharp` para decodificar JPG->raw RGB buffer (o alternativa ya existente)
+- cálculos en TS puro sobre el buffer (sin OpenCV)
+- downscale a ancho <= 256 para performance (mantener proporción)
 
-D) Sentimiento / afecto (determinista, lexicon-based):
-- sentiment_mean, sentiment_std, sentiment_trend:
-  - usar un lexicon simple (EN+ES) versionado en repo (pequeño) y calcular score por segmento
-  - trend: slope de score vs tiempo (si timestamps); si no, vs index
-- emotion_peaks:
-  - usar wordlists pequeñas por emoción (joy/sadness/anger/fear/surprise)
-  - devolver top 3 picos con evidence: segmentIndex + snippet + score
-No LLM para sentimiento (evitar alucinación).
+D) Congruencia título ↔ OCR (NO LLM):
+- thumb_ocr_title_overlap_jaccard sobre tokens normalizados
+- thumb_ocr_title_overlap_tokens: {titleTokens[], ocrTokens[], overlapTokens[]} como evidencia
+- hasBigText (determinista): textAreaRatio >= 0.08 OR ocrWordCount >= 3
 
-E) Topic shift count (opcional determinista con embeddings, NO AutoGen):
-- topic_shift_count:
-  - construir ventanas (ej cada 20s) si timestamps; si no, chunk por N palabras (ej 120)
-  - embed cada ventana con embeddings (text-embedding-3-large)
-  - contar saltos donde cosine_distance > threshold (ej 0.22) con evidencia (window indices)
-Si no hay OPENAI_API_KEY, set null + warning.
+Qué SÍ se calcula CON AutoGen (LLM vision) y debe ir al prompt del agente:
+Solo lo que requiere percepción semántica/rostros/emoción/clasificación de estilo:
 
-Qué SÍ se calcula CON AutoGen (LLM) y debe ir al prompt del agente
-Solo lo “interpretativo” que queremos en taxonomías cerradas y con evidencia:
+1) archetype (taxonomía cerrada):
+   reaction | diagram | logo | portrait | screenshot | text-heavy | collage | other
+2) faceSignals (cerrado y auditable):
+   - faceCountBucket: 0 | 1 | 2 | 3plus
+   - dominantFacePosition: left|center|right y top|mid|bottom (si hay caras; si no, "unknown")
+   - faceEmotionTone: positive|negative|neutral|mixed|unknown
+   - hasEyeContact: true|false|unknown
+   Todo con confidence 0..1 y evidencia en forma de bboxes NORMALIZADOS (0..1), aunque sean aproximados.
+3) clutterLevel (cerrado): low|medium|high + confidence
+4) styleTags (multi-label cerrado, max 6):
+   high-contrast, low-contrast, colorful, dark, minimal, cluttered, clean, big-text, no-text, face, no-face, logo-heavy, screenshot-like, diagram-like
 
-1) story_arc (clasificación cerrada):
-   - problem-solution | listicle | timeline | explainer | debate | investigation | tutorial | other
-   Con:
-   - confidence 0..1
-   - evidenceSegments: [{segmentIndex, snippet}] (snippets exactos del input)
-
-2) sponsor_segments (extracción semiestructurada con evidencia):
-   - detectar si hay sponsor mid-roll y extraer:
-     - { startSec|null, endSec|null, brand, confidence, evidenceSegments:[{segmentIndex,snippet}] }
-   El LLM NO inventa marcas: brand debe aparecer literal en snippet.
-
-3) cta_segments (CTA detectada y tipificada, con evidencia):
-   - { type: subscribe|like|comment|link|follow|none, confidence, evidenceSegments:[...] }
-   Preferir evidence dentro de los primeros/últimos 60s si existe.
-
-IMPORTANTE: Para minimizar tokens y alucinación, el LLM NO recibe el transcript completo.
-Debes construir un payload reducido:
-- segmentsSample[]:
-  - primeros N segmentos (ej 20)
-  - + 5 segmentos del medio
-  - + últimos 10 segmentos
-  Cada texto truncado a 240 chars.
-- candidateSponsorSegments[] (determinista por regex “sponsor/brought to you by/patrocinado”):
-  segmentos detectados (si alguno)
-- candidateCTASegments[] (determinista por regex “subscribe/like/comment/follow”):
-  segmentos detectados (si alguno)
-Esto se pasa al LLM y el LLM solo confirma/clasifica/extrae con evidencia.
+IMPORTANTE anti-alucinación:
+- El LLM debe recibir:
+  - la imagen (thumbnail) por multimodal
+  - resumen determinista (ocrText truncado + metrics)
+- El LLM debe devolver SOLO JSON según schema y con evidence:
+  - evidenceRegions[]: [{label, x, y, w, h}] normalizados en [0,1]
+  - evidenceSignals[]: referencias a métricas deterministas (fieldName + value)
+- Validación post-LLM en Node:
+  - clamp bboxes 0..1
+  - si faceCountBucket==0, entonces dominantFacePosition debe ser "unknown" y hasEyeContact "unknown"
+  - si styleTags incluye "face" y faceCountBucket==0 => quitar tag y warning
 
 Implementación requerida (apps/api):
-1) Parsing de transcript artifacts:
-   - crear apps/api/src/derived/transcriptArtifacts.ts
-     - loadTranscriptJsonl(path) -> {meta, segments[]}
-     - fallback: si no existe raw/transcripts/<id>.jsonl, crear un artifact in-memory con 1 segmento {i:0,text:transcript,startSec:null,endSec:null} y warning.
-2) Determinista:
-   - apps/api/src/derived/transcriptDeterministic.ts
-     export function computeTranscriptDeterministicFeatures({title, transcriptArtifact, durationSec?, publishedAt?, nowISO?}): {features, warnings}
-   - incluir stopwords ES/EN en repo (pequeñas) para keywords del título
-   - incluir lexicon simple EN/ES y emotion wordlists (assets JSON)
+1) Módulo OCR:
+   - apps/api/src/derived/ocr/tesseractOcr.ts
+     - función async runOcr(imageBuffer|path) -> {text, confidenceMean, boxes[]}
+     - cache in-memory por fileHash (sha1) para no recalcular
+2) Módulo de métricas visuales:
+   - apps/api/src/derived/vision/imageStats.ts
+     - decodeThumbnailToRgb(thumbnailPath) -> {width,height, rgbBuffer}
+     - computeBrightnessContrast(...)
+     - computeColorfulness(...)
+     - computeSharpnessLaplacianVar(...)
+     - computeEdgeDensity(...)
 3) Agente:
-   - apps/api/src/derived/transcriptFeaturesAgent.ts
-     - computeDeterministic(...)
-     - buildLLMPayloadSample(...)
-     - if AUTO_GEN_ENABLED && OPENAI_API_KEY: call autogenRuntime.request({task:"transcript_classifier_v1", payload})
-     - validate LLM output:
-       - evidenceSegments segmentIndex debe existir
-       - snippet debe ser substring del texto del segmento sample correspondiente
-       - brand debe aparecer en snippet; si no, descartar sponsor entry + warning
-     - merge into derived JSON and persist
+   - apps/api/src/derived/thumbnailFeaturesAgent.ts
+     - computeDeterministic({title, thumbnailAbsPath})
+     - buildLLMPayload({videoId,title,thumbMeta,ocrSummary,statsSummary,thumbnailAbsPath})
+     - if AUTO_GEN_ENABLED && OPENAI_API_KEY:
+         autogenRuntime.request(task="thumbnail_classifier_v1", payload includes thumbnailAbsPath + summaries)
+       else llm=null + warnings
+     - merge + persist en derived/video_features/<videoId>.json (leer->merge->write atómico)
 4) Extender autogen_worker.py:
-   - handler task == "transcript_classifier_v1"
-   - usar SYSTEM PROMPT fijo del bloque “PROMPT AUTOGEN — TranscriptClassifierAgent v1”
-5) Integración en exportService:
-   - en apps/api/src/services/exportService.ts, en el loop por video:
-     - tras obtener transcript (y/o tras escribir raw transcript jsonl), ejecutar transcriptFeaturesAgent
-     - persistir derived/video_features/<videoId>.json (merge)
-   - SSE:
-     - NO agregar nuevo stage (preferido). Usa "writing_json" con percent incremental o emite warning.
-6) Tests:
-   - apps/api/tests/transcriptDeterministic.test.ts:
-     - hook_keyword_hit_time (con timestamps)
-     - wpm windows
-     - markers counts + evidence
-     - sentiment lexicon scoring determinista
-   - apps/api/tests/transcriptFeaturesAgent.test.ts:
-     - AutoGen disabled -> llm=null, deterministic ok
-     - mock autogenRuntime -> sponsor/cta/storyArc merge y validación de evidence
-   - actualizar export integration test:
-     - derived/video_features/<id>.json contiene transcriptFeatures
-7) Docs:
-   - docs/DATA_CONTRACTS.md: extender derived schema con transcriptFeatures
-   - AI Context Pack: mencionar task "transcript_classifier_v1" y assets (stopwords/lexicons)
+   - handler task == "thumbnail_classifier_v1"
+   - debe cargar la imagen desde thumbnailAbsPath (archivo local)
+   - debe enviar MultiModalMessage con texto + imagen (AutoGen soporta multimodal)
+   - usar modelo por defecto "gpt-5.2" (env AUTO_GEN_MODEL_THUMBNAIL)
+   - usar SYSTEM PROMPT fijo del bloque “PROMPT AUTOGEN — ThumbnailVisionClassifierAgent v1”
+   - salida estricta JSON
+   - logs a stderr
+   Nota: si Pillow no está instalado, agregarlo a requirements-autogen.txt
 
-PROMPT AUTOGEN — TranscriptClassifierAgent v1:
-(usar EXACTAMENTE el bloque del siguiente apartado; no inventar otro)
+5) Env vars:
+   - apps/api/.env.example + env.ts:
+     - AUTO_GEN_MODEL_THUMBNAIL (default gpt-5.2)
+     - THUMB_OCR_ENABLED (default true)
+     - THUMB_OCR_LANGS (default "eng")  // opcional: "eng+spa"
+     - THUMB_VISION_DOWNSCALE_WIDTH (default 256)
+6) Integración en exportService:
+   - en apps/api/src/services/exportService.ts, por cada video:
+     - después de descargar thumbnail a exports/<channel>/thumbnails/<videoId>.jpg
+     - ejecutar thumbnailFeaturesAgent (usa ese path local)
+     - reusar stage "writing_json" con percent incremental (no agregar stage nuevo preferido)
+7) Tests:
+   - apps/api/tests/imageStats.test.ts:
+     - fixture thumbnail pequeña (jpg/png) -> brightness/contrast/colorfulness deterministas (assert rangos)
+   - apps/api/tests/tesseractOcr.test.ts:
+     - NO ejecutar OCR real en CI; en su lugar, mockear runOcr y testear textAreaRatio/boxing math.
+   - apps/api/tests/thumbnailFeaturesAgent.test.ts:
+     - AutoGen disabled -> llm=null, deterministic ok
+     - mock autogenRuntime -> valida merge + normalización bboxes
+   - export integration test:
+     - derived/video_features/<id>.json contiene thumbnailFeatures
+
+8) Docs:
+   - docs/DATA_CONTRACTS.md: extender derived schema con thumbnailFeatures
+   - AI Context Pack: mencionar task "thumbnail_classifier_v1"
+
+PROMPT AUTOGEN — ThumbnailVisionClassifierAgent v1:
+(usar EXACTAMENTE el bloque del siguiente apartado)
 
 Entrega:
 - pnpm test verde
-- export job genera transcriptFeatures para cada video
-- sin pasos nuevos fuera del frontend
+- export job genera thumbnailFeatures por video sin pasos manuales extra
+- degradación segura si OCR/AutoGen no están disponibles

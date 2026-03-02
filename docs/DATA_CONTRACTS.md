@@ -519,6 +519,37 @@ Formato mínimo estable:
     },
     "llm": null,
     "warnings": []
+  },
+  "thumbnailFeatures": {
+    "deterministic": {
+      "thumbnailLocalPath": "thumbnails/video1.jpg",
+      "fileSizeBytes": 45231,
+      "imageWidth": 1280,
+      "imageHeight": 720,
+      "aspectRatio": 1.777778,
+      "ocrText": "TOP 5 AI TOOLS",
+      "ocrConfidenceMean": 0.86,
+      "ocrBoxes": [
+        { "x": 120, "y": 80, "w": 420, "h": 110, "confidence": 0.92, "text": "TOP 5" }
+      ],
+      "ocrCharCount": 14,
+      "ocrWordCount": 4,
+      "textAreaRatio": 0.12,
+      "brightnessMean": 0.55,
+      "contrastStd": 0.41,
+      "colorfulness": 0.62,
+      "sharpnessLaplacianVar": 0.29,
+      "edgeDensity": 0.33,
+      "thumb_ocr_title_overlap_jaccard": 0.5,
+      "thumb_ocr_title_overlap_tokens": {
+        "titleTokens": ["top", "5", "ai", "tools"],
+        "ocrTokens": ["top", "5", "ai", "tools"],
+        "overlapTokens": ["top", "5", "ai", "tools"]
+      },
+      "hasBigText": true
+    },
+    "llm": null,
+    "warnings": []
   }
 }
 ```
@@ -529,6 +560,7 @@ Notas:
 - `llm` puede ser `null` si `AUTO_GEN_ENABLED=false`, falta `OPENAI_API_KEY` o falla el worker.
 - `descriptionFeatures.llm` se calcula con task AutoGen `description_classifier_v1`.
 - `transcriptFeatures.llm` se calcula con task AutoGen `transcript_classifier_v1` sobre `segmentsSample` (no sobre transcript completo).
+- `thumbnailFeatures.llm` se calcula con task AutoGen `thumbnail_classifier_v1` usando entrada multimodal (imagen + resumen determinista).
 - El archivo se genera durante el flujo normal de export (`POST /export` y `/export/jobs`) sin pasos extra en UI.
 - Si no hay timestamps de transcript, `title_keyword_early_coverage_30s` usa fallback por prefijo de caracteres y lo documenta en `title_keyword_audit`.
 

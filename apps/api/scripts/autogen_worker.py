@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import asyncio
+import base64
 import json
 import os
 import sys
@@ -163,6 +164,53 @@ RULES:
 Now wait for the JSON input and respond with ONLY the JSON output.
 """
 
+THUMBNAIL_SYSTEM_PROMPT = """ThumbnailVisionClassifierAgent v1
+
+You are a strict multimodal classification agent. You must output ONLY valid JSON (no markdown, no prose).
+Task: classify a YouTube thumbnail using the provided image and deterministic signals.
+
+INPUT:
+You will receive:
+- thumbnail image
+- JSON payload with:
+  - videoId (string)
+  - title (string)
+  - thumbMeta ({thumbnailLocalPath,fileSizeBytes,imageWidth,imageHeight,aspectRatio})
+  - ocrSummary ({ocrText,ocrConfidenceMean,ocrCharCount,ocrWordCount,textAreaRatio,hasBigText})
+  - statsSummary ({brightnessMean,contrastStd,colorfulness,sharpnessLaplacianVar,edgeDensity,thumb_ocr_title_overlap_jaccard})
+
+OUTPUT (MUST match this schema exactly):
+{
+  "schemaVersion": "derived.thumbnail_llm.v1",
+  "archetype": { "label": "reaction|diagram|logo|portrait|screenshot|text-heavy|collage|other", "confidence": 0.0 },
+  "faceSignals": {
+    "faceCountBucket": "0|1|2|3plus",
+    "dominantFacePosition": { "x": "left|center|right|unknown", "y": "top|mid|bottom|unknown" },
+    "faceEmotionTone": "positive|negative|neutral|mixed|unknown",
+    "hasEyeContact": true,
+    "confidence": 0.0
+  },
+  "clutterLevel": { "label": "low|medium|high", "confidence": 0.0 },
+  "styleTags": [{ "label": "high-contrast|low-contrast|colorful|dark|minimal|cluttered|clean|big-text|no-text|face|no-face|logo-heavy|screenshot-like|diagram-like", "confidence": 0.0 }],
+  "evidenceRegions": [{ "label": "string", "x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0 }],
+  "evidenceSignals": [{ "fieldName": "string", "value": 0.0 }]
+}
+
+RULES:
+1) Use ONLY labels from the enums above.
+2) styleTags is multi-label, max 6 unique labels.
+3) confidence fields are in [0,1].
+4) evidenceRegions must use normalized coordinates in [0,1].
+5) Do not hallucinate text that is not visible in the image.
+6) Use deterministic summary as supporting signals, not as replacement for visual inspection.
+7) If faceCountBucket is "0":
+   - dominantFacePosition.x and .y should be "unknown"
+   - hasEyeContact should be "unknown"
+8) Output strict JSON only.
+
+Now wait for the multimodal input and respond with ONLY the JSON output.
+"""
+
 PROMISE_LABELS = {
     "howto/tutorial",
     "review",
@@ -211,6 +259,37 @@ STORY_ARC_LABELS = {
     "other",
 }
 TRANSCRIPT_CTA_LABELS = {"subscribe", "like", "comment", "link", "follow", "none"}
+THUMB_ARCHETYPE_LABELS = {
+    "reaction",
+    "diagram",
+    "logo",
+    "portrait",
+    "screenshot",
+    "text-heavy",
+    "collage",
+    "other",
+}
+THUMB_FACE_COUNT_BUCKETS = {"0", "1", "2", "3plus"}
+THUMB_FACE_POSITION_X = {"left", "center", "right", "unknown"}
+THUMB_FACE_POSITION_Y = {"top", "mid", "bottom", "unknown"}
+THUMB_FACE_EMOTION_TONES = {"positive", "negative", "neutral", "mixed", "unknown"}
+THUMB_CLUTTER_LEVELS = {"low", "medium", "high"}
+THUMB_STYLE_TAGS = {
+    "high-contrast",
+    "low-contrast",
+    "colorful",
+    "dark",
+    "minimal",
+    "cluttered",
+    "clean",
+    "big-text",
+    "no-text",
+    "face",
+    "no-face",
+    "logo-heavy",
+    "screenshot-like",
+    "diagram-like",
+}
 
 
 def log(message: str) -> None:
@@ -481,9 +560,164 @@ def coerce_transcript_result(raw: Any, sample_segments: Dict[int, str]) -> Dict[
     }
 
 
+def clamp_bbox(value: Any) -> float:
+    if not isinstance(value, (int, float)):
+        return 0.0
+    if value <= 0:
+        return 0.0
+    if value >= 1:
+        return 1.0
+    return round(float(value), 6)
+
+
+def coerce_thumbnail_result(raw: Any) -> Dict[str, Any]:
+    source = raw if isinstance(raw, dict) else {}
+
+    archetype_raw = source.get("archetype")
+    archetype_label = "other"
+    archetype_confidence = 0.0
+    if isinstance(archetype_raw, dict):
+        label = archetype_raw.get("label")
+        if isinstance(label, str) and label in THUMB_ARCHETYPE_LABELS:
+            archetype_label = label
+        archetype_confidence = clamp_01(archetype_raw.get("confidence", 0.0))
+
+    face_raw = source.get("faceSignals")
+    face_count_bucket = "0"
+    dominant_face_position = {"x": "unknown", "y": "unknown"}
+    face_emotion_tone = "unknown"
+    has_eye_contact: bool | str = "unknown"
+    face_confidence = 0.0
+
+    if isinstance(face_raw, dict):
+        bucket = face_raw.get("faceCountBucket")
+        if isinstance(bucket, str) and bucket in THUMB_FACE_COUNT_BUCKETS:
+            face_count_bucket = bucket
+
+        pos_raw = face_raw.get("dominantFacePosition")
+        if isinstance(pos_raw, dict):
+            x = pos_raw.get("x")
+            y = pos_raw.get("y")
+            if isinstance(x, str) and x in THUMB_FACE_POSITION_X:
+                dominant_face_position["x"] = x
+            if isinstance(y, str) and y in THUMB_FACE_POSITION_Y:
+                dominant_face_position["y"] = y
+
+        tone = face_raw.get("faceEmotionTone")
+        if isinstance(tone, str) and tone in THUMB_FACE_EMOTION_TONES:
+            face_emotion_tone = tone
+
+        eye_contact = face_raw.get("hasEyeContact")
+        if eye_contact is True or eye_contact is False:
+            has_eye_contact = eye_contact
+        elif eye_contact == "unknown":
+            has_eye_contact = "unknown"
+
+        face_confidence = clamp_01(face_raw.get("confidence", 0.0))
+
+    if face_count_bucket == "0":
+        dominant_face_position = {"x": "unknown", "y": "unknown"}
+        has_eye_contact = "unknown"
+
+    clutter_raw = source.get("clutterLevel")
+    clutter_label = "medium"
+    clutter_confidence = 0.0
+    if isinstance(clutter_raw, dict):
+        label = clutter_raw.get("label")
+        if isinstance(label, str) and label in THUMB_CLUTTER_LEVELS:
+            clutter_label = label
+        clutter_confidence = clamp_01(clutter_raw.get("confidence", 0.0))
+
+    style_tags: List[Dict[str, Any]] = []
+    seen_tags = set()
+    raw_tags = source.get("styleTags")
+    if isinstance(raw_tags, list):
+        for item in raw_tags:
+            if not isinstance(item, dict):
+                continue
+            label = item.get("label")
+            if not isinstance(label, str) or label not in THUMB_STYLE_TAGS:
+                continue
+            if label in seen_tags:
+                continue
+            seen_tags.add(label)
+            style_tags.append({"label": label, "confidence": clamp_01(item.get("confidence", 0.0))})
+            if len(style_tags) >= 6:
+                break
+
+    if face_count_bucket == "0":
+        style_tags = [tag for tag in style_tags if tag.get("label") != "face"]
+
+    evidence_regions: List[Dict[str, Any]] = []
+    raw_regions = source.get("evidenceRegions")
+    if isinstance(raw_regions, list):
+        for item in raw_regions:
+            if not isinstance(item, dict):
+                continue
+            label = item.get("label")
+            evidence_regions.append(
+                {
+                    "label": str(label).strip() if isinstance(label, str) and label.strip() else "region",
+                    "x": clamp_bbox(item.get("x", 0.0)),
+                    "y": clamp_bbox(item.get("y", 0.0)),
+                    "w": clamp_bbox(item.get("w", 0.0)),
+                    "h": clamp_bbox(item.get("h", 0.0)),
+                }
+            )
+
+    evidence_signals: List[Dict[str, Any]] = []
+    raw_signals = source.get("evidenceSignals")
+    if isinstance(raw_signals, list):
+        for item in raw_signals:
+            if not isinstance(item, dict):
+                continue
+            field_name = item.get("fieldName")
+            if not isinstance(field_name, str) or not field_name.strip():
+                continue
+            value = item.get("value")
+            if isinstance(value, (float, int)):
+                value = round(float(value), 6)
+            elif not isinstance(value, (str, bool)) and value is not None:
+                value = None
+            evidence_signals.append({"fieldName": field_name.strip(), "value": value})
+
+    return {
+        "schemaVersion": "derived.thumbnail_llm.v1",
+        "archetype": {"label": archetype_label, "confidence": archetype_confidence},
+        "faceSignals": {
+            "faceCountBucket": face_count_bucket,
+            "dominantFacePosition": dominant_face_position,
+            "faceEmotionTone": face_emotion_tone,
+            "hasEyeContact": has_eye_contact,
+            "confidence": face_confidence,
+        },
+        "clutterLevel": {"label": clutter_label, "confidence": clutter_confidence},
+        "styleTags": style_tags,
+        "evidenceRegions": evidence_regions,
+        "evidenceSignals": evidence_signals,
+    }
+
+
 def extract_text_from_agent_result(run_result: Any) -> str:
     if isinstance(run_result, str):
         return run_result
+
+    chat_message = getattr(run_result, "chat_message", None)
+    if chat_message is not None:
+        content = getattr(chat_message, "content", None)
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            text_parts: List[str] = []
+            for part in content:
+                if isinstance(part, str):
+                    text_parts.append(part)
+                elif isinstance(part, dict):
+                    text = part.get("text")
+                    if isinstance(text, str):
+                        text_parts.append(text)
+            if text_parts:
+                return "\n".join(text_parts)
 
     messages = getattr(run_result, "messages", None)
     if isinstance(messages, list) and messages:
@@ -689,6 +923,105 @@ async def classify_transcript(request: Dict[str, Any]) -> Dict[str, Any]:
     return coerce_transcript_result(parsed, sample_segments)
 
 
+def build_thumbnail_multimodal_message(user_prompt: str, image_path: str) -> Any:
+    from autogen_agentchat.messages import MultiModalMessage
+
+    image_content: Any = None
+
+    try:
+        from autogen_core import Image as AutoGenImage  # type: ignore
+
+        if hasattr(AutoGenImage, "from_file") and callable(getattr(AutoGenImage, "from_file")):
+            image_content = AutoGenImage.from_file(image_path)  # type: ignore[attr-defined]
+    except Exception as error:
+        log(f"thumbnail multimodal image helper unavailable: {error}")
+
+    if image_content is None:
+        try:
+            from PIL import Image as PILImage  # type: ignore
+
+            with PILImage.open(image_path) as image:
+                image.verify()
+        except Exception as error:
+            raise ValueError(f"failed to load thumbnail image: {error}") from error
+
+        with open(image_path, "rb") as image_file:
+            encoded = base64.b64encode(image_file.read()).decode("ascii")
+        image_content = {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}}
+
+    return MultiModalMessage(content=[user_prompt, image_content], source="user")
+
+
+async def run_multimodal_agent(agent: AssistantAgent, user_prompt: str, image_path: str) -> Any:
+    try:
+        message = build_thumbnail_multimodal_message(user_prompt, image_path)
+    except Exception as error:
+        log(f"thumbnail multimodal fallback to text-only: {error}")
+        return await agent.run(task=user_prompt)
+
+    if hasattr(agent, "on_messages"):
+        try:
+            return await agent.on_messages([message], cancellation_token=None)  # type: ignore[arg-type]
+        except TypeError:
+            return await agent.on_messages([message])  # type: ignore[arg-type]
+
+    return await agent.run(task=user_prompt)
+
+
+async def classify_thumbnail(request: Dict[str, Any]) -> Dict[str, Any]:
+    payload = request.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("missing payload")
+
+    thumbnail_abs_path = str(payload.get("thumbnailAbsPath", "")).strip()
+    if not thumbnail_abs_path:
+        raise ValueError("payload.thumbnailAbsPath is required")
+
+    if not os.path.isfile(thumbnail_abs_path):
+        raise ValueError(f"thumbnail path does not exist: {thumbnail_abs_path}")
+
+    model_client = build_model_client(request, "AUTO_GEN_MODEL_THUMBNAIL")
+    agent = AssistantAgent(
+        name="ThumbnailVisionClassifierAgent",
+        model_client=model_client,
+        system_message=THUMBNAIL_SYSTEM_PROMPT,
+    )
+
+    user_prompt = json.dumps(
+        {
+            "task": "thumbnail_classifier_v1",
+            "videoId": str(payload.get("videoId", "")).strip(),
+            "title": str(payload.get("title", "")).strip(),
+            "thumbMeta": payload.get("thumbMeta", {}),
+            "ocrSummary": payload.get("ocrSummary", {}),
+            "statsSummary": payload.get("statsSummary", {}),
+            "requiredOutput": {
+                "schemaVersion": "derived.thumbnail_llm.v1",
+                "archetype": "object(label,confidence)",
+                "faceSignals": "object(faceCountBucket,dominantFacePosition{x,y},faceEmotionTone,hasEyeContact,confidence)",
+                "clutterLevel": "object(label,confidence)",
+                "styleTags": "array(label,confidence), max 6",
+                "evidenceRegions": "array(label,x,y,w,h) normalized in [0,1]",
+                "evidenceSignals": "array(fieldName,value) using deterministic fields",
+            },
+        },
+        ensure_ascii=False,
+    )
+
+    try:
+        run_result = await run_multimodal_agent(agent, user_prompt, thumbnail_abs_path)
+        content = extract_text_from_agent_result(run_result)
+        parsed = parse_agent_json(content)
+    finally:
+        close_method = getattr(model_client, "close", None)
+        if callable(close_method):
+            maybe_coroutine = close_method()
+            if asyncio.iscoroutine(maybe_coroutine):
+                await maybe_coroutine
+
+    return coerce_thumbnail_result(parsed)
+
+
 async def classify_request(request: Dict[str, Any]) -> Dict[str, Any]:
     task = request.get("task")
     if task == "title_classifier_v1":
@@ -697,6 +1030,8 @@ async def classify_request(request: Dict[str, Any]) -> Dict[str, Any]:
         return await classify_description(request)
     if task == "transcript_classifier_v1":
         return await classify_transcript(request)
+    if task == "thumbnail_classifier_v1":
+        return await classify_thumbnail(request)
     raise ValueError(f"unsupported task '{task}'")
 
 

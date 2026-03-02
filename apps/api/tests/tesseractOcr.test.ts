@@ -1,0 +1,67 @@
+import os from "node:os";
+import path from "node:path";
+import { promises as fs } from "node:fs";
+import sharp from "sharp";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const runOcrMock = vi.fn();
+
+vi.mock("../src/derived/ocr/tesseractOcr.js", () => ({
+  runOcr: runOcrMock,
+  clearOcrCache: vi.fn(),
+  terminateOcrWorkers: vi.fn()
+}));
+
+describe("tesseractOcr integration math", () => {
+  const originalEnv = { ...process.env };
+  let tempDir = "";
+
+  beforeEach(async () => {
+    vi.resetModules();
+    runOcrMock.mockReset();
+    process.env = { ...originalEnv };
+    process.env.THUMB_OCR_ENABLED = "true";
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ytai-thumb-ocr-"));
+  });
+
+  afterEach(async () => {
+    process.env = { ...originalEnv };
+    await fs.rm(tempDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it("computes textAreaRatio and limits evidence boxes without running real OCR", async () => {
+    const imagePath = path.join(tempDir, "thumb.jpg");
+    const image = Buffer.alloc(100 * 50 * 3, 120);
+    await sharp(image, { raw: { width: 100, height: 50, channels: 3 } }).jpeg({ quality: 100 }).toFile(imagePath);
+
+    const boxes = Array.from({ length: 60 }, (_, index) => ({
+      x: index,
+      y: 1,
+      w: 2,
+      h: 5,
+      confidence: 1 - index / 100,
+      text: `w${index}`
+    }));
+
+    runOcrMock.mockResolvedValue({
+      text: "big text title demo",
+      confidenceMean: 0.85,
+      boxes
+    });
+
+    const { computeDeterministic } = await import("../src/derived/thumbnailFeaturesAgent.js");
+
+    const result = await computeDeterministic({
+      title: "Big title demo",
+      thumbnailAbsPath: imagePath,
+      thumbnailLocalPath: "thumbnails/video123.jpg"
+    });
+
+    expect(runOcrMock).toHaveBeenCalledTimes(1);
+    expect(result.value.textAreaRatio).toBeCloseTo(0.12, 6);
+    expect(result.value.ocrBoxes).toHaveLength(50);
+    expect(result.value.ocrWordCount).toBe(4);
+    expect(result.value.hasBigText).toBe(true);
+  });
+});

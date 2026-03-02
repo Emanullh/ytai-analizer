@@ -68,10 +68,23 @@ interface AutoGenTranscriptTaskRequest extends AutoGenBaseTaskRequest {
   };
 }
 
+interface AutoGenThumbnailTaskRequest extends AutoGenBaseTaskRequest {
+  task: "thumbnail_classifier_v1";
+  payload: {
+    videoId: string;
+    title: string;
+    thumbnailAbsPath: string;
+    thumbMeta: Record<string, unknown>;
+    ocrSummary: Record<string, unknown>;
+    statsSummary: Record<string, unknown>;
+  };
+}
+
 export type AutoGenTaskRequest =
   | AutoGenTitleTaskRequest
   | AutoGenDescriptionTaskRequest
-  | AutoGenTranscriptTaskRequest;
+  | AutoGenTranscriptTaskRequest
+  | AutoGenThumbnailTaskRequest;
 
 interface AutoGenInFlightTask {
   id: string;
@@ -113,7 +126,14 @@ function resolveAutoGenModel(request: AutoGenTaskRequest): string {
   if (request.model) {
     return request.model;
   }
-  return request.task === "title_classifier_v1" ? env.autoGenModelTitle : env.autoGenModelDescription;
+
+  if (request.task === "title_classifier_v1") {
+    return env.autoGenModelTitle;
+  }
+  if (request.task === "thumbnail_classifier_v1") {
+    return env.autoGenModelThumbnail;
+  }
+  return env.autoGenModelDescription;
 }
 
 function normalizeAutoGenPayload(request: AutoGenTaskRequest): AutoGenTaskRequest["payload"] {
@@ -139,6 +159,22 @@ function normalizeAutoGenPayload(request: AutoGenTaskRequest): AutoGenTaskReques
       description: request.payload.description,
       urlsWithSpans: Array.isArray(request.payload.urlsWithSpans) ? request.payload.urlsWithSpans : [],
       languageHint: request.payload.languageHint ?? "auto"
+    };
+  }
+
+  if (request.task === "thumbnail_classifier_v1") {
+    return {
+      videoId: request.payload.videoId,
+      title: request.payload.title,
+      thumbnailAbsPath: request.payload.thumbnailAbsPath,
+      thumbMeta:
+        request.payload.thumbMeta && typeof request.payload.thumbMeta === "object" ? request.payload.thumbMeta : {},
+      ocrSummary:
+        request.payload.ocrSummary && typeof request.payload.ocrSummary === "object" ? request.payload.ocrSummary : {},
+      statsSummary:
+        request.payload.statsSummary && typeof request.payload.statsSummary === "object"
+          ? request.payload.statsSummary
+          : {}
     };
   }
 
@@ -252,7 +288,8 @@ class AutoGenWorkerClient {
           ...process.env,
           OPENAI_API_KEY: env.openAiApiKey,
           AUTO_GEN_MODEL_TITLE: env.autoGenModelTitle,
-          AUTO_GEN_MODEL_DESCRIPTION: env.autoGenModelDescription
+          AUTO_GEN_MODEL_DESCRIPTION: env.autoGenModelDescription,
+          AUTO_GEN_MODEL_THUMBNAIL: env.autoGenModelThumbnail
         }
       });
 

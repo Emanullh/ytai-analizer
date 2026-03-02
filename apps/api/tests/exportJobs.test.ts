@@ -74,12 +74,14 @@ describe("export jobs + SSE progress", () => {
   let tempDir = "";
   const originalAutoGenEnabled = process.env.AUTO_GEN_ENABLED;
   const originalOpenAiApiKey = process.env.OPENAI_API_KEY;
+  const originalThumbOcrEnabled = process.env.THUMB_OCR_ENABLED;
 
   beforeEach(async () => {
     originalCwd = process.cwd();
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ytai-export-job-"));
     process.chdir(tempDir);
     process.env.AUTO_GEN_ENABLED = "false";
+    process.env.THUMB_OCR_ENABLED = "false";
     delete process.env.OPENAI_API_KEY;
 
     getSelectedVideoDetailsMock.mockReset();
@@ -106,6 +108,11 @@ describe("export jobs + SSE progress", () => {
       process.env.OPENAI_API_KEY = originalOpenAiApiKey;
     } else {
       delete process.env.OPENAI_API_KEY;
+    }
+    if (typeof originalThumbOcrEnabled === "string") {
+      process.env.THUMB_OCR_ENABLED = originalThumbOcrEnabled;
+    } else {
+      delete process.env.THUMB_OCR_ENABLED;
     }
   });
 
@@ -477,6 +484,15 @@ describe("export jobs + SSE progress", () => {
         llm: unknown;
         warnings: string[];
       };
+      thumbnailFeatures: {
+        deterministic: {
+          imageWidth: number;
+          imageHeight: number;
+          hasBigText: boolean;
+        };
+        llm: unknown;
+        warnings: string[];
+      };
     };
     expect(derivedVideoOne.schemaVersion).toBe("derived.video_features.v1");
     expect(derivedVideoOne.videoId).toBe("video0000011");
@@ -489,6 +505,11 @@ describe("export jobs + SSE progress", () => {
     expect(typeof derivedVideoOne.transcriptFeatures.deterministic.title_keyword_coverage).toBe("number");
     expect(derivedVideoOne.transcriptFeatures.deterministic.promise_delivery_30s_score).toBeNull();
     expect(Array.isArray(derivedVideoOne.transcriptFeatures.warnings)).toBe(true);
+    expect(derivedVideoOne.thumbnailFeatures.deterministic.imageWidth).toBeGreaterThanOrEqual(0);
+    expect(derivedVideoOne.thumbnailFeatures.deterministic.imageHeight).toBeGreaterThanOrEqual(0);
+    expect(typeof derivedVideoOne.thumbnailFeatures.deterministic.hasBigText).toBe("boolean");
+    expect(derivedVideoOne.thumbnailFeatures.llm).toBeNull();
+    expect(Array.isArray(derivedVideoOne.thumbnailFeatures.warnings)).toBe(true);
   });
 
   it("writes transcript artifact with meta only when transcript is missing", async () => {

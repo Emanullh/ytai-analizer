@@ -22,6 +22,7 @@ import { resolveTimeframeRange } from "../utils/timeframe.js";
 import { persistTitleFeaturesArtifact } from "../derived/titleFeaturesAgent.js";
 import { persistDescriptionFeaturesArtifact } from "../derived/descriptionFeaturesAgent.js";
 import { persistTranscriptFeaturesArtifact } from "../derived/transcriptFeaturesAgent.js";
+import { persistThumbnailFeaturesArtifact } from "../derived/thumbnailFeaturesAgent.js";
 
 export type ExportVideoStage =
   | "queue"
@@ -701,6 +702,38 @@ export async function exportSelectedVideos(
           addWarning(warning, video.videoId);
         }
 
+        let derivedVideoFeaturesArtifactPath: string | undefined;
+        const titleForFeatures = enrichedVideo?.title || video.title;
+        const descriptionForFeatures = enrichedVideo?.description ?? "";
+
+        try {
+          const derived = await persistThumbnailFeaturesArtifact({
+            exportsRoot,
+            channelFolderPath,
+            videoId: video.videoId,
+            title: titleForFeatures,
+            thumbnailAbsPath: thumbnailAbsolutePath,
+            thumbnailLocalPath: thumbnailRelativePath
+          });
+          derivedVideoFeaturesArtifactPath = derived.artifactAbsolutePath;
+
+          for (const warning of derived.warnings) {
+            videoWarnings.push(warning);
+            addWarning(warning, video.videoId);
+          }
+        } catch (error) {
+          const warning = `Thumbnail features generation failed for ${video.videoId}: ${
+            error instanceof Error ? error.message : "unknown error"
+          }`;
+          videoWarnings.push(warning);
+          addWarning(warning, video.videoId);
+        }
+        callbacks.onVideoProgress?.({
+          videoId: video.videoId,
+          stage: "writing_json",
+          percent: 62
+        });
+
         const transcriptStatus = toTranscriptStatus(transcriptResult.status);
         const sanitizedTranscriptResult = sanitizeTranscript(transcriptResult.transcript);
         const transcriptArtifactRecords = buildTranscriptArtifactRecords({
@@ -718,9 +751,6 @@ export async function exportSelectedVideos(
           percent: 70
         });
 
-        let derivedVideoFeaturesArtifactPath: string | undefined;
-        const titleForFeatures = enrichedVideo?.title || video.title;
-        const descriptionForFeatures = enrichedVideo?.description ?? "";
         try {
           const derived = await persistTitleFeaturesArtifact({
             exportsRoot,

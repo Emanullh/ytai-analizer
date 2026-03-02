@@ -34,7 +34,8 @@
       "tasks": [
         "title_classifier_v1",
         "description_classifier_v1",
-        "transcript_classifier_v1"
+        "transcript_classifier_v1",
+        "thumbnail_classifier_v1"
       ]
     }
   },
@@ -150,7 +151,10 @@
         "descriptionFeatures.warnings",
         "transcriptFeatures.deterministic",
         "transcriptFeatures.llm",
-        "transcriptFeatures.warnings"
+        "transcriptFeatures.warnings",
+        "thumbnailFeatures.deterministic",
+        "thumbnailFeatures.llm",
+        "thumbnailFeatures.warnings"
       ],
       "assets": [
         "apps/api/src/derived/assets/transcript-stopwords.json",
@@ -189,8 +193,12 @@
       "AUTO_GEN_ENABLED",
       "AUTO_GEN_MODEL_TITLE",
       "AUTO_GEN_MODEL_DESCRIPTION",
+      "AUTO_GEN_MODEL_THUMBNAIL",
       "AUTO_GEN_REASONING_EFFORT",
-      "AUTO_GEN_TIMEOUT_SEC"
+      "AUTO_GEN_TIMEOUT_SEC",
+      "THUMB_OCR_ENABLED",
+      "THUMB_OCR_LANGS",
+      "THUMB_VISION_DOWNSCALE_WIDTH"
     ],
     "windowsNotes": {
       "venvPython": ".venv-asr\\\\Scripts\\\\python.exe",

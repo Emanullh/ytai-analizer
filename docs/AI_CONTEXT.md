@@ -95,12 +95,16 @@ Fuente de verdad:
 
 ### Opcionales AutoGen / Derived Features
 
-- `OPENAI_API_KEY` (OpenAI API para embeddings + clasificación title/description/transcript)
+- `OPENAI_API_KEY` (OpenAI API para embeddings + clasificación title/description/transcript/thumbnail)
 - `AUTO_GEN_ENABLED` (default `true`)
 - `AUTO_GEN_MODEL_TITLE` (default `gpt-5.2`)
 - `AUTO_GEN_MODEL_DESCRIPTION` (default `gpt-5.2`)
+- `AUTO_GEN_MODEL_THUMBNAIL` (default `gpt-5.2`)
 - `AUTO_GEN_REASONING_EFFORT` (default `low`)
 - `AUTO_GEN_TIMEOUT_SEC` (default `60`)
+- `THUMB_OCR_ENABLED` (default `true`)
+- `THUMB_OCR_LANGS` (default `eng`; soporta `eng+spa`)
+- `THUMB_VISION_DOWNSCALE_WIDTH` (default `256`)
 
 Resolución de Python ASR (`apps/api/src/services/asrRuntime.ts`):
 
@@ -184,6 +188,7 @@ Orquestación en `apps/api/src/services/exportService.ts`:
    - `apps/api/src/derived/titleFeaturesAgent.ts`
    - `apps/api/src/derived/descriptionFeaturesAgent.ts`
    - `apps/api/src/derived/transcriptFeaturesAgent.ts`
+   - `apps/api/src/derived/thumbnailFeaturesAgent.ts`
 
 Detalles:
 
@@ -193,6 +198,7 @@ Detalles:
 - AutoGen worker opcional (`apps/api/src/services/autogenRuntime.ts` + `apps/api/scripts/autogen_worker.py`)
 - task AutoGen para descripción: `description_classifier_v1`
 - task AutoGen para transcript: `transcript_classifier_v1`
+- task AutoGen para thumbnail: `thumbnail_classifier_v1` (multimodal texto + imagen)
 - assets versionados para transcript:
   - `apps/api/src/derived/assets/transcript-stopwords.json`
   - `apps/api/src/derived/assets/transcript-sentiment-lexicon.json`
