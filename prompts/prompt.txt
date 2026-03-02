@@ -1,148 +1,123 @@
-Tarea: Implementar Thumbnail Vision Features Agent (determinista + LLM vision via AutoGen) integrado al flujo actual de export (sin pasos extra fuera del frontend)
+Tarea: Implementar Performance Normalization Agent (100% determinista) integrado al flujo actual de export y a los artifacts derived
 
 Contexto:
-- Export flow asíncrono con SSE (exportJobService -> exportService)
-- Ya existe AutoGen runtime del primer agente:
-  - apps/api/src/services/autogenRuntime.ts
-  - apps/api/scripts/autogen_worker.py
-  - requirements-autogen.txt y scripts setup ya creados
-- Derived por video existe y se mergea:
-  exports/<channel>/derived/video_features/<videoId>.json
+- Export genera raw/videos.jsonl (o ya se planea) con fields: viewCount/likeCount/commentCount/publishedAt/durationSec (+ title/desc etc.)
+- Derived por video existe: exports/<channel>/derived/video_features/<videoId>.json, merge incremental por agentes previos.
+- Objetivo: construir targets normalizados (views/day, engagement rates) y un score residual dentro del canal/timeframe, sin usar YouTube Analytics.
 
 Objetivo:
-Extraer features de miniatura (thumbnail) para cada video exportado y persistirlas en el template reusable.
+Para cada video exportado:
+1) calcular proxies:
+   - daysSincePublish
+   - viewsPerDay
+   - likeRate, commentRate, engagementRate
+2) construir un “performance baseline” por canal (con los videos seleccionados del export):
+   - modelo robusto para log_views explicado por edad y duración (+ weekday + isShort)
+3) calcular:
+   - performanceResidual
+   - performancePercentile (percentil del residual dentro del conjunto)
+4) persistir:
+   - Por video, dentro de derived/video_features/<videoId>.json:
+     performance: { daysSincePublish, viewsPerDay, likeRate, commentRate, engagementRate, logViews, residual, percentile }
+   - A nivel canal, escribir:
+     exports/<channel>/derived/channel_models.json
+     con:
+     {
+       "schemaVersion":"derived.channel_models.v1",
+       "computedAt":"ISO",
+       "channelId":"...",
+       "timeframe":"1m|6m|1y",
+       "model": {
+         "type":"robust-linear",
+         "formula":"log1p(viewCount) ~ log1p(daysSincePublish) + log1p(durationSec) + weekday + isShort",
+         "coefficients": {...},
+         "intercept": number,
+         "fit": { "n": number, "r2Approx": number|null, "madResidual": number, "notes": [...] }
+       }
+     }
+5) todo determinista, sin llamadas de red.
 
-Salida (template fijo, extendiendo sin romper campos existentes):
-En exports/<channel>/derived/video_features/<videoId>.json agregar:
-"thumbnailFeatures": {
-  "deterministic": { ... },
-  "llm": { ... | null },
-  "warnings": [...]
-}
+Requisitos / Criterios de aceptación:
+- No romper el flujo actual de export ni SSE.
+- Si durationSec no está disponible para algún video:
+  - usar null en features derivados y excluir ese predictor del modelo o imputar de forma conservadora:
+    - isShort = durationSec<=60 (si null, set false y warning)
+    - durationTerm: log1p(durationSec) solo si durationSec no null
+- Si hay menos de 5 videos seleccionados:
+  - NO ajustar modelo; en su lugar:
+    - residual=null
+    - percentile=null
+    - escribir warnings en channel_models.json
+- Implementar robust regression:
+  Opción A (preferida): Huber loss via iteratively reweighted least squares (IRLS) implementado en TS.
+  Opción B: simple OLS + median absolute deviation para residuals (si IRLS es demasiado).
+  Debe ser estable y testeable.
 
-IMPORTANTE: Qué se calcula SIN AutoGen (determinista) y NO debe ir al prompt LLM
-Implementar en TypeScript (Node) y NO llamar LLM para:
+Detalles técnicos:
+A) Crear módulo:
+- apps/api/src/derived/performanceNormalization.ts
+  export function computePerformancePerVideo(videos, nowDateISO): { perVideoMap, modelSummary, warnings }
+  Donde videos incluye: videoId, publishedAt, viewCount, likeCount, commentCount, durationSec.
 
-A) File/metadata:
-- thumbnailLocalPath (relativo ya existe en channel.json)
-- fileSizeBytes (fs.stat)
-- imageWidth, imageHeight (leer encabezado)
-- aspectRatio = width/height
+B) Helpers deterministas:
+- daysSincePublish = max(1, floor((now - publishedAt)/86400000))
+- viewsPerDay = viewCount / daysSincePublish
+- likeRate = likeCount / max(1, viewCount) (si likeCount missing -> null)
+- commentRate = commentCount / max(1, viewCount) (si missing -> null)
+- engagementRate = (likeCount+commentCount)/max(1, viewCount) (si ambos missing -> null)
+- logViews = ln(1+viewCount)
+- weekday: 0-6 (UTC) desde publishedAt
+- isShort: durationSec != null && durationSec <= 60
 
-B) OCR determinista (NO LLM):
-- Usar tesseract.js (WASM, cross-platform) en apps/api:
-  - extraer ocrText (string)
-  - ocrConfidenceMean (0..1)
-  - ocrBoxes[] con:
-    { x, y, w, h, confidence, text } en pixeles
-- Derivados:
-  - ocrCharCount, ocrWordCount
-  - textAreaRatio = sum(boxArea)/imageArea (clamp 0..1)
-- Guardar evidencia:
-  - ocrBoxes (limit 50: top por confidence o por area)
+C) Modelo (canal):
+- X features:
+  - x0 = 1 (intercept)
+  - x1 = log1p(daysSincePublish)
+  - x2 = log1p(durationSec) (si durationSec disponible; si no, 0 y máscara)
+  - x3..x8 one-hot weekday (o sin uno para evitar colinealidad)
+  - x9 isShort (0/1)
+- Fit:
+  - Si implementas IRLS-Huber:
+    - iterar 10-20 veces, convergencia por delta coef
+  - Si implementas OLS:
+    - beta = (X'X)^-1 X'y
+    - usar ridge pequeño (lambda=1e-6) si matriz casi singular
+- Residual:
+  - residual = y - y_pred
+  - madResidual = median(|residual - median(residual)|)
+- Percentile:
+  - percentile = rank(residual)/n (0..1), con tie handling
 
-C) Métricas visuales deterministas (NO LLM):
-- brightnessMean (0..1), contrastStd (0..1) sobre luminancia
-- colorfulness (Hasler–Süsstrunk) aproximado
-- sharpnessLaplacianVar (varianza del Laplacian sobre grayscale)
-- edgeDensity (Sobel magnitude > threshold) / pixelCount
-Implementación recomendada:
-- usar `sharp` para decodificar JPG->raw RGB buffer (o alternativa ya existente)
-- cálculos en TS puro sobre el buffer (sin OpenCV)
-- downscale a ancho <= 256 para performance (mantener proporción)
+D) Integración en exportService:
+- En apps/api/src/services/exportService.ts:
+  - una vez que tengas la lista final de videos exportados (y sus stats/duration):
+    - llamar computePerformancePerVideo
+    - para cada video: merge performance into derived/video_features/<videoId>.json
+    - escribir derived/channel_models.json
+  - preferir hacerlo al final (antes de writing_json final) para tener todos los videos.
 
-D) Congruencia título ↔ OCR (NO LLM):
-- thumb_ocr_title_overlap_jaccard sobre tokens normalizados
-- thumb_ocr_title_overlap_tokens: {titleTokens[], ocrTokens[], overlapTokens[]} como evidencia
-- hasBigText (determinista): textAreaRatio >= 0.08 OR ocrWordCount >= 3
+E) SSE:
+- Reusar stage "writing_json" con percent incremental (sin stage nuevo).
+- Emitir warning SSE si el modelo no se ajustó (n<5) pero no fallar job.
 
-Qué SÍ se calcula CON AutoGen (LLM vision) y debe ir al prompt del agente:
-Solo lo que requiere percepción semántica/rostros/emoción/clasificación de estilo:
+F) Tests:
+1) apps/api/tests/performanceNormalization.test.ts:
+   - cálculo daysSincePublish, viewsPerDay, rates
+   - modelo con dataset sintético (10 videos):
+     - verificar que residuals existen y percentile [0,1]
+     - verificar que coef no NaN
+   - caso n<5 -> residual null y warning
+2) export integration test:
+   - existe exports/<channel>/derived/channel_models.json
+   - derived/video_features/<id>.json contiene performance.*
 
-1) archetype (taxonomía cerrada):
-   reaction | diagram | logo | portrait | screenshot | text-heavy | collage | other
-2) faceSignals (cerrado y auditable):
-   - faceCountBucket: 0 | 1 | 2 | 3plus
-   - dominantFacePosition: left|center|right y top|mid|bottom (si hay caras; si no, "unknown")
-   - faceEmotionTone: positive|negative|neutral|mixed|unknown
-   - hasEyeContact: true|false|unknown
-   Todo con confidence 0..1 y evidencia en forma de bboxes NORMALIZADOS (0..1), aunque sean aproximados.
-3) clutterLevel (cerrado): low|medium|high + confidence
-4) styleTags (multi-label cerrado, max 6):
-   high-contrast, low-contrast, colorful, dark, minimal, cluttered, clean, big-text, no-text, face, no-face, logo-heavy, screenshot-like, diagram-like
-
-IMPORTANTE anti-alucinación:
-- El LLM debe recibir:
-  - la imagen (thumbnail) por multimodal
-  - resumen determinista (ocrText truncado + metrics)
-- El LLM debe devolver SOLO JSON según schema y con evidence:
-  - evidenceRegions[]: [{label, x, y, w, h}] normalizados en [0,1]
-  - evidenceSignals[]: referencias a métricas deterministas (fieldName + value)
-- Validación post-LLM en Node:
-  - clamp bboxes 0..1
-  - si faceCountBucket==0, entonces dominantFacePosition debe ser "unknown" y hasEyeContact "unknown"
-  - si styleTags incluye "face" y faceCountBucket==0 => quitar tag y warning
-
-Implementación requerida (apps/api):
-1) Módulo OCR:
-   - apps/api/src/derived/ocr/tesseractOcr.ts
-     - función async runOcr(imageBuffer|path) -> {text, confidenceMean, boxes[]}
-     - cache in-memory por fileHash (sha1) para no recalcular
-2) Módulo de métricas visuales:
-   - apps/api/src/derived/vision/imageStats.ts
-     - decodeThumbnailToRgb(thumbnailPath) -> {width,height, rgbBuffer}
-     - computeBrightnessContrast(...)
-     - computeColorfulness(...)
-     - computeSharpnessLaplacianVar(...)
-     - computeEdgeDensity(...)
-3) Agente:
-   - apps/api/src/derived/thumbnailFeaturesAgent.ts
-     - computeDeterministic({title, thumbnailAbsPath})
-     - buildLLMPayload({videoId,title,thumbMeta,ocrSummary,statsSummary,thumbnailAbsPath})
-     - if AUTO_GEN_ENABLED && OPENAI_API_KEY:
-         autogenRuntime.request(task="thumbnail_classifier_v1", payload includes thumbnailAbsPath + summaries)
-       else llm=null + warnings
-     - merge + persist en derived/video_features/<videoId>.json (leer->merge->write atómico)
-4) Extender autogen_worker.py:
-   - handler task == "thumbnail_classifier_v1"
-   - debe cargar la imagen desde thumbnailAbsPath (archivo local)
-   - debe enviar MultiModalMessage con texto + imagen (AutoGen soporta multimodal)
-   - usar modelo por defecto "gpt-5.2" (env AUTO_GEN_MODEL_THUMBNAIL)
-   - usar SYSTEM PROMPT fijo del bloque “PROMPT AUTOGEN — ThumbnailVisionClassifierAgent v1”
-   - salida estricta JSON
-   - logs a stderr
-   Nota: si Pillow no está instalado, agregarlo a requirements-autogen.txt
-
-5) Env vars:
-   - apps/api/.env.example + env.ts:
-     - AUTO_GEN_MODEL_THUMBNAIL (default gpt-5.2)
-     - THUMB_OCR_ENABLED (default true)
-     - THUMB_OCR_LANGS (default "eng")  // opcional: "eng+spa"
-     - THUMB_VISION_DOWNSCALE_WIDTH (default 256)
-6) Integración en exportService:
-   - en apps/api/src/services/exportService.ts, por cada video:
-     - después de descargar thumbnail a exports/<channel>/thumbnails/<videoId>.jpg
-     - ejecutar thumbnailFeaturesAgent (usa ese path local)
-     - reusar stage "writing_json" con percent incremental (no agregar stage nuevo preferido)
-7) Tests:
-   - apps/api/tests/imageStats.test.ts:
-     - fixture thumbnail pequeña (jpg/png) -> brightness/contrast/colorfulness deterministas (assert rangos)
-   - apps/api/tests/tesseractOcr.test.ts:
-     - NO ejecutar OCR real en CI; en su lugar, mockear runOcr y testear textAreaRatio/boxing math.
-   - apps/api/tests/thumbnailFeaturesAgent.test.ts:
-     - AutoGen disabled -> llm=null, deterministic ok
-     - mock autogenRuntime -> valida merge + normalización bboxes
-   - export integration test:
-     - derived/video_features/<id>.json contiene thumbnailFeatures
-
-8) Docs:
-   - docs/DATA_CONTRACTS.md: extender derived schema con thumbnailFeatures
-   - AI Context Pack: mencionar task "thumbnail_classifier_v1"
-
-PROMPT AUTOGEN — ThumbnailVisionClassifierAgent v1:
-(usar EXACTAMENTE el bloque del siguiente apartado)
+G) Docs:
+- docs/DATA_CONTRACTS.md:
+  - agregar schema derived.channel_models.v1
+  - extender derived.video_features.v1 con performance
+- AI Context Pack: describir “Performance Normalization Agent” como determinista.
 
 Entrega:
 - pnpm test verde
-- export job genera thumbnailFeatures por video sin pasos manuales extra
-- degradación segura si OCR/AutoGen no están disponibles
+- export job genera channel_models.json + performance per video
+- sin AutoGen/LLM

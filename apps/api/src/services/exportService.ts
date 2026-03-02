@@ -23,6 +23,11 @@ import { persistTitleFeaturesArtifact } from "../derived/titleFeaturesAgent.js";
 import { persistDescriptionFeaturesArtifact } from "../derived/descriptionFeaturesAgent.js";
 import { persistTranscriptFeaturesArtifact } from "../derived/transcriptFeaturesAgent.js";
 import { persistThumbnailFeaturesArtifact } from "../derived/thumbnailFeaturesAgent.js";
+import {
+  computePerformancePerVideo,
+  type ChannelModelSummary,
+  type VideoPerformanceFeatures
+} from "../derived/performanceNormalization.js";
 
 export type ExportVideoStage =
   | "queue"
@@ -192,6 +197,22 @@ interface RawPackOutput {
   artifactPaths: string[];
 }
 
+interface DerivedVideoFeaturesArtifactV1 {
+  schemaVersion: "derived.video_features.v1";
+  videoId: string;
+  computedAt: string;
+  performance?: VideoPerformanceFeatures;
+  [key: string]: unknown;
+}
+
+interface DerivedChannelModelsArtifactV1 {
+  schemaVersion: "derived.channel_models.v1";
+  computedAt: string;
+  channelId: string;
+  timeframe: Timeframe;
+  model: ChannelModelSummary;
+}
+
 const EXPORT_VERSION = "1.1";
 const TRANSCRIPT_CONCURRENCY = 4;
 
@@ -259,6 +280,94 @@ function createJsonLineAppender(filePath: string): (record: unknown) => Promise<
     });
     await chain;
   };
+}
+
+async function readExistingArtifact(artifactPath: string): Promise<Record<string, unknown> | null> {
+  try {
+    const raw = await fs.readFile(artifactPath, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    return parsed as Record<string, unknown>;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function writeJsonAtomic(targetPath: string, value: unknown): Promise<void> {
+  const tempPath = `${targetPath}.${randomUUID()}.tmp`;
+  await fs.writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
+  await fs.rename(tempPath, targetPath);
+}
+
+function toOptionalMetricCount(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return null;
+  }
+  return value;
+}
+
+function toOptionalDurationSec(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+  return value;
+}
+
+async function persistPerformanceFeaturesArtifact(args: {
+  exportsRoot: string;
+  channelFolderPath: string;
+  videoId: string;
+  computedAt: string;
+  performance: VideoPerformanceFeatures;
+}): Promise<string> {
+  const derivedFolderPath = path.resolve(args.channelFolderPath, "derived", "video_features");
+  const artifactAbsolutePath = path.resolve(derivedFolderPath, `${args.videoId}.json`);
+
+  ensureInsideRoot(args.exportsRoot, derivedFolderPath);
+  ensureInsideRoot(args.exportsRoot, artifactAbsolutePath);
+
+  await fs.mkdir(derivedFolderPath, { recursive: true });
+  const existing = await readExistingArtifact(artifactAbsolutePath);
+  const mergedBundle: DerivedVideoFeaturesArtifactV1 = {
+    ...(existing ?? {}),
+    schemaVersion: "derived.video_features.v1",
+    videoId: args.videoId,
+    computedAt: args.computedAt,
+    performance: args.performance
+  };
+  await writeJsonAtomic(artifactAbsolutePath, mergedBundle);
+  return artifactAbsolutePath;
+}
+
+async function writeChannelModelsArtifact(args: {
+  exportsRoot: string;
+  channelFolderPath: string;
+  channelId: string;
+  timeframe: Timeframe;
+  computedAt: string;
+  model: ChannelModelSummary;
+}): Promise<string> {
+  const derivedFolderPath = path.resolve(args.channelFolderPath, "derived");
+  const channelModelsPath = path.resolve(derivedFolderPath, "channel_models.json");
+
+  ensureInsideRoot(args.exportsRoot, derivedFolderPath);
+  ensureInsideRoot(args.exportsRoot, channelModelsPath);
+
+  await fs.mkdir(derivedFolderPath, { recursive: true });
+  const payload: DerivedChannelModelsArtifactV1 = {
+    schemaVersion: "derived.channel_models.v1",
+    computedAt: args.computedAt,
+    channelId: args.channelId,
+    timeframe: args.timeframe,
+    model: args.model
+  };
+  await writeJsonAtomic(channelModelsPath, payload);
+  return channelModelsPath;
 }
 
 function daysBetweenDates(fromIsoDate: string, toDate: Date): number {
@@ -865,6 +974,55 @@ export async function exportSelectedVideos(
       }
     );
 
+    const performanceInputVideos = processedVideos.map((video) => {
+      const enrichedVideo = videoDetailsById.get(video.videoId);
+      return {
+        videoId: video.videoId,
+        publishedAt: enrichedVideo?.publishedAt ?? video.publishedAt,
+        viewCount: enrichedVideo?.statistics.viewCount ?? video.viewCount,
+        likeCount: toOptionalMetricCount(enrichedVideo?.statistics.likeCount),
+        commentCount: toOptionalMetricCount(enrichedVideo?.statistics.commentCount),
+        durationSec: toOptionalDurationSec(enrichedVideo?.durationSec)
+      };
+    });
+
+    const performanceResult = computePerformancePerVideo(performanceInputVideos, exportedAt);
+    for (const warning of performanceResult.warnings) {
+      addWarning(warning);
+    }
+
+    const performanceProgressDenominator = Math.max(processedVideos.length, 1);
+    for (const [index, video] of processedVideos.entries()) {
+      const performance = performanceResult.perVideoMap[video.videoId];
+      if (!performance) {
+        continue;
+      }
+
+      const artifactAbsolutePath = await persistPerformanceFeaturesArtifact({
+        exportsRoot,
+        channelFolderPath,
+        videoId: video.videoId,
+        computedAt: exportedAt,
+        performance
+      });
+      video.derivedVideoFeaturesArtifactPath = artifactAbsolutePath;
+
+      callbacks.onVideoProgress?.({
+        videoId: video.videoId,
+        stage: "writing_json",
+        percent: 98 + Math.floor(((index + 1) / performanceProgressDenominator) * 1)
+      });
+    }
+
+    const channelModelsArtifactPath = await writeChannelModelsArtifact({
+      exportsRoot,
+      channelFolderPath,
+      channelId: request.channelId,
+      timeframe: request.timeframe,
+      computedAt: exportedAt,
+      model: performanceResult.modelSummary
+    });
+
     const exportVideos: ExportPayload["videos"] = processedVideos.map(
       ({ warnings: _, rawTranscriptArtifactPath: __, derivedVideoFeaturesArtifactPath: ___, ...video }) => video
     );
@@ -931,7 +1089,13 @@ export async function exportSelectedVideos(
     const derivedArtifactPaths = processedVideos
       .map((video) => video.derivedVideoFeaturesArtifactPath)
       .filter((artifactPath): artifactPath is string => Boolean(artifactPath));
-    const artifactPaths = [channelFilePath, ...thumbnailArtifactPaths, ...rawPack.artifactPaths, ...derivedArtifactPaths];
+    const artifactPaths = [
+      channelFilePath,
+      ...thumbnailArtifactPaths,
+      ...rawPack.artifactPaths,
+      ...derivedArtifactPaths,
+      channelModelsArtifactPath
+    ];
     const artifactSet = new Set(
       artifactPaths.map((artifactPath) => toSafeRelativePath(channelFolderPath, artifactPath))
     );

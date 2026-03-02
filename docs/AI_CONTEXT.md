@@ -189,6 +189,10 @@ Orquestación en `apps/api/src/services/exportService.ts`:
    - `apps/api/src/derived/descriptionFeaturesAgent.ts`
    - `apps/api/src/derived/transcriptFeaturesAgent.ts`
    - `apps/api/src/derived/thumbnailFeaturesAgent.ts`
+4. ejecuta Performance Normalization Agent determinista:
+   - `apps/api/src/derived/performanceNormalization.ts`
+   - mergea `performance` por video en `derived/video_features/<videoId>.json`
+   - escribe baseline de canal en `derived/channel_models.json`
 
 Detalles:
 
@@ -199,6 +203,7 @@ Detalles:
 - task AutoGen para descripción: `description_classifier_v1`
 - task AutoGen para transcript: `transcript_classifier_v1`
 - task AutoGen para thumbnail: `thumbnail_classifier_v1` (multimodal texto + imagen)
+- Performance Normalization no usa LLM/AutoGen/red: calcula proxies, residual y percentil de forma determinista
 - assets versionados para transcript:
   - `apps/api/src/derived/assets/transcript-stopwords.json`
   - `apps/api/src/derived/assets/transcript-sentiment-lexicon.json`
@@ -212,6 +217,7 @@ Export (`apps/api/src/services/exportService.ts`) escribe en:
 - `exports/<channel_sanitizado>/channel.json`
 - `exports/<channel_sanitizado>/thumbnails/<videoId>.jpg`
 - `exports/<channel_sanitizado>/derived/video_features/<videoId>.json`
+- `exports/<channel_sanitizado>/derived/channel_models.json`
 
 Temporal de ASR:
 

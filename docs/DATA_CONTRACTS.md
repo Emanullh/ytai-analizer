@@ -550,6 +550,16 @@ Formato mínimo estable:
     },
     "llm": null,
     "warnings": []
+  },
+  "performance": {
+    "daysSincePublish": 45,
+    "viewsPerDay": 2143.25,
+    "likeRate": 0.0412,
+    "commentRate": 0.0038,
+    "engagementRate": 0.045,
+    "logViews": 11.477512,
+    "residual": 0.183214,
+    "percentile": 0.91
   }
 }
 ```
@@ -561,8 +571,57 @@ Notas:
 - `descriptionFeatures.llm` se calcula con task AutoGen `description_classifier_v1`.
 - `transcriptFeatures.llm` se calcula con task AutoGen `transcript_classifier_v1` sobre `segmentsSample` (no sobre transcript completo).
 - `thumbnailFeatures.llm` se calcula con task AutoGen `thumbnail_classifier_v1` usando entrada multimodal (imagen + resumen determinista).
+- `performance` se calcula de forma **100% determinista** sin llamadas de red:
+  - proxies por video: `daysSincePublish`, `viewsPerDay`, `likeRate`, `commentRate`, `engagementRate`, `logViews`
+  - score relativo por canal/timeframe: `residual`, `percentile`
+- cuando no hay suficientes videos (`n < 5`) no se ajusta modelo y `residual`/`percentile` quedan `null`.
 - El archivo se genera durante el flujo normal de export (`POST /export` y `/export/jobs`) sin pasos extra en UI.
 - Si no hay timestamps de transcript, `title_keyword_early_coverage_30s` usa fallback por prefijo de caracteres y lo documenta en `title_keyword_audit`.
+
+### 3.6 Derived Channel Model v1
+
+Ruta:
+
+- `exports/<channel_folder>/derived/channel_models.json`
+
+Formato:
+
+```json
+{
+  "schemaVersion": "derived.channel_models.v1",
+  "computedAt": "2026-03-02T12:00:00.000Z",
+  "channelId": "UC1234567890123456789012",
+  "timeframe": "6m",
+  "model": {
+    "type": "robust-linear",
+    "formula": "log1p(viewCount) ~ log1p(daysSincePublish) + log1p(durationSec) + weekday + isShort",
+    "coefficients": {
+      "logDaysSincePublish": 0.61,
+      "logDurationSec": 0.19,
+      "weekday_1": 0.02,
+      "weekday_2": -0.01,
+      "weekday_3": 0.03,
+      "weekday_4": 0.01,
+      "weekday_5": -0.02,
+      "weekday_6": -0.01,
+      "isShort": 0.08
+    },
+    "intercept": 7.12,
+    "fit": {
+      "n": 42,
+      "r2Approx": 0.58,
+      "madResidual": 0.24,
+      "notes": ["IRLS converged in 6 iterations"]
+    }
+  }
+}
+```
+
+Reglas:
+
+- modelo robusto por canal/timeframe (`IRLS + Huber`) sobre videos exportados.
+- predictor `durationSec` se excluye o imputa conservadoramente cuando falta.
+- `fit.notes` contiene warnings operativos (por ejemplo `n < 5` o missing duration).
 
 ## 4) Contratos internos de pipeline
 

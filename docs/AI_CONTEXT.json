@@ -66,6 +66,8 @@
         "GET /export/jobs/:jobId/events",
         "SSE events -> reducer",
         "derived/video_features/<videoId>.json write",
+        "performance normalization (deterministic) per video",
+        "derived/channel_models.json write",
         "channel.json write"
       ]
     },
@@ -154,13 +156,28 @@
         "transcriptFeatures.warnings",
         "thumbnailFeatures.deterministic",
         "thumbnailFeatures.llm",
-        "thumbnailFeatures.warnings"
+        "thumbnailFeatures.warnings",
+        "performance.daysSincePublish",
+        "performance.viewsPerDay",
+        "performance.likeRate",
+        "performance.commentRate",
+        "performance.engagementRate",
+        "performance.logViews",
+        "performance.residual",
+        "performance.percentile"
       ],
       "assets": [
         "apps/api/src/derived/assets/transcript-stopwords.json",
         "apps/api/src/derived/assets/transcript-sentiment-lexicon.json",
         "apps/api/src/derived/assets/transcript-emotions.json"
       ]
+    },
+    "derivedChannelModels": {
+      "path": "exports/<channel>/derived/channel_models.json",
+      "schemaVersion": "derived.channel_models.v1",
+      "modelType": "robust-linear",
+      "deterministic": true,
+      "formula": "log1p(viewCount) ~ log1p(daysSincePublish) + log1p(durationSec) + weekday + isShort"
     },
     "sseEvents": [
       "job_started",

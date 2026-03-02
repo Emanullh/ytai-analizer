@@ -254,6 +254,14 @@ describe("export jobs + SSE progress", () => {
       events.some((event) => event.event === "video_progress" && event.data.stage === "downloading_audio")
     ).toBe(true);
     expect(events.some((event) => event.event === "warning")).toBe(true);
+    expect(
+      events.some(
+        (event) =>
+          event.event === "warning" &&
+          typeof event.data.message === "string" &&
+          event.data.message.includes("Performance model skipped")
+      )
+    ).toBe(true);
     expect(events.at(-1)?.event).toBe("job_done");
 
     const lastProgressEvent = [...events]
@@ -339,6 +347,7 @@ describe("export jobs + SSE progress", () => {
         "raw/channel.json",
         "raw/videos.jsonl",
         "manifest.json",
+        "derived/channel_models.json",
         "derived/video_features/video0000011.json",
         "derived/video_features/video0000022.json"
       ])
@@ -458,6 +467,29 @@ describe("export jobs + SSE progress", () => {
       "utf-8"
     );
     await fs.access(path.join(statusBody.exportPath as string, "derived", "video_features", "video0000022.json"));
+    const channelModelsRaw = await fs.readFile(
+      path.join(statusBody.exportPath as string, "derived", "channel_models.json"),
+      "utf-8"
+    );
+    const channelModels = JSON.parse(channelModelsRaw) as {
+      schemaVersion: string;
+      channelId: string;
+      timeframe: string;
+      model: {
+        type: string;
+        fit: {
+          n: number;
+          notes: string[];
+        };
+      };
+    };
+    expect(channelModels.schemaVersion).toBe("derived.channel_models.v1");
+    expect(channelModels.channelId).toBe("UC1234567890123456789012");
+    expect(channelModels.timeframe).toBe("6m");
+    expect(channelModels.model.type).toBe("robust-linear");
+    expect(channelModels.model.fit.n).toBe(2);
+    expect(channelModels.model.fit.notes.some((note) => note.includes("requires at least 5 videos"))).toBe(true);
+
     const derivedVideoOne = JSON.parse(derivedVideoOneRaw) as {
       schemaVersion: string;
       videoId: string;
@@ -493,6 +525,16 @@ describe("export jobs + SSE progress", () => {
         llm: unknown;
         warnings: string[];
       };
+      performance: {
+        daysSincePublish: number;
+        viewsPerDay: number;
+        likeRate: number | null;
+        commentRate: number | null;
+        engagementRate: number | null;
+        logViews: number;
+        residual: number | null;
+        percentile: number | null;
+      };
     };
     expect(derivedVideoOne.schemaVersion).toBe("derived.video_features.v1");
     expect(derivedVideoOne.videoId).toBe("video0000011");
@@ -510,6 +552,11 @@ describe("export jobs + SSE progress", () => {
     expect(typeof derivedVideoOne.thumbnailFeatures.deterministic.hasBigText).toBe("boolean");
     expect(derivedVideoOne.thumbnailFeatures.llm).toBeNull();
     expect(Array.isArray(derivedVideoOne.thumbnailFeatures.warnings)).toBe(true);
+    expect(typeof derivedVideoOne.performance.daysSincePublish).toBe("number");
+    expect(typeof derivedVideoOne.performance.viewsPerDay).toBe("number");
+    expect(typeof derivedVideoOne.performance.logViews).toBe("number");
+    expect(derivedVideoOne.performance.residual).toBeNull();
+    expect(derivedVideoOne.performance.percentile).toBeNull();
   });
 
   it("writes transcript artifact with meta only when transcript is missing", async () => {
