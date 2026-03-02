@@ -392,6 +392,62 @@ Campos:
     - `confidence` (`number|null`)
 - Si transcript está `missing|error`, se escribe igualmente el archivo con la línea `meta` y sin segmentos.
 
+### 3.5 Derived Features v1
+
+Ruta:
+
+- `exports/<channel_folder>/derived/video_features/<videoId>.json`
+
+Formato mínimo estable:
+
+```json
+{
+  "schemaVersion": "derived.video_features.v1",
+  "videoId": "video1",
+  "computedAt": "2026-03-02T12:00:00.000Z",
+  "titleFeatures": {
+    "deterministic": {
+      "title_len_chars": 25,
+      "title_len_words": 4,
+      "caps_ratio": 0.66,
+      "emoji_count": 0,
+      "punct_count_total": 8,
+      "question_mark_count": 1,
+      "exclamation_count": 1,
+      "colon_count": 1,
+      "dash_count": 1,
+      "paren_count": 2,
+      "bracket_count": 2,
+      "has_number": true,
+      "number_count": 2,
+      "leading_number": true,
+      "pronoun_count": 0,
+      "negation_count": 0,
+      "certainty_count": 0,
+      "hedging_count": 0,
+      "title_keyword_coverage": 0.5,
+      "title_keyword_early_coverage_30s": 0.33,
+      "title_transcript_sim_cosine": null,
+      "title_keyword_audit": {
+        "title_tokens": ["token1", "token2"],
+        "matched_in_transcript": ["token1"],
+        "matched_in_early_window_30s": ["token1"],
+        "early_window_mode": "timestamp_window_0_30s",
+        "early_window_char_limit": null
+      }
+    },
+    "llm": null
+  }
+}
+```
+
+Notas:
+
+- `deterministic` se calcula siempre (sin LLM).
+- `llm` puede ser `null` si `AUTO_GEN_ENABLED=false`, falta `OPENAI_API_KEY` o falla el worker.
+- El archivo se genera durante el flujo normal de export (`POST /export` y `/export/jobs`) sin pasos extra en UI.
+- Si no hay timestamps de transcript, `title_keyword_early_coverage_30s` usa fallback por prefijo de caracteres y lo documenta en `title_keyword_audit`.
+
 ## 4) Contratos internos de pipeline
 
 ### 4.1 Transcript pipeline
@@ -481,6 +537,7 @@ Desde `apps/api/src/services/exportService.ts`:
 - crea thumbnails en `exports/<canal>/thumbnails/`
 - escribe `exports/<canal>/channel.json`
 - escribe `exports/<canal>/manifest.json`
+- escribe `exports/<canal>/derived/video_features/<videoId>.json`
 - escribe `exports/<canal>/raw/channel.json`
 - escribe `exports/<canal>/raw/videos.jsonl`
 - escribe `exports/<canal>/raw/transcripts/<videoId>.jsonl`

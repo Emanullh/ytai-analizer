@@ -72,11 +72,15 @@ describe("export jobs + SSE progress", () => {
   let app: FastifyInstance;
   let originalCwd = process.cwd();
   let tempDir = "";
+  const originalAutoGenEnabled = process.env.AUTO_GEN_ENABLED;
+  const originalOpenAiApiKey = process.env.OPENAI_API_KEY;
 
   beforeEach(async () => {
     originalCwd = process.cwd();
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ytai-export-job-"));
     process.chdir(tempDir);
+    process.env.AUTO_GEN_ENABLED = "false";
+    delete process.env.OPENAI_API_KEY;
 
     getSelectedVideoDetailsMock.mockReset();
     getVideoDetailsMock.mockReset();
@@ -93,6 +97,16 @@ describe("export jobs + SSE progress", () => {
     await app.close();
     process.chdir(originalCwd);
     await fs.rm(tempDir, { recursive: true, force: true });
+    if (typeof originalAutoGenEnabled === "string") {
+      process.env.AUTO_GEN_ENABLED = originalAutoGenEnabled;
+    } else {
+      delete process.env.AUTO_GEN_ENABLED;
+    }
+    if (typeof originalOpenAiApiKey === "string") {
+      process.env.OPENAI_API_KEY = originalOpenAiApiKey;
+    } else {
+      delete process.env.OPENAI_API_KEY;
+    }
   });
 
   it("emits progress events in SSE and completes with completed=total", async () => {
@@ -313,7 +327,15 @@ describe("export jobs + SSE progress", () => {
       thumbnailsOk: 2,
       thumbnailsFailed: 0
     });
-    expect(manifest.artifacts).toEqual(expect.arrayContaining(["raw/channel.json", "raw/videos.jsonl", "manifest.json"]));
+    expect(manifest.artifacts).toEqual(
+      expect.arrayContaining([
+        "raw/channel.json",
+        "raw/videos.jsonl",
+        "manifest.json",
+        "derived/video_features/video0000011.json",
+        "derived/video_features/video0000022.json"
+      ])
+    );
     for (const artifact of manifest.artifacts) {
       expect(isSafeRelativeArtifact(artifact)).toBe(true);
       const resolvedArtifactPath = path.resolve(statusBody.exportPath as string, artifact);
@@ -423,6 +445,28 @@ describe("export jobs + SSE progress", () => {
       text: "transcript captions video uno",
       confidence: null
     });
+
+    const derivedVideoOneRaw = await fs.readFile(
+      path.join(statusBody.exportPath as string, "derived", "video_features", "video0000011.json"),
+      "utf-8"
+    );
+    await fs.access(path.join(statusBody.exportPath as string, "derived", "video_features", "video0000022.json"));
+    const derivedVideoOne = JSON.parse(derivedVideoOneRaw) as {
+      schemaVersion: string;
+      videoId: string;
+      titleFeatures: {
+        deterministic: {
+          title_len_chars: number;
+          title_keyword_coverage: number;
+        };
+        llm: unknown;
+      };
+    };
+    expect(derivedVideoOne.schemaVersion).toBe("derived.video_features.v1");
+    expect(derivedVideoOne.videoId).toBe("video0000011");
+    expect(derivedVideoOne.titleFeatures.deterministic.title_len_chars).toBeGreaterThan(0);
+    expect(typeof derivedVideoOne.titleFeatures.deterministic.title_keyword_coverage).toBe("number");
+    expect(derivedVideoOne.titleFeatures.llm).toBeNull();
   });
 
   it("writes transcript artifact with meta only when transcript is missing", async () => {

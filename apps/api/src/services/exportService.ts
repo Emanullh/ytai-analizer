@@ -19,6 +19,7 @@ import { getTranscriptWithFallback } from "./transcriptPipeline.js";
 import type { TranscriptPipelineResult } from "./transcriptPipeline.js";
 import type { TranscriptSegment } from "./transcriptModels.js";
 import { resolveTimeframeRange } from "../utils/timeframe.js";
+import { persistTitleFeaturesArtifact } from "../derived/titleFeaturesAgent.js";
 
 export type ExportVideoStage =
   | "queue"
@@ -57,6 +58,7 @@ interface ExportDependencies {
 type ProcessedVideo = ExportPayload["videos"][number] & {
   warnings: string[];
   rawTranscriptArtifactPath: string;
+  derivedVideoFeaturesArtifactPath?: string;
 };
 
 interface RawChannelExportV1 {
@@ -319,6 +321,20 @@ function resolveTranscriptLanguage(result: TranscriptPipelineResult): string {
     return env.localAsrLanguage || "auto";
   }
   return env.transcriptLang ?? "auto";
+}
+
+function toLanguageHint(language: string | undefined): "auto" | "en" | "es" {
+  const normalized = language?.trim().toLowerCase();
+  if (!normalized) {
+    return "auto";
+  }
+  if (normalized.startsWith("en")) {
+    return "en";
+  }
+  if (normalized.startsWith("es")) {
+    return "es";
+  }
+  return "auto";
 }
 
 function buildTranscriptArtifactRecords(input: {
@@ -694,6 +710,42 @@ export async function exportSelectedVideos(
           createdAt: exportedAt
         });
         await writeJsonLines(transcriptAbsolutePath, transcriptArtifactRecords);
+        callbacks.onVideoProgress?.({
+          videoId: video.videoId,
+          stage: "writing_json",
+          percent: 70
+        });
+
+        let derivedVideoFeaturesArtifactPath: string | undefined;
+        const titleForFeatures = enrichedVideo?.title || video.title;
+        try {
+          const derived = await persistTitleFeaturesArtifact({
+            exportsRoot,
+            channelFolderPath,
+            videoId: video.videoId,
+            title: titleForFeatures,
+            transcript: sanitizedTranscriptResult.transcript,
+            transcriptSegments: transcriptResult.segments,
+            languageHint: toLanguageHint(resolveTranscriptLanguage(transcriptResult))
+          });
+          derivedVideoFeaturesArtifactPath = derived.artifactAbsolutePath;
+
+          for (const warning of derived.warnings) {
+            videoWarnings.push(warning);
+            addWarning(warning, video.videoId);
+          }
+        } catch (error) {
+          const warning = `Title features generation failed for ${video.videoId}: ${
+            error instanceof Error ? error.message : "unknown error"
+          }`;
+          videoWarnings.push(warning);
+          addWarning(warning, video.videoId);
+        }
+        callbacks.onVideoProgress?.({
+          videoId: video.videoId,
+          stage: "writing_json",
+          percent: 90
+        });
 
         const transcriptRef: RawVideoRecordV1["transcriptRef"] = {
           transcriptPath: transcriptRelativePath,
@@ -714,19 +766,21 @@ export async function exportSelectedVideos(
           transcriptSource: transcriptResult.source,
           transcriptPath: transcriptRelativePath,
           warnings: videoWarnings,
-          rawTranscriptArtifactPath: transcriptAbsolutePath
+          rawTranscriptArtifactPath: transcriptAbsolutePath,
+          derivedVideoFeaturesArtifactPath
         };
       }
     );
 
     const exportVideos: ExportPayload["videos"] = processedVideos.map(
-      ({ warnings: _, rawTranscriptArtifactPath: __, ...video }) => video
+      ({ warnings: _, rawTranscriptArtifactPath: __, derivedVideoFeaturesArtifactPath: ___, ...video }) => video
     );
     const thumbnailAvailability = await collectThumbnailAvailability(exportsRoot, channelFolderPath, processedVideos);
     for (const item of processedVideos) {
       callbacks.onVideoProgress?.({
         videoId: item.videoId,
-        stage: "writing_json"
+        stage: "writing_json",
+        percent: 100
       });
     }
 
@@ -781,7 +835,10 @@ export async function exportSelectedVideos(
     const thumbnailArtifactPaths = Array.from(thumbnailAvailability.existingVideoIds, (videoId) =>
       path.resolve(channelFolderPath, "thumbnails", `${videoId}.jpg`)
     );
-    const artifactPaths = [channelFilePath, ...thumbnailArtifactPaths, ...rawPack.artifactPaths];
+    const derivedArtifactPaths = processedVideos
+      .map((video) => video.derivedVideoFeaturesArtifactPath)
+      .filter((artifactPath): artifactPath is string => Boolean(artifactPath));
+    const artifactPaths = [channelFilePath, ...thumbnailArtifactPaths, ...rawPack.artifactPaths, ...derivedArtifactPaths];
     const artifactSet = new Set(
       artifactPaths.map((artifactPath) => toSafeRelativePath(channelFolderPath, artifactPath))
     );

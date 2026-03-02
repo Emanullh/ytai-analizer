@@ -26,6 +26,11 @@
         "scripts/setup_asr.ps1"
       ],
       "checkScript": "scripts/check_asr.mjs"
+    },
+    "autogen": {
+      "worker": "apps/api/scripts/autogen_worker.py",
+      "requirements": "apps/api/scripts/requirements-autogen.txt",
+      "runtime": "apps/api/src/services/autogenRuntime.ts"
     }
   },
   "flows": [
@@ -54,6 +59,7 @@
         "POST /export/jobs",
         "GET /export/jobs/:jobId/events",
         "SSE events -> reducer",
+        "derived/video_features/<videoId>.json write",
         "channel.json write"
       ]
     },
@@ -125,6 +131,11 @@
         "transcriptStatus?"
       ]
     },
+    "derivedTitleFeatures": {
+      "path": "exports/<channel>/derived/video_features/<videoId>.json",
+      "schemaVersion": "derived.video_features.v1",
+      "fields": ["schemaVersion", "videoId", "computedAt", "titleFeatures.deterministic", "titleFeatures.llm"]
+    },
     "sseEvents": [
       "job_started",
       "video_progress",
@@ -151,7 +162,12 @@
       "LOCAL_ASR_MAX_CONCURRENCY",
       "LOCAL_ASR_TIMEOUT_SEC",
       "YOUTUBE_AUDIO_DOWNLOAD_TIMEOUT_SEC",
-      "ASR_PYTHON_PATH"
+      "ASR_PYTHON_PATH",
+      "OPENAI_API_KEY",
+      "AUTO_GEN_ENABLED",
+      "AUTO_GEN_MODEL_TITLE",
+      "AUTO_GEN_REASONING_EFFORT",
+      "AUTO_GEN_TIMEOUT_SEC"
     ],
     "windowsNotes": {
       "venvPython": ".venv-asr\\\\Scripts\\\\python.exe",

@@ -1,49 +1,159 @@
-Tarea: Fase 1 — guardar transcript como artefacto por video (raw/transcripts/<videoId>.jsonl) con segmentación mínima y provenance
+Tarea: Implementar Title Features Agent + bootstrap inicial AutoGen (LLM) integrado al flujo actual de export (sin pasos extra fuera del frontend)
 
-Contexto:
-- channel.json actual guarda transcript como string gigante.
-- transcriptPipeline retorna { transcript, status, warning? } y el ASR worker puede emitir eventos.
-- Queremos que agentes posteriores puedan trabajar por segmentos y auditar calidad/fuente.
+Contexto (repo actual):
+- Export flow: POST /api/export/jobs + SSE; backend exportJobService/exportService
+- Export produce exports/<channel>/channel.json + thumbnails/<videoId>.jpg
+- Transcript pipeline ya existe (captions + fallback ASR).
+- Docs: AI Context Pack + DATA_CONTRACTS.md (ya presentes).
+- Requisito: todo debe ejecutarse dentro del flujo actual de “Exportar” (sin comandos manuales extra en UI).
 
-Objetivo:
-Guardar, por cada video, un archivo transcript JSONL en raw/transcripts/ con estructura estable y provenance.
+Objetivo (Title Features Agent):
+Generar features derivadas del título para cada video exportado y guardarlas como artefacto reusable por cualquier canal/video.
 
-Requisitos (Criterios de aceptación):
-1) Por cada video exportado, crear:
-   raw/transcripts/<videoId>.jsonl
-   con líneas JSON del tipo:
-   - header (primera línea):
-     { "type":"meta", "videoId":"...", "source":"captions|asr|none", "status":"ok|missing|error", "language":"auto|es|en|...", "model": "...", "computeType":"...", "createdAt":"ISO" }
-   - segmentos (una o más líneas):
-     { "type":"segment", "i":0, "startSec":null|number, "endSec":null|number, "text":"...", "confidence":null|number }
-2) Segmentación:
-   - Si ASR devuelve segmentos (si puedes obtenerlos del worker), persistir start/end reales.
-   - Si captions no trae timestamps, al menos escribir 1 segmento con start/end null y texto completo (o segmentar por párrafos/sentences SIN inventar timestamps).
-3) channel.json actual:
-   - seguir guardando transcript (string)
-   - agregar transcriptSource y transcriptPath (relativo) SIN romper consumidores:
-     - si temes compatibilidad estricta, agrega solo en raw/videos.jsonl y deja channel.json igual (pero recomendado añadir exportVersion y campos extra tolerantes).
-4) Limpieza:
-   - Quitar artefactos obvios del transcript (ej: “New thinking.”) con una función de “sanitizeTranscript” aplicada SOLO al string final si detecta patrones exactos.
-   - Guardar en meta si se aplicó cleaning: { transcriptCleaned: true|false }.
-5) Observabilidad:
-   - Si transcript missing/error, escribir el archivo JSONL igual con meta + warning (sin segments) para que agentes sepan que falta.
-6) Tests:
-   - Unit tests sanitizeTranscript (casos: no cambia normal, sí quita “New thinking.” exacto al final).
-   - Integration export: cuando transcript ok -> existe archivo y tiene meta+segment.
-   - Cuando transcript missing -> existe archivo y meta status missing y sin segments.
+Salida (template fijo):
+Por cada video exportado, escribir:
+exports/<channel>/derived/video_features/<videoId>.json
+con este template mínimo estable (v1):
+{
+  "schemaVersion": "derived.video_features.v1",
+  "videoId": "...",
+  "computedAt": "ISO",
+  "titleFeatures": {
+    "deterministic": { ... },
+    "llm": { ... }
+  }
+}
+- Nunca null: si algo no se pudo calcular, poner valor por defecto + warning.
 
-Implementación sugerida:
-- apps/api/src/services/transcriptPipeline.ts:
-  - Extender resultado a:
-    { transcript, status, warning?, source, language?, asrMeta?, segments? }
-  - Mantener compatibilidad con callers (si es breaking, crea función nueva getTranscriptWithArtifacts).
-- apps/api/src/services/exportService.ts:
-  - Luego de obtener transcript, escribir raw/transcripts/<id>.jsonl.
-  - Guardar transcriptPath relativo en raw/videos.jsonl.
-- No inventar timestamps para captions.
+IMPORTANTE: Qué se calcula SIN AutoGen (determinista) y NO debe ir al prompt del agente
+Implementar en TypeScript (Node) y NO llamar LLM para:
+1) Señales de formato:
+   - title_len_chars, title_len_words
+   - caps_ratio (mayúsculas/letras)
+   - emoji_count
+   - punct_count_total + por tipo: question_mark_count, exclamation_count, colon_count, dash_count, paren_count, bracket_count
+   - has_number, number_count, leading_number
+2) “Pseudo-LIWC” simple (determinista, con wordlists internas):
+   - pronoun_count (I/you/we/he/she/they + variantes)
+   - negation_count (not/no/never/n't + variantes es/en)
+   - certainty_count (must/always/definitely + variantes)
+   - hedging_count (maybe/might/probably + variantes)
+   (No usar LIWC propietario. Solo wordlists pequeñas versionadas en repo.)
+3) Congruencia título ↔ transcript (sin LLM):
+   - title_keyword_coverage: % de tokens importantes del título presentes en transcript
+   - title_keyword_early_coverage_30s:
+     - si existen segmentos con startSec/endSec: usar ventanas 0-30s reales
+     - si no hay timestamps: fallback a “primer N caracteres” del transcript (documentar).
+   Evidencia: guardar lista de tokens del título y cuáles aparecen (audit).
+4) (Opcional determinista con embeddings, NO AutoGen):
+   - title_transcript_sim_cosine usando embeddings (OpenAI text-embedding-3-small o 3-large).
+   - Esto NO usa AutoGen; es un request directo a API de embeddings (si OPENAI_API_KEY existe).
+   - Si no hay key, dejarlo null y warning.
+   Nota: text-embedding-3-large/3-small existen oficialmente. (No inventar modelos.)
+
+Qué SÍ se calcula CON AutoGen (LLM) y debe ir al prompt del agente:
+- promise_type multi-label con scores (taxonomía cerrada):
+  howto/tutorial, review, news, challenge, comparison, listicle, storytime, reaction, case-study, tooling, explainer
+- curiosity_gap_type (taxonomía cerrada):
+  threat, mystery, contrarian, how-to, controversy, warning, breakdown, unknown
+- (Opcional) headline_claim_strength: low|medium|high (cerrada)
+Todo con:
+- confidence 0..1
+- evidence: spans del título (charStart/charEnd + snippet) justificando labels
+Sin texto libre.
+
+Implementación requerida (backend):
+A) Código TS (apps/api):
+1) Crear módulo:
+   - apps/api/src/derived/titleDeterministic.ts
+     export function computeTitleDeterministicFeatures(args): DeterministicTitleFeatures
+2) Crear agente:
+   - apps/api/src/derived/titleFeaturesAgent.ts
+     - computeDeterministic(title, transcriptArtifacts?)
+     - maybeComputeEmbeddingsSimilarity(title, transcript) (opcional, si OPENAI_API_KEY)
+     - callAutoGenTitleClassifier(title) (si OPENAI_API_KEY y AUTO_GEN_ENABLED=true)
+     - return TitleFeaturesBundle + warnings
+3) Persistencia:
+   - escribir a exports/<channel>/derived/video_features/<videoId>.json
+   - asegurar ensureInsideRoot(...) para derived/
+4) Manifest:
+   - si existe manifest.json, agregar artifacts de derived/video_features/<videoId>.json
+   - si no existe, crear manifest básico sin romper export actual
+
+B) Integración en flujo de export (NO nuevos endpoints):
+- En apps/api/src/services/exportService.ts:
+  - después de obtener transcript (y si ya existe transcript artifact), invocar Title Features Agent
+  - agregar warning si LLM/embeddings no están configurados, pero NO fallar job
+- Progreso SSE:
+  - Reusar stage existente "writing_json" incrementando percent (recomendado para no romper UI), O
+  - Agregar stage "deriving_features" (si lo haces, actualiza enum en apps/web/src/types.ts + reducer + tests).
+  Preferencia: NO introducir nueva stage para minimizar cambios.
+
+Implementación requerida (AutoGen bootstrap inicial):
+C) Python worker para AutoGen (similar al ASR worker, persistente):
+1) Agregar:
+   - apps/api/scripts/autogen_worker.py
+   - apps/api/scripts/requirements-autogen.txt
+2) requirements-autogen.txt debe incluir:
+   - autogen-agentchat
+   - autogen-ext[openai]
+   (según docs oficiales de AutoGen)
+3) Protocolo JSONL (stdin/stdout) del worker:
+   Input (una línea JSON):
+   {
+     "id": "uuid",
+     "task": "title_classifier_v1",
+     "payload": {
+       "videoId": "...",
+       "title": "...",
+       "languageHint": "auto|en|es"
+     },
+     "provider": "openai",
+     "model": "gpt-5.2",
+     "reasoningEffort": "low|medium|high"
+   }
+   Output ok:
+   { "id":"uuid", "ok":true, "result": <TitleLLMResultV1> }
+   Output error:
+   { "id":"uuid", "ok":false, "error":"..." }
+4) Worker debe:
+   - construir 1 agente AutoGen (AssistantAgent) con SYSTEM PROMPT fijo (ver más abajo en este prompt: “AutoGen Agent Prompt”)
+   - pedir salida JSON estricta (sin markdown) y validar parse
+   - logs a stderr, no mezclar con stdout
+
+D) Runtime Node para worker (apps/api):
+1) Crear:
+   - apps/api/src/services/autogenRuntime.ts
+     - start/stop worker
+     - request(task) con cola y timeout
+     - reinicio 1 vez si el worker crashea
+2) Env vars (apps/api/.env.example + env.ts):
+   - AUTO_GEN_ENABLED=true|false (default true)
+   - OPENAI_API_KEY (si usas provider openai)
+   - AUTO_GEN_MODEL_TITLE=gpt-5.2 (default)
+   - AUTO_GEN_REASONING_EFFORT=low (default)
+   - AUTO_GEN_TIMEOUT_SEC=60 (default)
+   (Gemini no es necesario implementarlo en este primer PR; solo deja interfaz preparada.)
+
+E) Tests:
+1) apps/api/tests/titleDeterministic.test.ts:
+   - length/caps/punct/numbers
+   - pronoun/negation/certainty/hedging counts
+2) apps/api/tests/titleFeaturesAgent.test.ts:
+   - con AutoGen deshabilitado: solo deterministic + warnings
+   - mock autogenRuntime: retorna payload fijo y verificar escritura del JSON de derived/
+3) Export integration:
+   - actualizar test existente de export jobs para verificar que derived/video_features/<videoId>.json existe
+
+F) Documentación:
+- docs/DATA_CONTRACTS.md: agregar “derived/video_features/<videoId>.json” (v1)
+- AI Context Pack: mencionar env vars de autogen y el artefacto derived
+
+AutoGen Agent Prompt (debe quedar embebido en el worker como system prompt):
+(usa exactamente el contenido que te dejo en el siguiente bloque “PROMPT AUTOGEN — TitleIntentClassifierAgent”; no inventes otro).
 
 Entrega:
-- raw/transcripts JSONL estable
-- channel.json se mantiene compatible
-- tests verdes y docs actualizados
+- Todo corre con pnpm dev/test
+- Export job genera derived/video_features para cada video exportado
+- Si no hay OPENAI_API_KEY o AUTO_GEN_ENABLED=false -> derived se genera igual con deterministic + llm=null + warnings
+- No cambia la UX: sigue siendo “Exportar” desde el frontend, sin pasos manuales.

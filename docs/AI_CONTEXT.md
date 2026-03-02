@@ -62,6 +62,8 @@ Scripts ASR:
 - `scripts/check_asr.mjs`
 - `apps/api/scripts/asr_worker.py`
 - `apps/api/scripts/requirements-asr.txt`
+- `apps/api/scripts/autogen_worker.py`
+- `apps/api/scripts/requirements-autogen.txt`
 
 ## 4) Variables de entorno
 
@@ -90,6 +92,14 @@ Fuente de verdad:
 - `LOCAL_ASR_TIMEOUT_SEC` (default `900`)
 - `YOUTUBE_AUDIO_DOWNLOAD_TIMEOUT_SEC` (default `300`)
 - `ASR_PYTHON_PATH` (override explícito del binario python del worker)
+
+### Opcionales AutoGen / Title Features
+
+- `OPENAI_API_KEY` (OpenAI API para embeddings y clasificación de título)
+- `AUTO_GEN_ENABLED` (default `true`)
+- `AUTO_GEN_MODEL_TITLE` (default `gpt-5.2`)
+- `AUTO_GEN_REASONING_EFFORT` (default `low`)
+- `AUTO_GEN_TIMEOUT_SEC` (default `60`)
 
 Resolución de Python ASR (`apps/api/src/services/asrRuntime.ts`):
 
@@ -163,12 +173,28 @@ Detalles útiles:
 - `localAsrService.ts` usa worker Python persistente (`apps/api/scripts/asr_worker.py`) con cola y reintento al crash.
 - si falla health-check de `faster_whisper`, desactiva ASR en runtime y sigue en modo captions-only.
 
+### 5.4 Title Features Agent (deterministic + AutoGen opcional)
+
+Orquestación en `apps/api/src/services/exportService.ts`:
+
+1. termina transcript por video
+2. escribe `raw/transcripts/<videoId>.jsonl`
+3. genera `derived/video_features/<videoId>.json` via `apps/api/src/derived/titleFeaturesAgent.ts`
+
+Detalles:
+
+- features deterministas siempre activas (`apps/api/src/derived/titleDeterministic.ts`)
+- embeddings (`text-embedding-3-small`) opcionales si hay `OPENAI_API_KEY`
+- AutoGen worker opcional (`apps/api/src/services/autogenRuntime.ts` + `apps/api/scripts/autogen_worker.py`)
+- fallos de LLM/embeddings no rompen el export; quedan como warning y `llm: null`
+
 ## 6) Archivos generados y side effects
 
 Export (`apps/api/src/services/exportService.ts`) escribe en:
 
 - `exports/<channel_sanitizado>/channel.json`
 - `exports/<channel_sanitizado>/thumbnails/<videoId>.jpg`
+- `exports/<channel_sanitizado>/derived/video_features/<videoId>.json`
 
 Temporal de ASR:
 
