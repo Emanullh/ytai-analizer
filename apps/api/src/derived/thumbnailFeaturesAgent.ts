@@ -162,6 +162,11 @@ export interface ComputeThumbnailFeaturesArgs {
 export interface PersistThumbnailFeaturesArgs extends ComputeThumbnailFeaturesArgs {
   exportsRoot: string;
   channelFolderPath: string;
+  compute?: {
+    deterministic?: boolean;
+    deterministicMode?: "full" | "ocr_only";
+    llm?: boolean;
+  };
 }
 
 export interface ComputeThumbnailFeaturesResult {
@@ -446,6 +451,61 @@ export async function computeDeterministic(args: {
     value: base,
     warnings
   };
+}
+
+async function computeDeterministicOcrOnly(args: {
+  title: string;
+  thumbnailAbsPath: string;
+  thumbnailLocalPath: string;
+  existing: ThumbnailDeterministicFeatures;
+}): Promise<{ value: ThumbnailDeterministicFeatures; warnings: string[] }> {
+  const warnings: string[] = [];
+  const next: ThumbnailDeterministicFeatures = {
+    ...args.existing,
+    thumbnailLocalPath: args.thumbnailLocalPath
+  };
+
+  if (env.thumbOcrEnabled) {
+    try {
+      const ocr = await runOcr(args.thumbnailAbsPath);
+      const limitedBoxes = limitOcrBoxes(ocr.boxes, 50);
+      const ocrText = ocr.text.trim();
+      next.ocrText = ocrText;
+      next.ocrBoxes = limitedBoxes;
+      next.ocrConfidenceMean = clamp01(ocr.confidenceMean);
+      next.ocrCharCount = ocrText.length;
+      next.ocrWordCount = countWords(ocrText);
+      next.textAreaRatio = computeTextAreaRatio(limitedBoxes, next.imageWidth, next.imageHeight);
+    } catch (error) {
+      warnings.push(
+        `Thumbnail OCR failed for ${args.thumbnailAbsPath}: ${error instanceof Error ? error.message : "unknown error"}`
+      );
+      next.ocrText = "";
+      next.ocrBoxes = [];
+      next.ocrConfidenceMean = 0;
+      next.ocrCharCount = 0;
+      next.ocrWordCount = 0;
+      next.textAreaRatio = 0;
+    }
+  } else {
+    next.ocrText = "";
+    next.ocrBoxes = [];
+    next.ocrConfidenceMean = 0;
+    next.ocrCharCount = 0;
+    next.ocrWordCount = 0;
+    next.textAreaRatio = 0;
+  }
+
+  const overlap = computeTitleOcrOverlap(args.title, next.ocrText);
+  next.thumb_ocr_title_overlap_jaccard = overlap.jaccard;
+  next.thumb_ocr_title_overlap_tokens = {
+    titleTokens: overlap.titleTokens,
+    ocrTokens: overlap.ocrTokens,
+    overlapTokens: overlap.overlapTokens
+  };
+  next.hasBigText = next.ocrCharCount >= 12 && next.textAreaRatio >= 0.08;
+
+  return { value: next, warnings };
 }
 
 export function buildLLMPayload(args: {
@@ -814,8 +874,6 @@ function mergeBundle(
 export async function persistThumbnailFeaturesArtifact(
   args: PersistThumbnailFeaturesArgs
 ): Promise<PersistThumbnailFeaturesResult> {
-  const result = await computeThumbnailFeaturesBundle(args);
-
   const derivedFolderPath = path.resolve(args.channelFolderPath, "derived", "video_features");
   const artifactAbsolutePath = path.resolve(derivedFolderPath, `${args.videoId}.json`);
 
@@ -824,6 +882,65 @@ export async function persistThumbnailFeaturesArtifact(
 
   await fs.mkdir(derivedFolderPath, { recursive: true });
   const existing = await readExistingArtifact(artifactAbsolutePath);
+  const existingSection = readExistingThumbnailSection(existing);
+  const requestedDeterministic = args.compute?.deterministic ?? true;
+  const deterministicMode = args.compute?.deterministicMode ?? "full";
+  const requestedLlm = args.compute?.llm ?? true;
+
+  let deterministic = existingSection?.deterministic ?? null;
+  const warnings: string[] = [...(existingSection?.warnings ?? [])];
+  if (requestedDeterministic || !deterministic) {
+    const deterministicResult =
+      deterministicMode === "ocr_only" && deterministic
+        ? await computeDeterministicOcrOnly({
+            title: args.title,
+            thumbnailAbsPath: args.thumbnailAbsPath,
+            thumbnailLocalPath: args.thumbnailLocalPath,
+            existing: deterministic
+          })
+        : await computeDeterministic({
+            title: args.title,
+            thumbnailAbsPath: args.thumbnailAbsPath,
+            thumbnailLocalPath: args.thumbnailLocalPath
+          });
+    deterministic = deterministicResult.value;
+    warnings.push(...deterministicResult.warnings);
+  }
+
+  let llm = existingSection?.llm ?? null;
+  if (requestedLlm && deterministic) {
+    const llmResult = await callAutoGenThumbnailClassifier({
+      videoId: args.videoId,
+      title: args.title,
+      thumbnailAbsPath: args.thumbnailAbsPath,
+      deterministic
+    });
+    llm = llmResult.value;
+    warnings.push(...llmResult.warnings);
+  }
+
+  const result: ComputeThumbnailFeaturesResult = {
+    bundle: {
+      schemaVersion: "derived.video_features.v1",
+      videoId: args.videoId,
+      computedAt: new Date().toISOString(),
+      thumbnailFeatures: {
+        deterministic:
+          deterministic ??
+          (
+            await computeDeterministic({
+              title: args.title,
+              thumbnailAbsPath: args.thumbnailAbsPath,
+              thumbnailLocalPath: args.thumbnailLocalPath
+            })
+          ).value,
+        llm,
+        warnings: dedupeWarnings(warnings)
+      }
+    },
+    warnings: dedupeWarnings(warnings)
+  };
+
   const mergedBundle = mergeBundle(args, result.bundle, existing);
   await writeJsonAtomic(artifactAbsolutePath, mergedBundle);
 
@@ -833,4 +950,18 @@ export async function persistThumbnailFeaturesArtifact(
     artifactRelativePath: toSafeRelativePath(args.channelFolderPath, artifactAbsolutePath),
     mergedBundle
   };
+}
+
+function readExistingThumbnailSection(existing: Record<string, unknown> | null): ThumbnailFeaturesSection | null {
+  if (!existing || typeof existing !== "object") {
+    return null;
+  }
+  if (
+    !existing.thumbnailFeatures ||
+    typeof existing.thumbnailFeatures !== "object" ||
+    Array.isArray(existing.thumbnailFeatures)
+  ) {
+    return null;
+  }
+  return existing.thumbnailFeatures as ThumbnailFeaturesSection;
 }

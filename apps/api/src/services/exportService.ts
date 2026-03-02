@@ -15,6 +15,7 @@ import { HttpError } from "../utils/errors.js";
 import { downloadToBuffer } from "../utils/http.js";
 import { sanitizeFolderName } from "../utils/sanitize.js";
 import { sanitizeTranscript } from "../utils/transcript.js";
+import { fileExists } from "../utils/fileExists.js";
 import { getTranscriptWithFallback } from "./transcriptPipeline.js";
 import type { TranscriptPipelineResult } from "./transcriptPipeline.js";
 import type { TranscriptSegment } from "./transcriptModels.js";
@@ -23,12 +24,22 @@ import { persistTitleFeaturesArtifact } from "../derived/titleFeaturesAgent.js";
 import { persistDescriptionFeaturesArtifact } from "../derived/descriptionFeaturesAgent.js";
 import { persistTranscriptFeaturesArtifact } from "../derived/transcriptFeaturesAgent.js";
 import { persistThumbnailFeaturesArtifact } from "../derived/thumbnailFeaturesAgent.js";
+import { loadTranscriptJsonl } from "../derived/transcriptArtifacts.js";
 import {
   computePerformancePerVideo,
   type ChannelModelSummary,
   type VideoPerformanceFeatures
 } from "../derived/performanceNormalization.js";
 import { runOrchestrator } from "../analysis/orchestratorService.js";
+import {
+  buildCacheEntry,
+  checkVideoCache,
+  computeHashes,
+  loadCacheIndex,
+  resolveCacheArtifactRelativePath,
+  saveCacheIndex,
+  updateVideoCacheEntry
+} from "./exportCacheService.js";
 
 export type ExportVideoStage =
   | "queue"
@@ -683,6 +694,47 @@ function fallbackTranscriptResult(videoId: string, error: unknown): TranscriptPi
   };
 }
 
+interface TranscriptSnapshot {
+  transcript: string;
+  status: "ok" | "missing" | "error";
+  source: TranscriptPipelineResult["source"];
+  warning?: string;
+  language?: string;
+  segments: TranscriptSegment[];
+}
+
+async function readTranscriptSnapshot(
+  transcriptArtifactPath: string,
+  videoId: string
+): Promise<TranscriptSnapshot | null> {
+  const artifact = await loadTranscriptJsonl(transcriptArtifactPath, { videoId });
+  if (artifact.usedFallback) {
+    return null;
+  }
+
+  const transcript = artifact.segments
+    .map((segment) => segment.text.trim())
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+  const status = artifact.meta?.status ?? (transcript ? "ok" : "missing");
+  const source = artifact.meta?.source ?? "none";
+
+  return {
+    transcript,
+    status,
+    source,
+    warning: artifact.meta?.warning,
+    language: artifact.meta?.language,
+    segments: artifact.segments.map((segment) => ({
+      startSec: segment.startSec,
+      endSec: segment.endSec,
+      text: segment.text,
+      confidence: segment.confidence
+    }))
+  };
+}
+
 export async function exportSelectedVideos(
   request: ExportRequest,
   callbacks: ExportProgressCallbacks = {},
@@ -691,6 +743,9 @@ export async function exportSelectedVideos(
   const warnings: string[] = [];
   const addWarning = (message: string, videoId?: string) => {
     warnings.push(message);
+    callbacks.onWarning?.({ videoId, message });
+  };
+  const emitInfo = (message: string, videoId?: string) => {
     callbacks.onWarning?.({ videoId, message });
   };
 
@@ -723,6 +778,29 @@ export async function exportSelectedVideos(
   await fs.mkdir(thumbnailsFolderPath, { recursive: true });
   await fs.mkdir(tempAudioPath, { recursive: true });
   await initializeRawPaths(exportsRoot, rawPaths);
+  const cacheIndex = await loadCacheIndex({
+    exportsRoot,
+    channelFolderPath,
+    channelId: request.channelId,
+    exportVersion: EXPORT_VERSION
+  });
+  let cacheSaveChain = Promise.resolve();
+  const enqueueCacheEntryUpdate = async (videoId: string, entry: ReturnType<typeof buildCacheEntry>) => {
+    cacheSaveChain = cacheSaveChain.then(async () => {
+      updateVideoCacheEntry({
+        index: cacheIndex,
+        timeframe: request.timeframe,
+        videoId,
+        entry
+      });
+      await saveCacheIndex({
+        exportsRoot,
+        channelFolderPath,
+        index: cacheIndex
+      });
+    });
+    await cacheSaveChain;
+  };
 
   const [videoDetailsResult, channelDetailsResult] = await Promise.all([
     dependencies.getVideoDetails(details.videos.map((video) => video.videoId)),
@@ -767,211 +845,344 @@ export async function exportSelectedVideos(
         ensureInsideRoot(exportsRoot, thumbnailAbsolutePath);
         ensureInsideRoot(exportsRoot, outputMp3Path);
         ensureInsideRoot(exportsRoot, transcriptAbsolutePath);
-
-        let transcriptResult: TranscriptPipelineResult;
-        try {
-          transcriptResult = await dependencies.getTranscriptWithFallback(video.videoId, {
-            outputMp3Path,
-            language: env.localAsrLanguage,
-            onLocalAsrStage: (stage) => {
-              callbacks.onVideoProgress?.({
-                videoId: video.videoId,
-                stage
-              });
-            }
-          });
-        } catch (error) {
-          transcriptResult = fallbackTranscriptResult(video.videoId, error);
-        }
-
-        if (transcriptResult.warning) {
-          videoWarnings.push(transcriptResult.warning);
-          addWarning(transcriptResult.warning, video.videoId);
-        }
-
-        callbacks.onVideoProgress?.({
-          videoId: video.videoId,
-          stage: "downloading_thumbnail"
-        });
-
-        const thumbnailOriginalUrl = enrichedVideo?.thumbnailOriginalUrl || video.thumbnailUrl;
-        if (thumbnailOriginalUrl) {
-          try {
-            const image = await dependencies.downloadToBuffer(thumbnailOriginalUrl, 12_000);
-            await fs.writeFile(thumbnailAbsolutePath, image);
-          } catch (error) {
-            const warning = `Thumbnail download failed for ${video.videoId}: ${
-              error instanceof Error ? error.message : "unknown error"
-            }`;
-            videoWarnings.push(warning);
-            addWarning(warning, video.videoId);
-          }
-        } else {
-          const warning = `Missing thumbnail URL for ${video.videoId}`;
-          videoWarnings.push(warning);
-          addWarning(warning, video.videoId);
-        }
-
-        let derivedVideoFeaturesArtifactPath: string | undefined;
         const titleForFeatures = enrichedVideo?.title || video.title;
         const descriptionForFeatures = enrichedVideo?.description ?? "";
-
-        try {
-          const derived = await persistThumbnailFeaturesArtifact({
-            exportsRoot,
-            channelFolderPath,
-            videoId: video.videoId,
-            title: titleForFeatures,
-            thumbnailAbsPath: thumbnailAbsolutePath,
-            thumbnailLocalPath: thumbnailRelativePath
-          });
-          derivedVideoFeaturesArtifactPath = derived.artifactAbsolutePath;
-
-          for (const warning of derived.warnings) {
-            videoWarnings.push(warning);
-            addWarning(warning, video.videoId);
+        const transcriptSnapshot = await readTranscriptSnapshot(transcriptAbsolutePath, video.videoId);
+        const initialHashes = await computeHashes({
+          title: titleForFeatures,
+          description: descriptionForFeatures,
+          transcriptText: transcriptSnapshot?.transcript ?? "",
+          transcriptSource: transcriptSnapshot?.source ?? "none",
+          thumbnailFilePath: thumbnailAbsolutePath
+        });
+        const cacheCheck = await checkVideoCache({
+          exportsRoot,
+          channelFolderPath,
+          index: cacheIndex,
+          timeframe: request.timeframe,
+          videoId: video.videoId,
+          currentHashes: initialHashes
+        });
+        let cacheEntryForPersist = buildCacheEntry({
+          videoId: video.videoId,
+          hashes: initialHashes,
+          artifacts: {
+            rawTranscriptPath: cacheCheck.artifacts.rawTranscriptPath,
+            thumbnailPath: cacheCheck.artifacts.thumbnailPath,
+            derivedVideoFeaturesPath: cacheCheck.artifacts.derivedVideoFeaturesPath
+          },
+          status: {
+            rawTranscript: transcriptSnapshot?.status ?? "missing",
+            thumbnail: cacheCheck.artifacts.thumbnailExists ? "ok" : "failed",
+            derived: cacheCheck.artifacts.derivedExists ? "partial" : "error",
+            warnings: []
           }
-        } catch (error) {
-          const warning = `Thumbnail features generation failed for ${video.videoId}: ${
-            error instanceof Error ? error.message : "unknown error"
-          }`;
-          videoWarnings.push(warning);
-          addWarning(warning, video.videoId);
-        }
-        callbacks.onVideoProgress?.({
-          videoId: video.videoId,
-          stage: "writing_json",
-          percent: 62
-        });
-
-        const transcriptStatus = toTranscriptStatus(transcriptResult.status);
-        const sanitizedTranscriptResult = sanitizeTranscript(transcriptResult.transcript);
-        const transcriptArtifactRecords = buildTranscriptArtifactRecords({
-          videoId: video.videoId,
-          result: transcriptResult,
-          transcriptStatus,
-          transcriptText: sanitizedTranscriptResult.transcript,
-          transcriptCleaned: sanitizedTranscriptResult.cleaned,
-          createdAt: exportedAt
-        });
-        await writeJsonLines(transcriptAbsolutePath, transcriptArtifactRecords);
-        callbacks.onVideoProgress?.({
-          videoId: video.videoId,
-          stage: "writing_json",
-          percent: 70
         });
 
         try {
-          const derived = await persistTitleFeaturesArtifact({
-            exportsRoot,
-            channelFolderPath,
-            videoId: video.videoId,
-            title: titleForFeatures,
-            transcript: sanitizedTranscriptResult.transcript,
-            transcriptSegments: transcriptResult.segments,
-            languageHint: toLanguageHint(resolveTranscriptLanguage(transcriptResult))
-          });
-          derivedVideoFeaturesArtifactPath = derived.artifactAbsolutePath;
-
-          for (const warning of derived.warnings) {
-            videoWarnings.push(warning);
-            addWarning(warning, video.videoId);
+          if (cacheCheck.hit === "full") {
+            emitInfo("cache hit: reused transcript/thumbnail/derived", video.videoId);
+          } else if (cacheCheck.hit === "partial") {
+            emitInfo(`cache partial: ${cacheCheck.reasons.join(", ") || "recompute required fields only"}`, video.videoId);
           }
-        } catch (error) {
-          const warning = `Title features generation failed for ${video.videoId}: ${
-            error instanceof Error ? error.message : "unknown error"
-          }`;
-          videoWarnings.push(warning);
-          addWarning(warning, video.videoId);
-        }
-        callbacks.onVideoProgress?.({
-          videoId: video.videoId,
-          stage: "writing_json",
-          percent: 82
-        });
 
-        try {
-          const derived = await persistDescriptionFeaturesArtifact({
-            exportsRoot,
-            channelFolderPath,
+          const needTranscriptFetch = cacheCheck.plan.needTranscriptFetch || !transcriptSnapshot;
+          let transcriptResult: TranscriptPipelineResult = {
+            transcript: transcriptSnapshot?.transcript ?? "",
+            status: transcriptSnapshot?.status ?? "missing",
+            source: transcriptSnapshot?.source ?? "none",
+            warning: transcriptSnapshot?.warning,
+            language: transcriptSnapshot?.language,
+            segments: transcriptSnapshot?.segments
+          };
+
+          if (needTranscriptFetch) {
+            try {
+              transcriptResult = await dependencies.getTranscriptWithFallback(video.videoId, {
+                outputMp3Path,
+                language: env.localAsrLanguage,
+                onLocalAsrStage: (stage) => {
+                  callbacks.onVideoProgress?.({
+                    videoId: video.videoId,
+                    stage
+                  });
+                }
+              });
+            } catch (error) {
+              transcriptResult = fallbackTranscriptResult(video.videoId, error);
+            }
+          }
+
+          if (transcriptResult.warning) {
+            videoWarnings.push(transcriptResult.warning);
+            addWarning(transcriptResult.warning, video.videoId);
+          }
+
+          if (cacheCheck.plan.needThumbnailDownload) {
+            callbacks.onVideoProgress?.({
+              videoId: video.videoId,
+              stage: "downloading_thumbnail"
+            });
+
+            const thumbnailOriginalUrl = enrichedVideo?.thumbnailOriginalUrl || video.thumbnailUrl;
+            if (thumbnailOriginalUrl) {
+              try {
+                const image = await dependencies.downloadToBuffer(thumbnailOriginalUrl, 12_000);
+                await fs.writeFile(thumbnailAbsolutePath, image);
+              } catch (error) {
+                const warning = `Thumbnail download failed for ${video.videoId}: ${
+                  error instanceof Error ? error.message : "unknown error"
+                }`;
+                videoWarnings.push(warning);
+                addWarning(warning, video.videoId);
+              }
+            } else {
+              const warning = `Missing thumbnail URL for ${video.videoId}`;
+              videoWarnings.push(warning);
+              addWarning(warning, video.videoId);
+            }
+          }
+
+          const transcriptStatus = toTranscriptStatus(transcriptResult.status);
+          const sanitizedTranscriptResult = sanitizeTranscript(transcriptResult.transcript);
+          if (needTranscriptFetch || !cacheCheck.artifacts.rawTranscriptExists) {
+            const transcriptArtifactRecords = buildTranscriptArtifactRecords({
+              videoId: video.videoId,
+              result: transcriptResult,
+              transcriptStatus,
+              transcriptText: sanitizedTranscriptResult.transcript,
+              transcriptCleaned: sanitizedTranscriptResult.cleaned,
+              createdAt: exportedAt
+            });
+            await writeJsonLines(transcriptAbsolutePath, transcriptArtifactRecords);
+          }
+
+          callbacks.onVideoProgress?.({
             videoId: video.videoId,
+            stage: "writing_json",
+            percent: 62
+          });
+
+          const derivedArtifactAbsolutePath = path.resolve(
+            channelFolderPath,
+            cacheCheck.artifacts.derivedVideoFeaturesPath
+          );
+          ensureInsideRoot(exportsRoot, derivedArtifactAbsolutePath);
+          let derivedVideoFeaturesArtifactPath: string | undefined = cacheCheck.artifacts.derivedExists
+            ? derivedArtifactAbsolutePath
+            : undefined;
+          const languageHint = toLanguageHint(resolveTranscriptLanguage(transcriptResult));
+
+          if (cacheCheck.plan.needDerivedParts.thumbnailDeterministic || cacheCheck.plan.needDerivedParts.thumbnailLlm) {
+            try {
+              const derived = await persistThumbnailFeaturesArtifact({
+                exportsRoot,
+                channelFolderPath,
+                videoId: video.videoId,
+                title: titleForFeatures,
+                thumbnailAbsPath: thumbnailAbsolutePath,
+                thumbnailLocalPath: thumbnailRelativePath,
+                compute: {
+                  deterministic: cacheCheck.plan.needDerivedParts.thumbnailDeterministic,
+                  deterministicMode: cacheCheck.plan.needDerivedParts.thumbnailDeterministicMode,
+                  llm: cacheCheck.plan.needDerivedParts.thumbnailLlm
+                }
+              });
+              derivedVideoFeaturesArtifactPath = derived.artifactAbsolutePath;
+
+              for (const warning of derived.warnings) {
+                videoWarnings.push(warning);
+                addWarning(warning, video.videoId);
+              }
+            } catch (error) {
+              const warning = `Thumbnail features generation failed for ${video.videoId}: ${
+                error instanceof Error ? error.message : "unknown error"
+              }`;
+              videoWarnings.push(warning);
+              addWarning(warning, video.videoId);
+            }
+          }
+
+          callbacks.onVideoProgress?.({
+            videoId: video.videoId,
+            stage: "writing_json",
+            percent: 70
+          });
+
+          if (cacheCheck.plan.needDerivedParts.titleDeterministic || cacheCheck.plan.needDerivedParts.titleLlm) {
+            try {
+              const derived = await persistTitleFeaturesArtifact({
+                exportsRoot,
+                channelFolderPath,
+                videoId: video.videoId,
+                title: titleForFeatures,
+                transcript: sanitizedTranscriptResult.transcript,
+                transcriptSegments: transcriptResult.segments,
+                languageHint,
+                compute: {
+                  deterministic: cacheCheck.plan.needDerivedParts.titleDeterministic,
+                  embeddings: cacheCheck.plan.needDerivedParts.titleDeterministic,
+                  llm: cacheCheck.plan.needDerivedParts.titleLlm
+                }
+              });
+              derivedVideoFeaturesArtifactPath = derived.artifactAbsolutePath;
+
+              for (const warning of derived.warnings) {
+                videoWarnings.push(warning);
+                addWarning(warning, video.videoId);
+              }
+            } catch (error) {
+              const warning = `Title features generation failed for ${video.videoId}: ${
+                error instanceof Error ? error.message : "unknown error"
+              }`;
+              videoWarnings.push(warning);
+              addWarning(warning, video.videoId);
+            }
+          }
+
+          callbacks.onVideoProgress?.({
+            videoId: video.videoId,
+            stage: "writing_json",
+            percent: 82
+          });
+
+          if (cacheCheck.plan.needDerivedParts.descriptionDeterministic || cacheCheck.plan.needDerivedParts.descriptionLlm) {
+            try {
+              const derived = await persistDescriptionFeaturesArtifact({
+                exportsRoot,
+                channelFolderPath,
+                videoId: video.videoId,
+                title: titleForFeatures,
+                description: descriptionForFeatures,
+                languageHint,
+                compute: {
+                  deterministic: cacheCheck.plan.needDerivedParts.descriptionDeterministic,
+                  llm: cacheCheck.plan.needDerivedParts.descriptionLlm
+                }
+              });
+              derivedVideoFeaturesArtifactPath = derived.artifactAbsolutePath;
+
+              for (const warning of derived.warnings) {
+                videoWarnings.push(warning);
+                addWarning(warning, video.videoId);
+              }
+            } catch (error) {
+              const warning = `Description features generation failed for ${video.videoId}: ${
+                error instanceof Error ? error.message : "unknown error"
+              }`;
+              videoWarnings.push(warning);
+              addWarning(warning, video.videoId);
+            }
+          }
+
+          callbacks.onVideoProgress?.({
+            videoId: video.videoId,
+            stage: "writing_json",
+            percent: 90
+          });
+
+          if (cacheCheck.plan.needDerivedParts.transcriptDeterministic || cacheCheck.plan.needDerivedParts.transcriptLlm) {
+            try {
+              const derived = await persistTranscriptFeaturesArtifact({
+                exportsRoot,
+                channelFolderPath,
+                videoId: video.videoId,
+                title: titleForFeatures,
+                transcript: sanitizedTranscriptResult.transcript,
+                transcriptArtifactPath: transcriptAbsolutePath,
+                durationSec: enrichedVideo?.durationSec,
+                publishedAt: enrichedVideo?.publishedAt ?? video.publishedAt,
+                nowISO: exportedAt,
+                languageHint,
+                compute: {
+                  deterministic: cacheCheck.plan.needDerivedParts.transcriptDeterministic,
+                  llm: cacheCheck.plan.needDerivedParts.transcriptLlm
+                }
+              });
+              derivedVideoFeaturesArtifactPath = derived.artifactAbsolutePath;
+
+              for (const warning of derived.warnings) {
+                videoWarnings.push(warning);
+                addWarning(warning, video.videoId);
+              }
+            } catch (error) {
+              const warning = `Transcript features generation failed for ${video.videoId}: ${
+                error instanceof Error ? error.message : "unknown error"
+              }`;
+              videoWarnings.push(warning);
+              addWarning(warning, video.videoId);
+            }
+          }
+
+          callbacks.onVideoProgress?.({
+            videoId: video.videoId,
+            stage: "writing_json",
+            percent: 97
+          });
+
+          const transcriptRef: RawVideoRecordV1["transcriptRef"] = {
+            transcriptPath: transcriptRelativePath,
+            transcriptSource: transcriptResult.source,
+            transcriptStatus
+          };
+          const rawVideoRecord = buildRawVideoRecord(video, enrichedVideo, transcriptRef, exportedAtDate, videoWarnings);
+          await appendRawVideoRecord(rawVideoRecord);
+
+          const finalHashes = await computeHashes({
             title: titleForFeatures,
             description: descriptionForFeatures,
-            languageHint: toLanguageHint(resolveTranscriptLanguage(transcriptResult))
+            transcriptText: sanitizedTranscriptResult.transcript,
+            transcriptSource: transcriptResult.source,
+            thumbnailFilePath: thumbnailAbsolutePath
           });
-          derivedVideoFeaturesArtifactPath = derived.artifactAbsolutePath;
-
-          for (const warning of derived.warnings) {
-            videoWarnings.push(warning);
-            addWarning(warning, video.videoId);
-          }
-        } catch (error) {
-          const warning = `Description features generation failed for ${video.videoId}: ${
-            error instanceof Error ? error.message : "unknown error"
-          }`;
-          videoWarnings.push(warning);
-          addWarning(warning, video.videoId);
-        }
-        callbacks.onVideoProgress?.({
-          videoId: video.videoId,
-          stage: "writing_json",
-          percent: 90
-        });
-
-        try {
-          const derived = await persistTranscriptFeaturesArtifact({
-            exportsRoot,
-            channelFolderPath,
+          const thumbnailExists = await fileExists(thumbnailAbsolutePath);
+          const derivedExists = derivedVideoFeaturesArtifactPath ? await fileExists(derivedVideoFeaturesArtifactPath) : false;
+          cacheEntryForPersist = buildCacheEntry({
             videoId: video.videoId,
-            title: titleForFeatures,
-            transcript: sanitizedTranscriptResult.transcript,
-            transcriptArtifactPath: transcriptAbsolutePath,
-            durationSec: enrichedVideo?.durationSec,
-            publishedAt: enrichedVideo?.publishedAt ?? video.publishedAt,
-            nowISO: exportedAt,
-            languageHint: toLanguageHint(resolveTranscriptLanguage(transcriptResult))
+            hashes: finalHashes,
+            artifacts: {
+              rawTranscriptPath: transcriptRelativePath,
+              thumbnailPath: thumbnailRelativePath,
+              derivedVideoFeaturesPath:
+                derivedVideoFeaturesArtifactPath && path.isAbsolute(derivedVideoFeaturesArtifactPath)
+                  ? resolveCacheArtifactRelativePath({
+                      channelFolderPath,
+                      artifactAbsolutePath: derivedVideoFeaturesArtifactPath
+                    })
+                  : cacheCheck.artifacts.derivedVideoFeaturesPath
+            },
+            status: {
+              rawTranscript: transcriptStatus,
+              thumbnail: thumbnailExists ? "ok" : "failed",
+              derived: derivedExists ? (videoWarnings.length > 0 ? "partial" : "ok") : "error",
+              warnings: [...videoWarnings]
+            }
           });
-          derivedVideoFeaturesArtifactPath = derived.artifactAbsolutePath;
 
-          for (const warning of derived.warnings) {
-            videoWarnings.push(warning);
-            addWarning(warning, video.videoId);
+          return {
+            videoId: video.videoId,
+            title: video.title,
+            viewCount: video.viewCount,
+            publishedAt: video.publishedAt,
+            thumbnailPath: thumbnailRelativePath,
+            transcript: sanitizedTranscriptResult.transcript,
+            transcriptStatus: transcriptStatus,
+            transcriptSource: transcriptResult.source,
+            transcriptPath: transcriptRelativePath,
+            warnings: videoWarnings,
+            rawTranscriptArtifactPath: transcriptAbsolutePath,
+            derivedVideoFeaturesArtifactPath
+          };
+        } finally {
+          try {
+            await enqueueCacheEntryUpdate(video.videoId, cacheEntryForPersist);
+          } catch (error) {
+            addWarning(
+              `Export cache update failed for ${video.videoId}: ${error instanceof Error ? error.message : "unknown error"}`,
+              video.videoId
+            );
           }
-        } catch (error) {
-          const warning = `Transcript features generation failed for ${video.videoId}: ${
-            error instanceof Error ? error.message : "unknown error"
-          }`;
-          videoWarnings.push(warning);
-          addWarning(warning, video.videoId);
         }
-        callbacks.onVideoProgress?.({
-          videoId: video.videoId,
-          stage: "writing_json",
-          percent: 97
-        });
-
-        const transcriptRef: RawVideoRecordV1["transcriptRef"] = {
-          transcriptPath: transcriptRelativePath,
-          transcriptSource: transcriptResult.source,
-          transcriptStatus
-        };
-        const rawVideoRecord = buildRawVideoRecord(video, enrichedVideo, transcriptRef, exportedAtDate, videoWarnings);
-        await appendRawVideoRecord(rawVideoRecord);
-
-        return {
-          videoId: video.videoId,
-          title: video.title,
-          viewCount: video.viewCount,
-          publishedAt: video.publishedAt,
-          thumbnailPath: thumbnailRelativePath,
-          transcript: sanitizedTranscriptResult.transcript,
-          transcriptStatus: transcriptStatus,
-          transcriptSource: transcriptResult.source,
-          transcriptPath: transcriptRelativePath,
-          warnings: videoWarnings,
-          rawTranscriptArtifactPath: transcriptAbsolutePath,
-          derivedVideoFeaturesArtifactPath
-        };
       }
     );
 
@@ -1121,12 +1332,16 @@ export async function exportSelectedVideos(
     const derivedArtifactPaths = processedVideos
       .map((video) => video.derivedVideoFeaturesArtifactPath)
       .filter((artifactPath): artifactPath is string => Boolean(artifactPath));
+    const cacheIndexPath = path.resolve(channelFolderPath, ".cache", "index.json");
+    ensureInsideRoot(exportsRoot, cacheIndexPath);
+    const cacheArtifacts = (await fileExists(cacheIndexPath)) ? [cacheIndexPath] : [];
     const artifactPaths = [
       channelFilePath,
       ...thumbnailArtifactPaths,
       ...rawPack.artifactPaths,
       ...derivedArtifactPaths,
       channelModelsArtifactPath,
+      ...cacheArtifacts,
       ...orchestratorArtifactPaths
     ];
     const artifactSet = new Set(

@@ -91,11 +91,21 @@ export interface ComputeTitleFeaturesResult {
 export interface PersistTitleFeaturesArgs extends ComputeTitleFeaturesArgs {
   exportsRoot: string;
   channelFolderPath: string;
+  compute?: {
+    deterministic?: boolean;
+    embeddings?: boolean;
+    llm?: boolean;
+  };
 }
 
 export interface PersistTitleFeaturesResult extends ComputeTitleFeaturesResult {
   artifactAbsolutePath: string;
   artifactRelativePath: string;
+}
+
+interface ExistingTitleFeatures {
+  deterministic: DeterministicTitleFeatures | null;
+  llm: TitleLlmResultV1 | null;
 }
 
 function ensureInsideRoot(rootPath: string, targetPath: string): void {
@@ -444,8 +454,6 @@ export async function computeTitleFeaturesBundle(args: ComputeTitleFeaturesArgs)
 }
 
 export async function persistTitleFeaturesArtifact(args: PersistTitleFeaturesArgs): Promise<PersistTitleFeaturesResult> {
-  const result = await computeTitleFeaturesBundle(args);
-
   const derivedFolderPath = path.resolve(args.channelFolderPath, "derived", "video_features");
   const artifactAbsolutePath = path.resolve(derivedFolderPath, `${args.videoId}.json`);
 
@@ -454,6 +462,60 @@ export async function persistTitleFeaturesArtifact(args: PersistTitleFeaturesArg
 
   await fs.mkdir(derivedFolderPath, { recursive: true });
   const existing = await readExistingArtifact(artifactAbsolutePath);
+  const existingTitle = readExistingTitleFeatures(existing);
+  const requestedDeterministic = args.compute?.deterministic ?? true;
+  const requestedEmbeddings = args.compute?.embeddings ?? requestedDeterministic;
+  const requestedLlm = args.compute?.llm ?? true;
+  const warnings: string[] = [];
+
+  let deterministic =
+    existingTitle.deterministic ??
+    computeDeterministic({
+      title: args.title,
+      transcript: args.transcript,
+      transcriptSegments: args.transcriptSegments
+    });
+  if (requestedDeterministic) {
+    deterministic = computeDeterministic({
+      title: args.title,
+      transcript: args.transcript,
+      transcriptSegments: args.transcriptSegments
+    });
+  }
+
+  if (requestedEmbeddings) {
+    const embeddingsResult = await maybeComputeEmbeddingsSimilarity(args.title, args.transcript ?? "");
+    warnings.push(...embeddingsResult.warnings);
+    deterministic = {
+      ...deterministic,
+      title_transcript_sim_cosine: embeddingsResult.value
+    };
+  }
+
+  let llm = existingTitle.llm;
+  if (requestedLlm) {
+    const llmResult = await callAutoGenTitleClassifier({
+      videoId: args.videoId,
+      title: args.title,
+      languageHint: args.languageHint
+    });
+    warnings.push(...llmResult.warnings);
+    llm = llmResult.value;
+  }
+
+  const result: ComputeTitleFeaturesResult = {
+    bundle: {
+      schemaVersion: "derived.video_features.v1",
+      videoId: args.videoId,
+      computedAt: new Date().toISOString(),
+      titleFeatures: {
+        deterministic,
+        llm
+      }
+    },
+    warnings
+  };
+
   const mergedBundle = {
     ...(existing ?? {}),
     schemaVersion: "derived.video_features.v1",
@@ -467,5 +529,38 @@ export async function persistTitleFeaturesArtifact(args: PersistTitleFeaturesArg
     ...result,
     artifactAbsolutePath,
     artifactRelativePath: toSafeRelativePath(args.channelFolderPath, artifactAbsolutePath)
+  };
+}
+
+function readExistingTitleFeatures(existing: Record<string, unknown> | null): ExistingTitleFeatures {
+  if (!existing || typeof existing !== "object") {
+    return {
+      deterministic: null,
+      llm: null
+    };
+  }
+
+  const titleSection =
+    existing.titleFeatures && typeof existing.titleFeatures === "object" && !Array.isArray(existing.titleFeatures)
+      ? (existing.titleFeatures as Record<string, unknown>)
+      : null;
+  if (!titleSection) {
+    return {
+      deterministic: null,
+      llm: null
+    };
+  }
+
+  const deterministicRaw =
+    titleSection.deterministic &&
+    typeof titleSection.deterministic === "object" &&
+    !Array.isArray(titleSection.deterministic)
+      ? (titleSection.deterministic as DeterministicTitleFeatures)
+      : null;
+  const llmRaw = titleSection.llm && typeof titleSection.llm === "object" ? (titleSection.llm as TitleLlmResultV1) : null;
+
+  return {
+    deterministic: deterministicRaw,
+    llm: llmRaw
   };
 }

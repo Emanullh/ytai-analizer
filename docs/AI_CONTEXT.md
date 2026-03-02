@@ -200,7 +200,7 @@ Detalles:
 
 - features deterministas siempre activas (`apps/api/src/derived/titleDeterministic.ts`)
 - description determinista (`apps/api/src/derived/descriptionDeterministic.ts`) sin llamar LLM
-- transcript determinista (`apps/api/src/derived/transcriptDeterministic.ts`) con embeddings opcionales (`text-embedding-3-large`)
+- transcript determinista (`apps/api/src/derived/transcriptDeterministic.ts`) y similitud título-transcript con embeddings opcionales (`text-embedding-3-small`)
 - AutoGen worker opcional (`apps/api/src/services/autogenRuntime.ts` + `apps/api/scripts/autogen_worker.py`)
 - task AutoGen para descripción: `description_classifier_v1`
 - task AutoGen para transcript: `transcript_classifier_v1`
@@ -212,17 +212,49 @@ Detalles:
   - `apps/api/src/derived/assets/transcript-emotions.json`
 - fallos de LLM/embeddings no rompen el export; quedan como warning y `llm: null`
 
+### 5.5 Export Cache Persistente (filesystem)
+
+`apps/api/src/services/exportCacheService.ts` mantiene un índice por canal en:
+
+- `exports/<channel_sanitizado>/.cache/index.json`
+
+Objetivo del cache:
+
+- reutilizar artifacts por video ya existentes (`thumbnail`, `raw/transcripts`, `derived/video_features`)
+- evitar recomputar trabajo pesado por video (captions/ASR, OCR, embeddings, AutoGen)
+- soportar reuse parcial por subset de videos
+
+Reglas operativas:
+
+- cache key por `channelId + exportVersion + timeframe + videoId`
+- fingerprints de input/config por video:
+  - hashes de `title`, `description`, `transcript`, `thumbnail`
+  - `transcriptSource`
+  - `asrConfigHash` (`model/computeType/language/beam`)
+  - `ocrConfigHash` (`langs/downscaleWidth`)
+  - modelos (`embeddingModel`, `llmModels`)
+- si falta `OPENAI_API_KEY` o `AUTO_GEN_ENABLED=false`, no invalida LLM cacheado
+- si antes `llm=null` y ahora hay API key, hace upgrade solo de subcampos LLM faltantes
+- seguridad de paths:
+  - paths relativos solamente en cache index
+  - validación de root con `ensureInsideRoot(...)`
+  - escritura atómica para `index.json`
+
 ## 6) Archivos generados y side effects
 
 Export (`apps/api/src/services/exportService.ts`) escribe en:
 
 - `exports/<channel_sanitizado>/channel.json`
 - `exports/<channel_sanitizado>/thumbnails/<videoId>.jpg`
+- `exports/<channel_sanitizado>/raw/channel.json`
+- `exports/<channel_sanitizado>/raw/videos.jsonl`
+- `exports/<channel_sanitizado>/raw/transcripts/<videoId>.jsonl`
 - `exports/<channel_sanitizado>/analysis/orchestrator_input.json`
 - `exports/<channel_sanitizado>/analysis/playbook.json`
 - `exports/<channel_sanitizado>/derived/video_features/<videoId>.json`
 - `exports/<channel_sanitizado>/derived/channel_models.json`
 - `exports/<channel_sanitizado>/derived/templates.json`
+- `exports/<channel_sanitizado>/.cache/index.json`
 
 Temporal de ASR:
 
@@ -246,9 +278,14 @@ Resumen rápido:
 
 Versionado:
 
-- el runtime actual no escribe `exportVersion` explícito.
-- para consumidores, tratarlo como versión implícita `1.0`.
-- recomendado: agregar `exportVersion` en próximos cambios para compatibilidad hacia adelante.
+- el runtime escribe `exportVersion: "1.1"` en `channel.json`, `manifest.json` y `raw/channel.json`.
+- contratos deben tratar `exportVersion` como campo fuente de compatibilidad forward/backward.
+- el cache persistente también versiona por `exportVersion` para invalidación segura.
+
+Recomputación cruzada (siempre fresh por corrida):
+
+- `performanceNormalization` por conjunto exportado (afecta `performance.*` y `derived/channel_models.json`)
+- `orchestratorDeterministic` y `orchestratorService` (`analysis/orchestrator_input.json`, `analysis/playbook.json`, `derived/templates.json`)
 
 ## 8) Frontend: estado y modal de progreso
 

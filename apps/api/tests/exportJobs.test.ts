@@ -10,6 +10,8 @@ const getChannelDetailsMock = vi.fn();
 const analyzeChannelMock = vi.fn();
 const downloadToBufferMock = vi.fn();
 const getTranscriptWithFallbackMock = vi.fn();
+const runOcrMock = vi.fn();
+const requestAutoGenTaskMock = vi.fn();
 
 vi.mock("../src/services/youtubeService.js", () => ({
   getSelectedVideoDetails: getSelectedVideoDetailsMock,
@@ -25,6 +27,18 @@ vi.mock("../src/utils/http.js", () => ({
 
 vi.mock("../src/services/transcriptPipeline.js", () => ({
   getTranscriptWithFallback: getTranscriptWithFallbackMock
+}));
+
+vi.mock("../src/derived/ocr/tesseractOcr.js", () => ({
+  runOcr: runOcrMock,
+  clearOcrCache: vi.fn(),
+  terminateOcrWorkers: vi.fn()
+}));
+
+vi.mock("../src/services/autogenRuntime.js", () => ({
+  requestAutoGenTask: requestAutoGenTaskMock,
+  startAutoGenWorker: vi.fn(),
+  stopAutoGenWorker: vi.fn()
 }));
 
 interface SseEvent {
@@ -90,6 +104,8 @@ describe("export jobs + SSE progress", () => {
     analyzeChannelMock.mockReset();
     downloadToBufferMock.mockReset();
     getTranscriptWithFallbackMock.mockReset();
+    runOcrMock.mockReset();
+    requestAutoGenTaskMock.mockReset();
 
     const { buildServer } = await import("../src/server.js");
     app = await buildServer();
@@ -689,6 +705,215 @@ describe("export jobs + SSE progress", () => {
       status: "missing"
     });
     expect(typeof transcriptArtifactLines[0]?.warning).toBe("string");
+  });
+
+  it("reuses cached per-video artifacts on second export and only recomputes cross-video outputs", async () => {
+    process.env.THUMB_OCR_ENABLED = "true";
+    process.env.AUTO_GEN_ENABLED = "false";
+    runOcrMock.mockResolvedValue({
+      text: "Big cache text",
+      confidenceMean: 0.9,
+      boxes: [{ x: 2, y: 2, w: 80, h: 24, confidence: 0.9, text: "Big" }]
+    });
+
+    const selectedVideos = [
+      {
+        videoId: "video0000411",
+        title: "Video Cache 1",
+        publishedAt: "2025-01-01T00:00:00.000Z",
+        viewCount: 10,
+        thumbnailUrl: "https://img.example/cache-1.jpg"
+      },
+      {
+        videoId: "video0000422",
+        title: "Video Cache 2",
+        publishedAt: "2025-01-02T00:00:00.000Z",
+        viewCount: 20,
+        thumbnailUrl: "https://img.example/cache-2.jpg"
+      }
+    ];
+    const detailedVideos = [
+      {
+        videoId: "video0000411",
+        title: "Video Cache 1",
+        description: "Descripcion cache 1",
+        publishedAt: "2025-01-01T00:00:00.000Z",
+        durationSec: 125,
+        categoryId: "22",
+        tags: ["cache"],
+        madeForKids: false,
+        liveBroadcastContent: "none",
+        statistics: {
+          viewCount: 10,
+          likeCount: 2,
+          commentCount: 1
+        },
+        thumbnails: {
+          high: { url: "https://img.example/cache-1.jpg", width: 480, height: 360 }
+        },
+        thumbnailOriginalUrl: "https://img.example/cache-1.jpg"
+      },
+      {
+        videoId: "video0000422",
+        title: "Video Cache 2",
+        description: "Descripcion cache 2",
+        publishedAt: "2025-01-02T00:00:00.000Z",
+        durationSec: 245,
+        categoryId: "24",
+        tags: [],
+        madeForKids: false,
+        liveBroadcastContent: "none",
+        statistics: {
+          viewCount: 20,
+          likeCount: 4,
+          commentCount: 2
+        },
+        thumbnails: {
+          high: { url: "https://img.example/cache-2.jpg", width: 480, height: 360 }
+        },
+        thumbnailOriginalUrl: "https://img.example/cache-2.jpg"
+      }
+    ];
+
+    getSelectedVideoDetailsMock.mockResolvedValue({
+      warnings: [],
+      videos: selectedVideos
+    });
+    getVideoDetailsMock.mockResolvedValue({
+      warnings: [],
+      videos: detailedVideos
+    });
+    getChannelDetailsMock.mockResolvedValue({
+      channelId: "UC1234567890123456789012",
+      channelName: "Canal Demo Jobs",
+      channelStats: {
+        subscriberCount: 999
+      },
+      warnings: []
+    });
+    downloadToBufferMock.mockImplementation(async (url: string) => Buffer.from(`thumbnail-${url}`));
+    getTranscriptWithFallbackMock.mockImplementation(async (videoId: string) => ({
+      transcript: `cached transcript ${videoId}`,
+      status: "ok",
+      source: "captions"
+    }));
+
+    const firstJob = await app.inject({
+      method: "POST",
+      url: "/export/jobs",
+      payload: {
+        channelId: "UC1234567890123456789012",
+        channelName: "Canal Demo Jobs",
+        sourceInput: "https://www.youtube.com/@demo",
+        timeframe: "6m",
+        selectedVideoIds: selectedVideos.map((video) => video.videoId)
+      }
+    });
+    expect(firstJob.statusCode).toBe(200);
+    const firstJobId = (firstJob.json() as { jobId: string }).jobId;
+    const firstEventsResponse = await app.inject({
+      method: "GET",
+      url: `/export/jobs/${firstJobId}/events`
+    });
+    const firstEvents = parseSsePayload(firstEventsResponse.body);
+    expect(firstEvents.at(-1)?.event).toBe("job_done");
+    const firstStatusResponse = await app.inject({
+      method: "GET",
+      url: `/export/jobs/${firstJobId}`
+    });
+    const firstStatus = firstStatusResponse.json() as { status: string; exportPath?: string };
+    expect(firstStatus.status).toBe("done");
+    const exportPath = firstStatus.exportPath as string;
+
+    const firstChannelModelsRaw = await fs.readFile(path.join(exportPath, "derived", "channel_models.json"), "utf-8");
+    const firstPlaybookRaw = await fs.readFile(path.join(exportPath, "analysis", "playbook.json"), "utf-8");
+    const firstTemplatesRaw = await fs.readFile(path.join(exportPath, "derived", "templates.json"), "utf-8");
+    const transcriptBefore = await fs.readFile(path.join(exportPath, "raw", "transcripts", "video0000411.jsonl"), "utf-8");
+
+    const firstChannelModels = JSON.parse(firstChannelModelsRaw) as { computedAt: string };
+    const firstPlaybook = JSON.parse(firstPlaybookRaw) as { generatedAt: string };
+    const firstTemplates = JSON.parse(firstTemplatesRaw) as { generatedAt: string };
+
+    expect(getTranscriptWithFallbackMock).toHaveBeenCalledTimes(2);
+    expect(downloadToBufferMock).toHaveBeenCalledTimes(2);
+
+    getTranscriptWithFallbackMock.mockClear();
+    downloadToBufferMock.mockClear();
+    runOcrMock.mockClear();
+    requestAutoGenTaskMock.mockClear();
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const secondJob = await app.inject({
+      method: "POST",
+      url: "/export/jobs",
+      payload: {
+        channelId: "UC1234567890123456789012",
+        channelName: "Canal Demo Jobs",
+        sourceInput: "https://www.youtube.com/@demo",
+        timeframe: "6m",
+        selectedVideoIds: selectedVideos.map((video) => video.videoId)
+      }
+    });
+    expect(secondJob.statusCode).toBe(200);
+    const secondJobId = (secondJob.json() as { jobId: string }).jobId;
+
+    const secondEventsResponse = await app.inject({
+      method: "GET",
+      url: `/export/jobs/${secondJobId}/events`
+    });
+    const secondEvents = parseSsePayload(secondEventsResponse.body);
+    expect(secondEvents.at(-1)?.event).toBe("job_done");
+    expect(
+      secondEvents.some(
+        (event) =>
+          event.event === "warning" &&
+          typeof event.data.message === "string" &&
+          event.data.message.includes("cache hit: reused transcript/thumbnail/derived")
+      )
+    ).toBe(true);
+
+    const secondStatusResponse = await app.inject({
+      method: "GET",
+      url: `/export/jobs/${secondJobId}`
+    });
+    const secondStatus = secondStatusResponse.json() as { status: string; exportPath?: string };
+    expect(secondStatus.status).toBe("done");
+
+    expect(getTranscriptWithFallbackMock).toHaveBeenCalledTimes(0);
+    expect(downloadToBufferMock).toHaveBeenCalledTimes(0);
+    expect(runOcrMock).toHaveBeenCalledTimes(0);
+    expect(requestAutoGenTaskMock).toHaveBeenCalledTimes(0);
+
+    const secondChannelModelsRaw = await fs.readFile(path.join(exportPath, "derived", "channel_models.json"), "utf-8");
+    const secondPlaybookRaw = await fs.readFile(path.join(exportPath, "analysis", "playbook.json"), "utf-8");
+    const secondTemplatesRaw = await fs.readFile(path.join(exportPath, "derived", "templates.json"), "utf-8");
+    const transcriptAfter = await fs.readFile(path.join(exportPath, "raw", "transcripts", "video0000411.jsonl"), "utf-8");
+
+    const secondChannelModels = JSON.parse(secondChannelModelsRaw) as { computedAt: string };
+    const secondPlaybook = JSON.parse(secondPlaybookRaw) as { generatedAt: string };
+    const secondTemplates = JSON.parse(secondTemplatesRaw) as { generatedAt: string };
+
+    expect(new Date(secondChannelModels.computedAt).getTime()).toBeGreaterThan(
+      new Date(firstChannelModels.computedAt).getTime()
+    );
+    expect(new Date(secondPlaybook.generatedAt).getTime()).toBeGreaterThan(
+      new Date(firstPlaybook.generatedAt).getTime()
+    );
+    expect(new Date(secondTemplates.generatedAt).getTime()).toBeGreaterThan(
+      new Date(firstTemplates.generatedAt).getTime()
+    );
+    expect(transcriptAfter).toBe(transcriptBefore);
+
+    const cacheIndexRaw = await fs.readFile(path.join(exportPath, ".cache", "index.json"), "utf-8");
+    const cacheIndex = JSON.parse(cacheIndexRaw) as {
+      schemaVersion: string;
+      timeframes: { "6m": { videos: Record<string, unknown> } };
+    };
+    expect(cacheIndex.schemaVersion).toBe("cache.index.v1");
+    expect(Object.keys(cacheIndex.timeframes["6m"].videos)).toEqual(
+      expect.arrayContaining(["video0000411", "video0000422"])
+    );
   });
 
   it("continues export with warning when transcript pipeline throws (ASR health-check failure)", async () => {

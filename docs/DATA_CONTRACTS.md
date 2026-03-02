@@ -392,7 +392,81 @@ Campos:
     - `confidence` (`number|null`)
 - Si transcript está `missing|error`, se escribe igualmente el archivo con la línea `meta` y sin segmentos.
 
-### 3.5 Derived Features v1
+### 3.5 Export Cache Index v1
+
+Ruta:
+
+- `exports/<channel_folder>/.cache/index.json`
+
+Formato:
+
+```json
+{
+  "schemaVersion": "cache.index.v1",
+  "channelId": "UC1234567890123456789012",
+  "channelFolder": "Canal_Demo",
+  "updatedAt": "2026-03-02T12:00:00.000Z",
+  "exportVersion": "1.1",
+  "timeframes": {
+    "1m": { "videos": {} },
+    "6m": {
+      "videos": {
+        "video1": {
+          "videoId": "video1",
+          "lastUpdatedAt": "2026-03-02T12:00:00.000Z",
+          "inputs": {
+            "titleHash": "sha1",
+            "descriptionHash": "sha1",
+            "thumbnailHash": "sha1",
+            "transcriptHash": "sha1",
+            "transcriptSource": "captions",
+            "asrConfigHash": "sha1",
+            "ocrConfigHash": "sha1",
+            "embeddingModel": "text-embedding-3-small",
+            "llmModels": {
+              "title": "gpt-5.2",
+              "description": "gpt-5.2",
+              "transcript": "gpt-5.2",
+              "thumbnail": "gpt-5.2"
+            }
+          },
+          "artifacts": {
+            "rawTranscriptPath": "raw/transcripts/video1.jsonl",
+            "thumbnailPath": "thumbnails/video1.jpg",
+            "derivedVideoFeaturesPath": "derived/video_features/video1.json"
+          },
+          "status": {
+            "rawTranscript": "ok",
+            "thumbnail": "ok",
+            "derived": "ok",
+            "warnings": []
+          }
+        }
+      }
+    },
+    "1y": { "videos": {} }
+  }
+}
+```
+
+Reglas de validez / invalidación:
+
+- hit completo requiere existencia de:
+  - `thumbnailPath`
+  - `rawTranscriptPath`
+  - `derivedVideoFeaturesPath`
+- además, deben coincidir fingerprints (`titleHash`, `descriptionHash`, `transcriptHash`, `thumbnailHash`, configs/modelos).
+- cambios de `ocrConfigHash` invalidan solo `thumbnailFeatures.deterministic` (modo parcial `ocr_only`).
+- cambios de modelos LLM invalidan solo subcampos `*.llm` correspondientes.
+- si `OPENAI_API_KEY` falta o `AUTO_GEN_ENABLED=false`, no invalida LLM cacheado existente.
+- si antes `llm=null` y ahora hay API key, se permite upgrade de solo `*.llm` faltantes.
+- seguridad:
+  - paths en cache son siempre relativos
+  - prohibidos paths absolutos o con `..`
+  - validación anti-traversal sobre root `exports/`
+  - escritura atómica de `index.json` (temp + rename)
+
+### 3.6 Derived Features v1
 
 Ruta:
 
@@ -574,11 +648,12 @@ Notas:
 - `performance` se calcula de forma **100% determinista** sin llamadas de red:
   - proxies por video: `daysSincePublish`, `viewsPerDay`, `likeRate`, `commentRate`, `engagementRate`, `logViews`
   - score relativo por canal/timeframe: `residual`, `percentile`
+- aunque haya cache por video, `performance.*` se recomputa en cada export porque depende del conjunto seleccionado/timeframe.
 - cuando no hay suficientes videos (`n < 5`) no se ajusta modelo y `residual`/`percentile` quedan `null`.
 - El archivo se genera durante el flujo normal de export (`POST /export` y `/export/jobs`) sin pasos extra en UI.
 - Si no hay timestamps de transcript, `title_keyword_early_coverage_30s` usa fallback por prefijo de caracteres y lo documenta en `title_keyword_audit`.
 
-### 3.6 Derived Channel Model v1
+### 3.7 Derived Channel Model v1
 
 Ruta:
 
@@ -623,7 +698,7 @@ Reglas:
 - predictor `durationSec` se excluye o imputa conservadoramente cuando falta.
 - `fit.notes` contiene warnings operativos (por ejemplo `n < 5` o missing duration).
 
-### 3.7 Analysis Playbook v1
+### 3.8 Analysis Playbook v1
 
 Ruta:
 
@@ -672,7 +747,7 @@ Reglas de validación anti-alucinación:
 - todo `evidence_fields[]` debe ser un path válido en el row plano (`performance.*`, `titleFeatures.*`, `thumbnailFeatures.*`, etc.).
 - si falla validación de salida LLM, se degrada a fallback determinista (sin romper export).
 
-### 3.8 Derived Templates v1
+### 3.9 Derived Templates v1
 
 Ruta:
 
@@ -714,7 +789,7 @@ Reglas:
 - mismas reglas anti-alucinación para `supported_by` y `evidence_fields`.
 - con LLM deshabilitado/fallido: se escribe estructura vacía + `warnings`.
 
-### 3.9 Orchestrator Input Audit v1 (opcional)
+### 3.10 Orchestrator Input Audit v1 (opcional)
 
 Ruta:
 
@@ -818,7 +893,9 @@ Desde `apps/api/src/services/exportService.ts`:
 - escribe `exports/<canal>/analysis/orchestrator_input.json`
 - escribe `exports/<canal>/analysis/playbook.json`
 - escribe `exports/<canal>/derived/video_features/<videoId>.json`
+- escribe `exports/<canal>/derived/channel_models.json`
 - escribe `exports/<canal>/derived/templates.json`
+- escribe `exports/<canal>/.cache/index.json`
 - escribe `exports/<canal>/raw/channel.json`
 - escribe `exports/<canal>/raw/videos.jsonl`
 - escribe `exports/<canal>/raw/transcripts/<videoId>.jsonl`
@@ -833,6 +910,7 @@ Sanitización de folder de canal:
 ## 6) Cobertura de tests ligada a contratos
 
 - `apps/api/tests/exportJobs.test.ts`: valida flujo jobs + SSE + `channel.json` + `manifest.json` + `raw/*`
+- `apps/api/tests/exportCacheService.test.ts`: hit/miss/partial + upgrade LLM + invalidación granular por `ocrConfig`
 - `apps/api/tests/orchestratorDeterministic.test.ts`: cohorts, rankings y drivers deterministas
 - `apps/api/tests/orchestratorService.test.ts`: fallback + validación anti-alucinación + persistencia
 - `apps/api/tests/transcriptPipeline.test.ts`: captions vs fallback ASR

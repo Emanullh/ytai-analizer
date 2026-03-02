@@ -92,6 +92,10 @@ export interface ComputeDescriptionFeaturesResult {
 export interface PersistDescriptionFeaturesArgs extends ComputeDescriptionFeaturesArgs {
   exportsRoot: string;
   channelFolderPath: string;
+  compute?: {
+    deterministic?: boolean;
+    llm?: boolean;
+  };
 }
 
 export interface PersistDescriptionFeaturesResult extends ComputeDescriptionFeaturesResult {
@@ -372,8 +376,6 @@ function mergeBundle(
 export async function persistDescriptionFeaturesArtifact(
   args: PersistDescriptionFeaturesArgs
 ): Promise<PersistDescriptionFeaturesResult> {
-  const result = await computeDescriptionFeaturesBundle(args);
-
   const derivedFolderPath = path.resolve(args.channelFolderPath, "derived", "video_features");
   const artifactAbsolutePath = path.resolve(derivedFolderPath, `${args.videoId}.json`);
 
@@ -382,6 +384,66 @@ export async function persistDescriptionFeaturesArtifact(
 
   await fs.mkdir(derivedFolderPath, { recursive: true });
   const existing = await readExistingArtifact(artifactAbsolutePath);
+  const existingSection = readExistingDescriptionSection(existing);
+  const requestedDeterministic = args.compute?.deterministic ?? true;
+  const requestedLlm = args.compute?.llm ?? true;
+
+  const shouldComputeDeterministic = requestedDeterministic || !existingSection?.deterministic;
+  const deterministicResult = shouldComputeDeterministic
+    ? computeDeterministic({
+        title: args.title,
+        description: args.description
+      })
+    : null;
+
+  let deterministic =
+    deterministicResult !== null
+      ? {
+          ...deterministicResult.features,
+          evidence: deterministicResult.evidence
+        }
+      : existingSection?.deterministic ?? null;
+
+  let llm = existingSection?.llm ?? null;
+  const warnings: string[] = [...(deterministicResult?.warnings ?? []), ...(existingSection?.warnings ?? [])];
+  if (!deterministic) {
+    const fallbackDeterministic = computeDeterministic({
+      title: args.title,
+      description: args.description
+    });
+    deterministic = {
+      ...fallbackDeterministic.features,
+      evidence: fallbackDeterministic.evidence
+    };
+    warnings.push(...fallbackDeterministic.warnings);
+  }
+  if (requestedLlm) {
+    const urlsWithSpans = Array.isArray(deterministic.urls) ? (deterministic.urls as UrlWithSpan[]) : [];
+    const llmResult = await callAutoGenDescriptionClassifier({
+      videoId: args.videoId,
+      title: args.title,
+      description: args.description,
+      urlsWithSpans,
+      languageHint: args.languageHint ?? "auto"
+    });
+    llm = llmResult.value;
+    warnings.push(...llmResult.warnings);
+  }
+
+  const result: ComputeDescriptionFeaturesResult = {
+    bundle: {
+      schemaVersion: "derived.video_features.v1",
+      videoId: args.videoId,
+      computedAt: new Date().toISOString(),
+      descriptionFeatures: {
+        deterministic,
+        llm,
+        warnings
+      }
+    },
+    warnings
+  };
+
   const mergedBundle = mergeBundle(args, result.bundle, existing);
   await writeJsonAtomic(artifactAbsolutePath, mergedBundle);
 
@@ -391,4 +453,18 @@ export async function persistDescriptionFeaturesArtifact(
     artifactRelativePath: toSafeRelativePath(args.channelFolderPath, artifactAbsolutePath),
     mergedBundle
   };
+}
+
+function readExistingDescriptionSection(existing: Record<string, unknown> | null): DescriptionFeaturesSection | null {
+  if (!existing || typeof existing !== "object") {
+    return null;
+  }
+  if (
+    !existing.descriptionFeatures ||
+    typeof existing.descriptionFeatures !== "object" ||
+    Array.isArray(existing.descriptionFeatures)
+  ) {
+    return null;
+  }
+  return existing.descriptionFeatures as DescriptionFeaturesSection;
 }

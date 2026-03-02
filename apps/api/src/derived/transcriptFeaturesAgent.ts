@@ -100,6 +100,10 @@ export interface ComputeTranscriptFeaturesArgs {
 export interface PersistTranscriptFeaturesArgs extends ComputeTranscriptFeaturesArgs {
   exportsRoot: string;
   channelFolderPath: string;
+  compute?: {
+    deterministic?: boolean;
+    llm?: boolean;
+  };
 }
 
 export interface ComputeTranscriptFeaturesResult {
@@ -630,8 +634,6 @@ function mergeBundle(
 export async function persistTranscriptFeaturesArtifact(
   args: PersistTranscriptFeaturesArgs
 ): Promise<PersistTranscriptFeaturesResult> {
-  const result = await computeTranscriptFeaturesBundle(args);
-
   const derivedFolderPath = path.resolve(args.channelFolderPath, "derived", "video_features");
   const artifactAbsolutePath = path.resolve(derivedFolderPath, `${args.videoId}.json`);
 
@@ -640,6 +642,62 @@ export async function persistTranscriptFeaturesArtifact(
 
   await fs.mkdir(derivedFolderPath, { recursive: true });
   const existing = await readExistingArtifact(artifactAbsolutePath);
+  const existingSection = readExistingTranscriptSection(existing);
+  const requestedDeterministic = args.compute?.deterministic ?? true;
+  const requestedLlm = args.compute?.llm ?? true;
+  const transcriptArtifact = await loadArtifactForFeatures(args);
+
+  const shouldComputeDeterministic = requestedDeterministic || !existingSection?.deterministic;
+  const deterministicResult = shouldComputeDeterministic
+    ? await computeDeterministic({
+        title: args.title,
+        transcriptArtifact,
+        durationSec: args.durationSec,
+        publishedAt: args.publishedAt,
+        nowISO: args.nowISO
+      })
+    : null;
+  let deterministic = deterministicResult?.features ?? existingSection?.deterministic ?? null;
+  const warnings = dedupeWarnings([...(deterministicResult?.warnings ?? []), ...(existingSection?.warnings ?? [])]);
+  if (!deterministic) {
+    const fallbackDeterministic = await computeDeterministic({
+      title: args.title,
+      transcriptArtifact,
+      durationSec: args.durationSec,
+      publishedAt: args.publishedAt,
+      nowISO: args.nowISO
+    });
+    deterministic = fallbackDeterministic.features;
+    warnings.push(...fallbackDeterministic.warnings);
+  }
+
+  let llm = existingSection?.llm ?? null;
+
+  if (requestedLlm) {
+    const llmResult = await callAutoGenTranscriptClassifier({
+      videoId: args.videoId,
+      title: args.title,
+      languageHint: args.languageHint,
+      transcriptArtifact
+    });
+    llm = llmResult.value;
+    warnings.push(...llmResult.warnings);
+  }
+
+  const result: ComputeTranscriptFeaturesResult = {
+    bundle: {
+      schemaVersion: "derived.video_features.v1",
+      videoId: args.videoId,
+      computedAt: new Date().toISOString(),
+      transcriptFeatures: {
+        deterministic,
+        llm,
+        warnings: dedupeWarnings(warnings)
+      }
+    },
+    warnings: dedupeWarnings(warnings)
+  };
+
   const mergedBundle = mergeBundle(args, result.bundle, existing);
   await writeJsonAtomic(artifactAbsolutePath, mergedBundle);
 
@@ -649,4 +707,18 @@ export async function persistTranscriptFeaturesArtifact(
     artifactRelativePath: toSafeRelativePath(args.channelFolderPath, artifactAbsolutePath),
     mergedBundle
   };
+}
+
+function readExistingTranscriptSection(existing: Record<string, unknown> | null): TranscriptFeaturesSection | null {
+  if (!existing || typeof existing !== "object") {
+    return null;
+  }
+  if (
+    !existing.transcriptFeatures ||
+    typeof existing.transcriptFeatures !== "object" ||
+    Array.isArray(existing.transcriptFeatures)
+  ) {
+    return null;
+  }
+  return existing.transcriptFeatures as TranscriptFeaturesSection;
 }

@@ -124,9 +124,9 @@
       "fields": ["channelName", "channelId", "sourceInput", "timeframe", "videos[]"]
     },
     "exportVersioning": {
-      "runtimeFieldPresent": false,
-      "implicitVersion": "1.0",
-      "recommendedField": "exportVersion"
+      "runtimeFieldPresent": true,
+      "currentVersion": "1.1",
+      "field": "exportVersion"
     },
     "videoRecord": {
       "fields": [
@@ -178,6 +178,20 @@
       "modelType": "robust-linear",
       "deterministic": true,
       "formula": "log1p(viewCount) ~ log1p(daysSincePublish) + log1p(durationSec) + weekday + isShort"
+    },
+    "exportCacheIndex": {
+      "path": "exports/<channel>/.cache/index.json",
+      "schemaVersion": "cache.index.v1",
+      "keySpace": ["channelId", "exportVersion", "timeframe", "videoId"],
+      "cacheHitRequirements": [
+        "thumbnail + raw/transcript + derived/video_features exist",
+        "hash/config/model fingerprints match"
+      ],
+      "partialInvalidation": {
+        "ocrConfigChange": "thumbnailFeatures.deterministic only (ocr_only mode)",
+        "llmModelChange": "only affected *.llm section",
+        "missingApiKey": "reuse existing llm cache without invalidation"
+      }
     },
     "sseEvents": [
       "job_started",
