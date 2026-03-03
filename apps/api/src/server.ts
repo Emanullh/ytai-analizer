@@ -17,6 +17,7 @@ import {
 } from "./services/projectsService.js";
 import { analyzeChannel } from "./services/youtubeService.js";
 import { HttpError } from "./utils/errors.js";
+import { rerunOrchestrator, PrerequisiteError } from "./services/rerunOrchestratorService.js";
 
 const timeframeSchema = z.enum(["1m", "6m", "1y"]);
 
@@ -35,6 +36,10 @@ const exportSchema = z.object({
 
 const exportJobParamsSchema = z.object({
   jobId: z.string().uuid("Invalid jobId")
+});
+
+const rerunOrchestratorSchema = z.object({
+  channelName: z.string().min(1)
 });
 
 const projectParamsSchema = z.object({
@@ -157,6 +162,30 @@ export async function buildServer() {
     const latestJob = exportJobService.getJob(jobId);
     if (latestJob?.status === "done" || latestJob?.status === "failed") {
       closeStream();
+    }
+  });
+
+  app.post("/export/rerun-orchestrator", async (request, reply) => {
+    const payload = rerunOrchestratorSchema.safeParse(request.body);
+    if (!payload.success) {
+      return reply.status(400).send({ error: payload.error.issues[0]?.message ?? "Invalid request body" });
+    }
+
+    try {
+      const result = await rerunOrchestrator(payload.data);
+      return reply.send(result);
+    } catch (error) {
+      if (error instanceof PrerequisiteError) {
+        return reply.status(409).send({
+          error: error.message,
+          checks: error.checks.map((c) => ({
+            artifact: c.artifact,
+            exists: c.exists,
+            detail: c.detail
+          }))
+        });
+      }
+      throw error;
     }
   });
 
