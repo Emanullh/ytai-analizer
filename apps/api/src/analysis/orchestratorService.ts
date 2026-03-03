@@ -134,39 +134,54 @@ function collectEvidenceItems(value: unknown, acc: PlaybookInsightLike[]): void 
   }
 }
 
-function validateSupportedBy(value: unknown, validVideoIds: Set<string>): string | null {
+function sanitizeSupportedBy(
+  value: unknown,
+  validVideoIds: Set<string>
+): { sanitized: string[]; stripped: string[] } {
   if (!Array.isArray(value)) {
-    return "supported_by must be an array";
+    return { sanitized: [], stripped: [] };
   }
+  const sanitized: string[] = [];
+  const stripped: string[] = [];
   for (const item of value) {
-    if (typeof item !== "string" || !validVideoIds.has(item)) {
-      return `supported_by contains unknown videoId: ${String(item)}`;
+    if (typeof item === "string" && validVideoIds.has(item)) {
+      sanitized.push(item);
+    } else {
+      stripped.push(String(item));
     }
   }
-  return null;
+  return { sanitized, stripped };
 }
 
-function validateEvidenceFields(value: unknown, rows: FlatVideoRow[]): string | null {
+function sanitizeEvidenceFields(
+  value: unknown,
+  rows: FlatVideoRow[]
+): { sanitized: string[]; stripped: string[] } {
   if (!Array.isArray(value)) {
-    return "evidence_fields must be an array";
+    return { sanitized: [], stripped: [] };
   }
+  const sanitized: string[] = [];
+  const stripped: string[] = [];
   for (const item of value) {
     if (typeof item !== "string" || !item.trim()) {
-      return "evidence_fields contains an invalid path";
+      stripped.push(String(item));
+      continue;
     }
     const pathIsValid = rows.some((row) => getPathValue(row, item) !== undefined);
-    if (!pathIsValid) {
-      return `evidence_fields contains unknown path: ${item}`;
+    if (pathIsValid) {
+      sanitized.push(item);
+    } else {
+      stripped.push(item);
     }
   }
-  return null;
+  return { sanitized, stripped };
 }
 
 function validateLlmArtifacts(input: {
   playbook: unknown;
   templates: unknown;
   rows: FlatVideoRow[];
-}): { ok: true } | { ok: false; warning: string } {
+}): { ok: true; warnings: string[] } | { ok: false; warning: string } {
   if (!input.playbook || typeof input.playbook !== "object" || Array.isArray(input.playbook)) {
     return { ok: false, warning: "LLM output invalid: playbook missing or not an object" };
   }
@@ -182,6 +197,7 @@ function validateLlmArtifacts(input: {
     return { ok: false, warning: "LLM output invalid: templates.schemaVersion must be derived.templates.v1" };
   }
 
+  const sanitizeWarnings: string[] = [];
   const evidenceItems: PlaybookInsightLike[] = [];
   collectEvidenceItems(input.playbook, evidenceItems);
   collectEvidenceItems(input.templates, evidenceItems);
@@ -189,20 +205,22 @@ function validateLlmArtifacts(input: {
   const videoIds = new Set(input.rows.map((row) => row.videoId));
   for (const item of evidenceItems) {
     if (Object.prototype.hasOwnProperty.call(item, "supported_by")) {
-      const supportedValidation = validateSupportedBy(item.supported_by, videoIds);
-      if (supportedValidation) {
-        return { ok: false, warning: `LLM output invalid: ${supportedValidation}` };
+      const { sanitized, stripped } = sanitizeSupportedBy(item.supported_by, videoIds);
+      if (stripped.length > 0) {
+        sanitizeWarnings.push(`Stripped unknown videoIds from supported_by: ${stripped.join(", ")}`);
       }
+      item.supported_by = sanitized;
     }
     if (Object.prototype.hasOwnProperty.call(item, "evidence_fields")) {
-      const evidenceValidation = validateEvidenceFields(item.evidence_fields, input.rows);
-      if (evidenceValidation) {
-        return { ok: false, warning: `LLM output invalid: ${evidenceValidation}` };
+      const { sanitized, stripped } = sanitizeEvidenceFields(item.evidence_fields, input.rows);
+      if (stripped.length > 0) {
+        sanitizeWarnings.push(`Stripped unknown evidence_fields paths: ${stripped.join(", ")}`);
       }
+      item.evidence_fields = sanitized;
     }
   }
 
-  return { ok: true };
+  return { ok: true, warnings: sanitizeWarnings };
 }
 
 function toFallbackPlaybook(args: {
@@ -373,6 +391,9 @@ export async function runOrchestrator(args: RunOrchestratorArgs): Promise<RunOrc
       rows: deterministic.orchestratorInput.rows
     });
     if (validation.ok) {
+      if (validation.warnings.length > 0) {
+        warnings.push(...validation.warnings);
+      }
       playbook = llmOutput.playbook as PlaybookArtifactV1;
       templates = llmOutput.templates as TemplatesArtifactV1;
       playbook.warnings = Array.from(new Set([...(Array.isArray(playbook.warnings) ? playbook.warnings : []), ...warnings]));

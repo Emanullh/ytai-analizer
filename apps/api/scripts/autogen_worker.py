@@ -421,8 +421,12 @@ OUTPUT JSON (must match exactly):
 RULES:
 1) Use ONLY the provided deterministic input. Do NOT compute new stats.
 2) Every insight/rule/formula/archetype/blueprint MUST include:
-   - supported_by: videoIds that exist in the input
-   - evidence_fields: valid field paths from the input (e.g. "performance.residual", "features.thumbnail.textAreaRatio")
+   - supported_by: videoIds that exist in the input rows
+   - evidence_fields: dot-separated field paths that exist inside each video row object
+     (e.g. "performance.residual", "features.thumbnail.textAreaRatio", "performance.percentile").
+     Do NOT use top-level input keys like "drivers", "cohorts", or "exemplars".
+     Do NOT use array bracket notation like "drivers[].feature".
+     Only reference paths within the "rows[*]" objects.
 3) Keep statements concise and operational (actionable).
 4) If evidence is weak (low n), lower confidence and avoid strong claims.
 5) Do not invent CTR/retention/impressions or any YouTube Analytics-only metrics.
