@@ -40,6 +40,15 @@ export interface PlaybookArtifactV1 {
     drivers: unknown[];
     exemplars: unknown;
   };
+  checklists?: {
+    title: string[];
+    thumbnail: string[];
+    hook_0_30s: string[];
+  };
+  contentIdeationPrompt?: {
+    systemPrompt: string;
+    supported_by: string[];
+  };
 }
 
 export interface TemplatesArtifactV1 {
@@ -55,6 +64,15 @@ export interface TemplatesArtifactV1 {
   titleTemplates: PlaybookInsightLike[];
   thumbnailTemplates: PlaybookInsightLike[];
   scriptTemplates: PlaybookInsightLike[];
+  titleGenerationPrompt?: {
+    systemPrompt: string;
+    exampleInputOutput: Array<{ topic: string; generatedTitle: string }>;
+    supported_by: string[];
+  };
+  scriptGenerationPrompt?: {
+    systemPrompt: string;
+    supported_by: string[];
+  };
 }
 
 export interface RunOrchestratorArgs {

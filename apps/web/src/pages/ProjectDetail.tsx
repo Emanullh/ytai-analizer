@@ -8,6 +8,8 @@ import Tooltip from "../components/Tooltip";
 import PlaybookView from "../components/playbook/PlaybookView";
 import TemplatesView from "../components/templates/TemplatesView";
 import ChannelModelView from "../components/model/ChannelModelView";
+import PercentileDistributionChart from "../components/charts/PercentileDistributionChart";
+import SectionExplainer from "../components/SectionExplainer";
 import { asRecord, asString, valueToText } from "../lib/artifactUtils";
 import { getByPath } from "../lib/getByPath";
 import { ProjectDetailResponse, ProjectVideoDetail, ProjectVideoSummary } from "../types";
@@ -184,6 +186,13 @@ export default function ProjectDetail() {
   });
   const [evidenceLoading, setEvidenceLoading] = useState(false);
   const [evidenceError, setEvidenceError] = useState<string | null>(null);
+
+  const [rerunState, setRerunState] = useState<{
+    running: boolean;
+    error: string | null;
+    checks: Array<{ artifact: string; exists: boolean; detail?: string }> | null;
+    result: { ok: boolean; warnings: string[]; usedLlm: boolean } | null;
+  }>({ running: false, error: null, checks: null, result: null });
 
   useEffect(() => {
     if (!projectId) {
@@ -404,6 +413,69 @@ export default function ProjectDetail() {
     });
   }, []);
 
+  const handleRerunOrchestrator = useCallback(async () => {
+    const channelName = detail?.channel.channelName;
+    if (!channelName) return;
+
+    setRerunState({ running: true, error: null, checks: null, result: null });
+
+    try {
+      const response = await fetch("/api/export/rerun-orchestrator", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channelName })
+      });
+
+      const payload = await response.json() as Record<string, unknown>;
+
+      if (response.status === 409) {
+        const checks = Array.isArray(payload.checks)
+          ? (payload.checks as Array<{ artifact: string; exists: boolean; detail?: string }>)
+          : null;
+        setRerunState({
+          running: false,
+          error: (payload.error as string) ?? "Prerequisitos faltantes",
+          checks,
+          result: null
+        });
+        return;
+      }
+
+      if (!response.ok) {
+        setRerunState({
+          running: false,
+          error: (payload.error as string) ?? `Error ${response.status}`,
+          checks: null,
+          result: null
+        });
+        return;
+      }
+
+      setRerunState({
+        running: false,
+        error: null,
+        checks: null,
+        result: {
+          ok: true,
+          warnings: Array.isArray(payload.warnings) ? (payload.warnings as string[]) : [],
+          usedLlm: payload.usedLlm === true
+        }
+      });
+
+      setPlaybookState(INITIAL_ARTIFACT_STATE);
+      setTemplatesState(INITIAL_ARTIFACT_STATE);
+      void loadArtifact("playbook");
+      void loadArtifact("templates");
+    } catch (requestError) {
+      setRerunState({
+        running: false,
+        error: requestError instanceof Error ? requestError.message : "Error inesperado",
+        checks: null,
+        result: null
+      });
+    }
+  }, [detail, loadArtifact]);
+
   useEffect(() => {
     if (!evidencePanel.open || evidencePanel.supportedBy.length === 0) {
       return;
@@ -558,6 +630,12 @@ export default function ProjectDetail() {
           {activeTab === "overview" ? (
             <div className="space-y-4">
               <Section title="Project Overview" hint="Resumen de artifacts y señales de calidad">
+                <SectionExplainer>
+                  Este proyecto analizó <strong>{detail.manifest?.counts?.totalVideosSelected ?? 0} videos</strong> de{" "}
+                  <strong>{detail.channel.channelName}</strong> en un timeframe de{" "}
+                  <strong>{detail.channel.timeframe ?? "-"}</strong>. Los artifacts Playbook, Templates y Model
+                  contienen los patrones, fórmulas y modelos derivados del análisis.
+                </SectionExplainer>
                 <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                   <article className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                     <p className="text-xs text-slate-500">Playbook</p>
@@ -580,7 +658,23 @@ export default function ProjectDetail() {
                 </div>
               </Section>
 
+              {videos.length > 0 ? (
+                <Section title="Percentile Distribution" hint="Distribución de rendimiento de videos">
+                  <SectionExplainer>
+                    Muestra cuántos de los <strong>{videos.length} videos</strong> caen en cada cuartil de rendimiento.
+                    Más videos en 75-100 indica un canal con alto rendimiento consistente.
+                  </SectionExplainer>
+                  <PercentileDistributionChart videos={videos} />
+                </Section>
+              ) : null}
+
               <Section title="Top Videos" hint="Ranking por percentile dentro del subset">
+                {topVideos.length > 0 ? (
+                  <SectionExplainer>
+                    Top <strong>{topVideos.length}</strong> videos por percentile. El <strong>residual</strong> mide la
+                    diferencia entre vistas reales y esperadas según el modelo del canal: positivo = superó expectativas.
+                  </SectionExplainer>
+                ) : null}
                 {topVideos.length === 0 ? <p className="text-sm text-slate-500">No hay videos para mostrar.</p> : null}
                 {topVideos.length > 0 ? (
                   <div className="overflow-x-auto rounded-xl border border-slate-200">
@@ -617,6 +711,75 @@ export default function ProjectDetail() {
 
           {activeTab === "playbook" ? (
             <div>
+              <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-900">Re-run Orchestrator</p>
+                    <p className="mt-0.5 text-xs text-slate-500">
+                      Vuelve a ejecutar solo el paso del agente orchestrator (LLM) usando los datos ya exportados.
+                      Valida que los prerequisitos (channel.json, videos.jsonl, video_features) existan antes de lanzar.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={rerunState.running || !detail.channel.channelName}
+                    onClick={() => void handleRerunOrchestrator()}
+                    className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {rerunState.running ? (
+                      <>
+                        <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                        </svg>
+                        Ejecutando...
+                      </>
+                    ) : (
+                      <>
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
+                          <path fillRule="evenodd" d="M15.312 11.424a5.5 5.5 0 01-9.201 2.466l-.312-.311h2.433a.75.75 0 000-1.5H4.598a.75.75 0 00-.75.75v3.634a.75.75 0 001.5 0v-2.033l.312.311a7 7 0 0011.712-3.138.75.75 0 00-1.449-.39zm-1.873-7.263a7 7 0 00-11.712 3.138.75.75 0 001.449.39 5.5 5.5 0 019.201-2.467l.312.311H10.257a.75.75 0 000 1.5h3.634a.75.75 0 00.75-.75V2.649a.75.75 0 00-1.5 0v2.033l-.312-.311a6.972 6.972 0 00-.39-.21z" clipRule="evenodd" />
+                        </svg>
+                        Re-run Orchestrator
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {rerunState.error ? (
+                  <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 p-3">
+                    <p className="text-sm font-medium text-rose-800">{rerunState.error}</p>
+                    {rerunState.checks ? (
+                      <ul className="mt-2 space-y-1">
+                        {rerunState.checks.map((check) => (
+                          <li key={check.artifact} className="flex items-center gap-2 text-xs">
+                            <span className={check.exists ? "text-emerald-600" : "text-rose-600"}>
+                              {check.exists ? "OK" : "FALTA"}
+                            </span>
+                            <span className="font-mono text-slate-700">{check.artifact}</span>
+                            {check.detail ? <span className="text-slate-500">({check.detail})</span> : null}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {rerunState.result ? (
+                  <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+                    <p className="text-sm font-medium text-emerald-800">
+                      Orchestrator completado {rerunState.result.usedLlm ? "(LLM)" : "(deterministic fallback)"}
+                    </p>
+                    {rerunState.result.warnings.length > 0 ? (
+                      <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs text-amber-700">
+                        {rerunState.result.warnings.map((w, i) => (
+                          <li key={i}>{w}</li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+
               {playbookState.loading ? <p className="text-sm text-slate-600">Cargando playbook...</p> : null}
               {playbookState.error ? <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{playbookState.error}</p> : null}
               {!playbookState.loading && !playbookState.error && !detail.artifacts.playbook ? <ArtifactEmptyState label="Playbook" /> : null}

@@ -358,9 +358,13 @@ OUTPUT JSON (must match exactly):
       }
     ],
     "checklists": {
-      "title": ["string"],
-      "thumbnail": ["string"],
-      "hook_0_30s": ["string"]
+      "title": ["string - concise pre-publish check item for titles"],
+      "thumbnail": ["string - concise pre-publish check item for thumbnails"],
+      "hook_0_30s": ["string - concise pre-publish check item for the first 30 seconds"]
+    },
+    "contentIdeationPrompt": {
+      "systemPrompt": "string - a detailed, generic LLM system prompt for brainstorming new video topics based on this channel's winning content pillars and audience interests. Include specific style rules, topic patterns, and constraints derived from the analysis. Must be usable with ANY LLM to generate topic ideas for similar channels.",
+      "supported_by": ["videoId"]
     }
   },
   "templates": {
@@ -414,6 +418,17 @@ OUTPUT JSON (must match exactly):
           "evidence_fields": ["string"]
         }
       ]
+    },
+    "titleGenerationPrompt": {
+      "systemPrompt": "string - a detailed, generic LLM system prompt that can generate YouTube titles in this channel's proven style. Include specific rules about length, punctuation, word choice, emotional triggers, and structure patterns extracted from the analysis. Must be usable with ANY LLM to produce titles for new topics in a similar niche.",
+      "exampleInputOutput": [
+        { "topic": "string - an example topic", "generatedTitle": "string - title in the channel style" }
+      ],
+      "supported_by": ["videoId"]
+    },
+    "scriptGenerationPrompt": {
+      "systemPrompt": "string - a detailed, generic LLM system prompt for generating full video scripts in this channel's narrative style. Include pacing rules, section structure, tone guidelines, hook techniques, and transition patterns. Must reference the specific timing blocks and speaking cadence insights from the analysis.",
+      "supported_by": ["videoId"]
     }
   }
 }
@@ -432,6 +447,11 @@ RULES:
 5) Do not invent CTR/retention/impressions or any YouTube Analytics-only metrics.
 6) Prefer using "drivers" and "cohorts" as the basis for insights.
 7) Output JSON only.
+8) CHECKLISTS: Provide at least 3 items for each checklist (title, thumbnail, hook_0_30s). Each item must be a concrete, verifiable check (e.g. "Title contains fewer than 12 words").
+9) GENERATION PROMPTS: The titleGenerationPrompt, scriptGenerationPrompt, and contentIdeationPrompt must be
+   self-contained system prompts that any LLM can use to produce content in this channel's style.
+   They must be detailed (200+ words each), referencing specific patterns from the analysis.
+   Include concrete examples, style constraints, and do/don't rules derived from the data.
 """
 
 PROMISE_LABELS = {
@@ -1215,6 +1235,23 @@ def coerce_channel_orchestrator_result(raw: Any, payload: Dict[str, Any]) -> Dic
                     }
                 )
 
+        checklists_raw = playbook_source.get("checklists")
+        checklists = {}
+        if isinstance(checklists_raw, dict):
+            for key in ("title", "thumbnail", "hook_0_30s"):
+                val = checklists_raw.get(key)
+                checklists[key] = [str(item).strip() for item in val if isinstance(item, str) and str(item).strip()] if isinstance(val, list) else []
+
+        content_ideation_raw = playbook_source.get("contentIdeationPrompt")
+        content_ideation = None
+        if isinstance(content_ideation_raw, dict):
+            sp = content_ideation_raw.get("systemPrompt")
+            if isinstance(sp, str) and sp.strip():
+                content_ideation = {
+                    "systemPrompt": sp.strip(),
+                    "supported_by": _normalize_supported_by(content_ideation_raw.get("supported_by")),
+                }
+
         playbook = {
             "schemaVersion": "analysis.playbook.v1",
             "generatedAt": generated_at,
@@ -1229,6 +1266,10 @@ def coerce_channel_orchestrator_result(raw: Any, payload: Dict[str, Any]) -> Dic
                 "exemplars": payload.get("exemplars") if isinstance(payload.get("exemplars"), dict) else {},
             },
         }
+        if any(len(v) > 0 for v in checklists.values()):
+            playbook["checklists"] = checklists
+        if content_ideation:
+            playbook["contentIdeationPrompt"] = content_ideation
     else:
         playbook = {
             "schemaVersion": "analysis.playbook.v1",
@@ -1350,6 +1391,36 @@ def coerce_channel_orchestrator_result(raw: Any, payload: Dict[str, Any]) -> Dic
                         }
                     )
 
+        title_gen_raw = templates_source.get("titleGenerationPrompt")
+        title_gen_prompt = None
+        if isinstance(title_gen_raw, dict):
+            sp = title_gen_raw.get("systemPrompt")
+            if isinstance(sp, str) and sp.strip():
+                examples = []
+                raw_examples = title_gen_raw.get("exampleInputOutput")
+                if isinstance(raw_examples, list):
+                    for ex in raw_examples:
+                        if isinstance(ex, dict):
+                            topic = ex.get("topic")
+                            gen_title = ex.get("generatedTitle")
+                            if isinstance(topic, str) and isinstance(gen_title, str):
+                                examples.append({"topic": topic.strip(), "generatedTitle": gen_title.strip()})
+                title_gen_prompt = {
+                    "systemPrompt": sp.strip(),
+                    "exampleInputOutput": examples,
+                    "supported_by": _normalize_supported_by(title_gen_raw.get("supported_by")),
+                }
+
+        script_gen_raw = templates_source.get("scriptGenerationPrompt")
+        script_gen_prompt = None
+        if isinstance(script_gen_raw, dict):
+            sp = script_gen_raw.get("systemPrompt")
+            if isinstance(sp, str) and sp.strip():
+                script_gen_prompt = {
+                    "systemPrompt": sp.strip(),
+                    "supported_by": _normalize_supported_by(script_gen_raw.get("supported_by")),
+                }
+
         templates = {
             "schemaVersion": "derived.templates.v1",
             "generatedAt": generated_at,
@@ -1359,6 +1430,10 @@ def coerce_channel_orchestrator_result(raw: Any, payload: Dict[str, Any]) -> Dic
             "thumbnailTemplates": thumbnail_templates,
             "scriptTemplates": script_templates,
         }
+        if title_gen_prompt:
+            templates["titleGenerationPrompt"] = title_gen_prompt
+        if script_gen_prompt:
+            templates["scriptGenerationPrompt"] = script_gen_prompt
     else:
         templates = {
             "schemaVersion": "derived.templates.v1",
