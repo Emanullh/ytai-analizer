@@ -36,6 +36,14 @@ const CURIOSITY_GAP_LABELS = [
 ] as const;
 
 const CLAIM_STRENGTH_LABELS = ["low", "medium", "high"] as const;
+const EMBEDDING_MODEL_MAX_TOKENS = 8_192;
+const EMBEDDING_TOKEN_SAFETY_MARGIN = 512;
+const EMBEDDING_APPROX_CHARS_PER_TOKEN = 3.5;
+const EMBEDDING_MAX_INPUT_CHARS = Math.floor(
+  (EMBEDDING_MODEL_MAX_TOKENS - EMBEDDING_TOKEN_SAFETY_MARGIN) * EMBEDDING_APPROX_CHARS_PER_TOKEN
+);
+const EMBEDDING_RETRY_ATTEMPTS = 2;
+const EMBEDDING_RETRY_DELAY_MS = 400;
 
 type PromiseTypeLabel = (typeof PROMISE_TYPE_LABELS)[number];
 type CuriosityGapLabel = (typeof CURIOSITY_GAP_LABELS)[number];
@@ -201,6 +209,61 @@ async function fetchEmbedding(input: string): Promise<number[]> {
   return embedding;
 }
 
+function normalizeEmbeddingInput(input: string): string {
+  return input.replace(/\s+/g, " ").trim();
+}
+
+function truncateEmbeddingInput(input: string): { value: string; truncated: boolean } {
+  const normalized = normalizeEmbeddingInput(input);
+  if (normalized.length <= EMBEDDING_MAX_INPUT_CHARS) {
+    return { value: normalized, truncated: false };
+  }
+  return {
+    value: normalized.slice(0, EMBEDDING_MAX_INPUT_CHARS),
+    truncated: true
+  };
+}
+
+function isRetryableEmbeddingError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("fetch failed") ||
+    message.includes("network") ||
+    message.includes("timed out") ||
+    message.includes("timeout") ||
+    message.includes("rate limit") ||
+    message.includes("too many requests") ||
+    message.includes("http 429") ||
+    message.includes("http 500") ||
+    message.includes("http 502") ||
+    message.includes("http 503") ||
+    message.includes("http 504")
+  );
+}
+
+async function wait(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchEmbeddingWithRetry(input: string): Promise<number[]> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= EMBEDDING_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return await fetchEmbedding(input);
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableEmbeddingError(error) || attempt >= EMBEDDING_RETRY_ATTEMPTS) {
+        throw error;
+      }
+      await wait(EMBEDDING_RETRY_DELAY_MS * attempt);
+    }
+  }
+  throw (lastError instanceof Error ? lastError : new Error("unknown embeddings error"));
+}
+
 async function readExistingArtifact(artifactPath: string): Promise<Record<string, unknown> | null> {
   try {
     const raw = await fs.readFile(artifactPath, "utf-8");
@@ -227,6 +290,7 @@ export async function maybeComputeEmbeddingsSimilarity(
   title: string,
   transcript: string
 ): Promise<{ value: number | null; warnings: string[] }> {
+  const warnings: string[] = [];
   if (!env.openAiApiKey) {
     return {
       value: null,
@@ -241,16 +305,26 @@ export async function maybeComputeEmbeddingsSimilarity(
     };
   }
 
+  const titleInput = normalizeEmbeddingInput(title);
+  const transcriptInput = truncateEmbeddingInput(transcript);
+  if (transcriptInput.truncated) {
+    warnings.push("Embeddings similarity used truncated transcript input to stay within model context limits");
+  }
+
   try {
-    const [titleEmbedding, transcriptEmbedding] = await Promise.all([fetchEmbedding(title), fetchEmbedding(transcript)]);
+    const [titleEmbedding, transcriptEmbedding] = await Promise.all([
+      fetchEmbeddingWithRetry(titleInput),
+      fetchEmbeddingWithRetry(transcriptInput.value)
+    ]);
     return {
       value: cosineSimilarity(titleEmbedding, transcriptEmbedding),
-      warnings: []
+      warnings
     };
   } catch (error) {
     return {
       value: null,
       warnings: [
+        ...warnings,
         `Embeddings similarity failed: ${error instanceof Error ? error.message : "unknown embeddings error"}`
       ]
     };

@@ -756,12 +756,13 @@ export async function computeTranscriptDeterministicFeatures(
   const warnings = [...args.transcriptArtifact.warnings];
   const segments = normalizeSegments(args.transcriptArtifact.segments);
   const transcriptText = getAllTranscriptText(segments);
+  const hasTranscriptText = transcriptText.length > 0;
 
   const titleTokens = extractImportantTitleTokens(args.title);
   const titleCoverage = buildTitleKeywordCoverage(titleTokens, transcriptText);
 
   const earlyWindow = getEarlyWindowText(segments, transcriptText);
-  if (earlyWindow.mode === "leading_chars_fallback") {
+  if (hasTranscriptText && earlyWindow.mode === "leading_chars_fallback") {
     warnings.push("Early 30s coverage used char-based fallback: transcript segments have no timestamps");
   }
 
@@ -785,7 +786,9 @@ export async function computeTranscriptDeterministicFeatures(
   let wpmLast30: number | null = null;
   let wpmVariance: number | null = null;
 
-  if (!hasAnyTimestamps) {
+  if (!hasTranscriptText) {
+    // Keep WPM metrics as null when transcript text is unavailable.
+  } else if (!hasAnyTimestamps) {
     warnings.push("WPM metrics set to null: transcript segments have no timestamps");
   } else if (durationSec === null) {
     warnings.push("WPM metrics set to null: durationSec unavailable and no segment endSec found");
@@ -839,10 +842,9 @@ export async function computeTranscriptDeterministicFeatures(
     y: scoreSegmentSentiment(segment)
   }));
 
-  const promiseResult = await computePromiseDeliveryScore(args.title, earlyWindow.text);
-  if (promiseResult.warning) {
-    warnings.push(promiseResult.warning);
-  }
+  const promiseResult = hasTranscriptText
+    ? await computePromiseDeliveryScore(args.title, earlyWindow.text)
+    : { value: null, warning: null };
 
   const topicShiftResult = await computeTopicShiftCount(segments, transcriptText);
   if (topicShiftResult.warning) {

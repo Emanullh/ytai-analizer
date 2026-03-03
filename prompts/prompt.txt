@@ -1,191 +1,27 @@
-Tarea: Mejorar visualización del Projects Dashboard (playbook/templates/channel_models) — dejar de “dumpear JSON”, render semántico + tooltips (hover hints)
+Tarea: Investigar porque sucedieron estos warnings para el proyecto Modern_MBA y que posible soluciones hay, utliza el mejor modelo de codex para esto
 
 Contexto:
-- Frontend (apps/web) ya tiene:
-  - Tailwind configurado (tailwind.config.cjs, postcss.config.cjs, src/index.css)
-  - Router + páginas:
-    - AnalyzePage.tsx
-    - ProjectsList.tsx
-    - ProjectDetail.tsx
-- Backend ya expone endpoints read-only:
-  - GET /projects/:projectId/artifacts/playbook
-  - GET /projects/:projectId/artifacts/templates
-  - GET /projects/:projectId/artifacts/channel_models
-- Problema actual: Playbook/Templates/Channel Models se muestran como JSON crudo.
+Warnings
 
-Objetivo UX:
-1) Reemplazar la vista de JSON crudo por vistas “semánticas”:
-   - Playbook: insights/rules/keys/evidence en cards y tablas.
-   - Templates: titleTemplates/thumbnailTemplates/scriptTemplates en cards con ejemplos.
-   - Channel Models: baseline model + coeficientes + fit + notas en panel “model card” + tabla.
-2) Agregar hints on hover (tooltips) para cada campo/label importante:
-   - Qué significa (definición)
-   - Cómo interpretarlo
-   - Si aplica, de dónde sale (evidence_fields)
-3) Mantener accesibilidad:
-   - tooltips con focus/keyboard (no solo hover)
-4) Mantener compatibilidad con schemas actuales:
-   - analysis.playbook.v1
-   - derived.templates.v1
-   - derived.channel_models.v1
-5) Sin cambiar backend ni contratos; todo es UI.
+Thumbnail download failed for niQ7mk13xew: Timeout while downloading: https://i.ytimg.com/vi/niQ7mk13xew/maxresdefault.jpg
+Discarded evidence signal 'ocrSummary.ocrText': unknown deterministic field
+Embeddings similarity failed: This model's maximum context length is 8192 tokens, however you requested 10978 tokens (10978 in your prompt; 0 for the completion). Please reduce your prompt; or completion length.
+Thumbnail download failed for Gi1GDBEp1yA: Timeout while downloading: https://i.ytimg.com/vi/Gi1GDBEp1yA/maxresdefault.jpg
+Embeddings similarity failed: fetch failed
+Thumbnail deterministic stats failed: cannot access file /Users/jenhde/Desktop/proyecto-ytai/ytai-analizer/apps/api/exports/Modern_MBA/thumbnails/niQ7mk13xew.jpg (ENOENT: no such file or directory, stat '/Users/jenhde/Desktop/proyecto-ytai/ytai-analizer/apps/api/exports/Modern_MBA/thumbnails/niQ7mk13xew.jpg')
+AutoGen thumbnail classifier skipped: thumbnail file is not accessible (/Users/jenhde/Desktop/proyecto-ytai/ytai-analizer/apps/api/exports/Modern_MBA/thumbnails/niQ7mk13xew.jpg)
+Embeddings similarity failed: This model's maximum context length is 8192 tokens, however you requested 11300 tokens (11300 in your prompt; 0 for the completion). Please reduce your prompt; or completion length.
+Thumbnail deterministic stats failed: cannot access file /Users/jenhde/Desktop/proyecto-ytai/ytai-analizer/apps/api/exports/Modern_MBA/thumbnails/Gi1GDBEp1yA.jpg (ENOENT: no such file or directory, stat '/Users/jenhde/Desktop/proyecto-ytai/ytai-analizer/apps/api/exports/Modern_MBA/thumbnails/Gi1GDBEp1yA.jpg')
+AutoGen thumbnail classifier skipped: thumbnail file is not accessible (/Users/jenhde/Desktop/proyecto-ytai/ytai-analizer/apps/api/exports/Modern_MBA/thumbnails/Gi1GDBEp1yA.jpg)
+Embeddings similarity failed: This model's maximum context length is 8192 tokens, however you requested 10024 tokens (10024 in your prompt; 0 for the completion). Please reduce your prompt; or completion length.
+Embeddings similarity failed: This model's maximum context length is 8192 tokens, however you requested 10265 tokens (10265 in your prompt; 0 for the completion). Please reduce your prompt; or completion length.
+Transcript unavailable for video eQ3LSNXwZ2Y (captions missing/disabled) | Local ASR fallback failed for video eQ3LSNXwZ2Y: Local ASR timeout after 900s
+Embeddings similarity skipped: transcript is empty
+Early 30s coverage used char-based fallback: transcript segments have no timestamps
+WPM metrics set to null: transcript segments have no timestamps
+Promise delivery score skipped: missing title or first 30s transcript text
+AutoGen transcript classifier skipped: empty segmentsSample
 
-Implementación (apps/web):
-A) Infra UI base (Tooltips + Components)
-1) Implementar un componente Tooltip reusable SIN dependencia pesada:
-   - src/components/Tooltip.tsx
-     - props: content (ReactNode), children, side? (top/right/bottom/left)
-     - behavior: show on hover + focus, hide on blur/escape
-     - tailwind: z-50, bg-slate-900 text-white, shadow, rounded, max-w-sm
-   - Asegurar aria:
-     - role="tooltip"
-     - aria-describedby
-2) Implementar componentes UI semánticos:
-   - src/components/StatCard.tsx (label, value, hint)
-   - src/components/Badge.tsx (status/variant)
-   - src/components/Section.tsx (title + actions)
-   - src/components/KeyValueTable.tsx (para coeficientes y metadata)
-   - src/components/Collapsible.tsx (para bloques grandes)
-   Nota: no uses shadcn; solo Tailwind + componentes simples.
+Lee todo el contexto de logs y warnings en /Users/jenhde/Desktop/proyecto-ytai/ytai-analizer/apps/api/exports/ColdFusion
 
-B) Render semántico de artifacts en ProjectDetail
-Modificar src/pages/ProjectDetail.tsx:
-1) En vez de “JSON dump”, crear tabs internas:
-   - Tabs: “Overview”, “Playbook”, “Templates”, “Model”, “Jobs”
-   - Overview: tiles principales + warnings + top videos table
-2) PlaybookView:
-   - src/components/playbook/PlaybookView.tsx
-   Render:
-   - Header: channelName/timeframe/jobId + generatedAt
-   - Section “Positioning”: oneLine, audience chips, valueProps list
-   - Section “Content Pillars”: cards por pillar (pillar, description)
-     - Hover hints:
-       - “Pillar”: cluster temático extraído del canal
-       - “Supported by”: lista de videos que sustentan el pillar (videoId)
-   - Section “Insights”:
-     - tabla/cards con:
-       - title, summary, confidence (badge), supported_by (chips), evidence_fields
-     - Hover hints:
-       - confidence: “0..1, basado en fuerza de evidencia (n/cohorts/drivers)”
-       - evidence_fields: “paths de features que respaldan el insight”
-   - Section “Anti-patterns”: lista con supported_by + evidence_fields
-   - Section “Checklists”: 3 columnas (title/thumbnail/hook_0_30s) con bullets
-   - Section “Evidence Explorer” (MVP):
-     - mostrar cohorts/drivers/exemplars si vienen en playbook.evidence
-     - en drivers: effect + n + feature + supported_by
-     - tooltips:
-       - effect: “magnitud correlacional/delta; no implica causalidad”
-       - n: “tamaño de muestra dentro del subset exportado”
-
-3) TemplatesView:
-   - src/components/templates/TemplatesView.tsx
-   Render:
-   - Title templates:
-     - cards con:
-       - template string (monospace)
-       - when_to_use
-       - supported_by chips
-       - evidence_fields list (compact)
-     - Hover hints:
-       - template: “Patrón de título recomendado”
-       - when_to_use: “condición basada en features/residual/cohorts”
-   - Thumbnail templates:
-     - cards con:
-       - label/archetype (si aplica), designBrief, supported_by
-       - hints sobre textAreaRatio/face presence si están en evidence_fields
-   - Script templates:
-     - blueprint cards con timeline (0-10 / 10-30 / 30-120 / mid / end)
-     - tooltips:
-       - cada rango: “bloque temporal recomendado”
-       - supported_by: ejemplos que sustentan
-
-4) ChannelModelView:
-   - src/components/model/ChannelModelView.tsx
-   Render:
-   - Card “Baseline Model”:
-     - formula (monospace)
-     - type, computedAt, timeframe
-     - fit: n, r2Approx, madResidual, notes
-     - tooltips:
-       - residual: “log_views - predicción; positivo = mejor de lo esperable”
-       - madResidual: “robust spread; menor = modelo más consistente”
-       - r2Approx: “aprox; no perfecto por robust regression”
-   - Tabla de coeficientes:
-     - name, value
-     - tooltip por predictor:
-       - logDaysSincePublish: “ajuste por edad del video”
-       - logDurationSec: “ajuste por duración”
-       - weekday_x: “efecto por día publicación”
-       - isShort: “efecto short <=60s”
-   - Mini sección “How to read” con bullets.
-
-C) Mejorar tabla/grilla de videos con hints
-En ProjectDetail (videos list):
-- Mostrar columnas:
-  - thumbnail, title, publishedAt
-  - percentile/residual (badge con color)
-  - viewsPerDay/engagementRate
-  - transcriptStatus/source
-  - cacheHit (full/partial/miss)
-- Tooltips:
-  - percentile: “ranking relativo dentro del subset”
-  - residual: “performance vs baseline”
-  - cacheHit: “si se reutilizó transcript/thumbnail/derived”
-  - transcriptStatus/source: “captions vs asr vs none”
-- En hover sobre thumbnail:
-  - mostrar mini popover con:
-    - ocrText (si existe)
-    - hasBigText
-    - archetype (si thumbnailFeatures.llm)
-  (usar Tooltip con content más ancho)
-
-D) “Evidence Fields” drill-down (MVP)
-- En Playbook/Templates, al click de un evidence_field:
-  - abrir un panel lateral o modal (simple) que:
-    - muestra el valor de ese field para cada supported_by videoId
-    - obtiene /projects/:projectId/videos/:videoId (o usa data ya cargada) y navega el JSON por path
-- Implementar helper:
-  - src/lib/getByPath.ts (path tipo "thumbnailFeatures.deterministic.textAreaRatio")
-- Esto hace el dashboard auditable sin ver JSON crudo.
-
-E) Manejo de fallbacks
-- Si playbook/templates/channel_models no existen o están vacíos:
-  - mostrar empty state con icon + texto + link para re-export
-- Si el JSON no coincide (schema future):
-  - render “Raw JSON” colapsable como fallback (solo en debug)
-  - pero default = semántico.
-
-F) Estilo Tailwind (mejoras globales)
-- Refinar layout en App.tsx:
-  - top nav sticky, container max-w-6xl, spacing consistente
-  - botones con variants (primary/secondary/ghost)
-  - typography: headings, muted text, code blocks monospace
-- Mejorar modal de export (AnalyzePage):
-  - progress bar + steps list + warnings panel
-  - tooltips en stages (qué significa cada stage)
-
-G) Tests (mínimo)
-- Unit tests de:
-  - getByPath
-  - Tooltip (render + aria-describedby)
-- Component tests básicos (si ya hay setup vitest/react-testing-library):
-  - PlaybookView renderiza insights y tooltips.
-  - ChannelModelView renderiza coeficientes.
-
-H) Docs
-- Update docs/REPO_MAP.md (si existe) y AI Context Pack:
-  - explicar nueva UI semántica
-  - mencionar fallback “Raw JSON” colapsable
-  - mencionar evidence drill-down
-
-Criterios de aceptación:
-- /projects/:projectId muestra Playbook/Templates/Model sin JSON dump por defecto
-- Todos los campos clave tienen tooltip/hint (hover + focus)
-- Evidence fields se pueden inspeccionar (al menos tooltip + drill-down MVP)
-- UI se ve consistente (Tailwind), responsive, y sin romper Analyze/export.
-- pnpm test pasa.
-
-Notas técnicas:
-- Mantener fetches eficientes: cargar playbook/templates/model solo cuando se abre su tab (lazy).
-- Evitar rerender pesado: memoizar parseos grandes.
-- No introducir librerías UI pesadas; Tooltip propio + Tailwind.
+Al finalizar implementa los fixes sugeridos en orden de prioridad

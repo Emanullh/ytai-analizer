@@ -488,7 +488,7 @@ async function callAutoGenTranscriptClassifier(args: {
   if (payload.segmentsSample.length === 0) {
     return {
       value: null,
-      warnings: ["AutoGen transcript classifier skipped: empty segmentsSample"]
+      warnings: []
     };
   }
 

@@ -499,6 +499,55 @@ function extractDomain(urlRaw: string): string | null {
   }
 }
 
+const THUMBNAIL_RESOLUTION_PRIORITY = ["maxres", "standard", "high", "medium", "default"] as const;
+const THUMBNAIL_FILENAME_FALLBACKS = [
+  "maxresdefault.jpg",
+  "sddefault.jpg",
+  "hqdefault.jpg",
+  "mqdefault.jpg",
+  "default.jpg"
+] as const;
+
+function pushUniqueThumbnailUrl(target: string[], seen: Set<string>, value: string | undefined): void {
+  if (!value || !value.trim()) {
+    return;
+  }
+
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return;
+    }
+    const normalized = parsed.toString();
+    if (seen.has(normalized)) {
+      return;
+    }
+    seen.add(normalized);
+    target.push(normalized);
+  } catch {
+    // Ignore malformed URLs and continue with other candidates.
+  }
+}
+
+function buildThumbnailCandidateUrls(args: {
+  videoId: string;
+  primaryUrl?: string;
+  thumbnails?: Partial<Record<"default" | "medium" | "high" | "standard" | "maxres", YoutubeThumbnail>>;
+}): string[] {
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+
+  pushUniqueThumbnailUrl(candidates, seen, args.primaryUrl);
+  for (const key of THUMBNAIL_RESOLUTION_PRIORITY) {
+    pushUniqueThumbnailUrl(candidates, seen, args.thumbnails?.[key]?.url);
+  }
+  for (const filename of THUMBNAIL_FILENAME_FALLBACKS) {
+    pushUniqueThumbnailUrl(candidates, seen, `https://i.ytimg.com/vi/${args.videoId}/${filename}`);
+  }
+
+  return candidates;
+}
+
 function logEvent(
   callbacks: ExportProgressCallbacks,
   input: {
@@ -1340,50 +1389,82 @@ export async function exportSelectedVideos(
               stage: "downloading_thumbnail"
             });
 
-            const thumbnailOriginalUrl = enrichedVideo?.thumbnailOriginalUrl || video.thumbnailUrl;
-            if (thumbnailOriginalUrl) {
-              const domain = extractDomain(thumbnailOriginalUrl);
+            const thumbnailCandidates = buildThumbnailCandidateUrls({
+              videoId: video.videoId,
+              primaryUrl: enrichedVideo?.thumbnailOriginalUrl || video.thumbnailUrl,
+              thumbnails: enrichedVideo?.thumbnails
+            });
+
+            if (thumbnailCandidates.length > 0) {
               logEvent(callbacks, {
                 scope: "youtube",
                 action: "thumbnail_download_start",
                 videoId: video.videoId,
                 stage: "downloading_thumbnail",
                 msg: "Downloading thumbnail",
-                data: { urlDomain: domain }
+                data: {
+                  urlDomain: extractDomain(thumbnailCandidates[0]),
+                  candidates: thumbnailCandidates.length
+                }
               });
-              try {
-                const image = await scheduler.run("http", () => dependencies.downloadToBuffer(thumbnailOriginalUrl, 12_000));
-                await scheduler.run("fs", () => fs.writeFile(thumbnailAbsolutePath, image));
-                logEvent(callbacks, {
-                  scope: "youtube",
-                  action: "thumbnail_download_done",
-                  videoId: video.videoId,
-                  stage: "downloading_thumbnail",
-                  msg: "Thumbnail downloaded",
-                  data: {
-                    urlDomain: domain,
-                    bytes: image.byteLength,
-                    ms: elapsedMs(thumbnailStartedAtMs),
-                    path: toRelativeExportPath(channelFolderPath, thumbnailAbsolutePath)
-                  }
-                });
-              } catch (error) {
+
+              let thumbnailDownloaded = false;
+              let lastDownloadError: unknown = null;
+              let selectedThumbnailUrl = thumbnailCandidates[0];
+              for (const candidateUrl of thumbnailCandidates) {
+                try {
+                  const image = await scheduler.run("http", () => dependencies.downloadToBuffer(candidateUrl, 8_000));
+                  await scheduler.run("fs", () => fs.writeFile(thumbnailAbsolutePath, image));
+                  selectedThumbnailUrl = candidateUrl;
+                  thumbnailDownloaded = true;
+                  logEvent(callbacks, {
+                    scope: "youtube",
+                    action: "thumbnail_download_done",
+                    videoId: video.videoId,
+                    stage: "downloading_thumbnail",
+                    msg: "Thumbnail downloaded",
+                    data: {
+                      urlDomain: extractDomain(candidateUrl),
+                      bytes: image.byteLength,
+                      ms: elapsedMs(thumbnailStartedAtMs),
+                      path: toRelativeExportPath(channelFolderPath, thumbnailAbsolutePath),
+                      attemptedUrls: thumbnailCandidates.length,
+                      selectedUrl: candidateUrl
+                    }
+                  });
+                  break;
+                } catch (error) {
+                  lastDownloadError = error;
+                }
+              }
+
+              if (!thumbnailDownloaded) {
+                const finalError = lastDownloadError instanceof Error ? lastDownloadError : new Error("unknown error");
                 logErrorAndWarn(callbacks, {
                   scope: "youtube",
                   action: "download_thumbnail",
                   stage: "downloading_thumbnail",
                   videoId: video.videoId,
-                  err: error,
+                  err: finalError,
                   msg: "Thumbnail download failed"
                 });
                 if (env.exportFailFast) {
-                  throw error;
+                  throw finalError;
                 }
-                const warning = `Thumbnail download failed for ${video.videoId}: ${
-                  error instanceof Error ? error.message : "unknown error"
-                }`;
+                const warning = `Thumbnail download failed for ${video.videoId}: ${finalError.message}`;
                 videoWarnings.push(warning);
                 addWarning(warning, video.videoId);
+              } else if (selectedThumbnailUrl !== thumbnailCandidates[0]) {
+                logEvent(callbacks, {
+                  scope: "youtube",
+                  action: "thumbnail_download_fallback_used",
+                  videoId: video.videoId,
+                  stage: "downloading_thumbnail",
+                  msg: "Thumbnail downloaded from fallback URL",
+                  data: {
+                    selectedUrl: selectedThumbnailUrl
+                  }
+                });
               }
             } else {
               const warning = `Missing thumbnail URL for ${video.videoId}`;
@@ -1460,160 +1541,167 @@ export async function exportSelectedVideos(
           const languageHint = toLanguageHint(resolveTranscriptLanguage(transcriptResult));
 
           if (cacheCheck.plan.needDerivedParts.thumbnailDeterministic || cacheCheck.plan.needDerivedParts.thumbnailLlm) {
-            const thumbnailFeaturesStartedAt = Date.now();
-            if (cacheCheck.plan.needDerivedParts.thumbnailDeterministic && env.thumbOcrEnabled) {
-              logEvent(callbacks, {
-                scope: "ocr",
-                action: "ocr_start",
-                videoId: video.videoId,
-                stage: "writing_json",
-                msg: "OCR started"
-              });
-            }
-            const thumbnailTaskStepId = cacheCheck.plan.needDerivedParts.thumbnailLlm
-              ? logEvent(callbacks, {
-                  scope: "autogen",
-                  action: "autogen_task_start",
-                  videoId: video.videoId,
-                  stage: "writing_json",
-                  msg: "AutoGen thumbnail task started",
-                  data: {
-                    taskName: "thumbnail",
-                    model: env.autoGenModelThumbnail,
-                    reasoningEffort: env.autoGenReasoningEffort,
-                    inputBytes: estimateSizeBytes({
-                      title: titleForFeatures,
-                      thumbnailLocalPath: thumbnailRelativePath
-                    })
-                  }
-                })
-              : null;
-            const thumbnailTaskType =
-              cacheCheck.plan.needDerivedParts.thumbnailLlm
-                ? "llm"
-                : cacheCheck.plan.needDerivedParts.thumbnailDeterministic && env.thumbOcrEnabled
-                  ? "ocr"
-                  : "fs";
-            try {
-              const derived = await scheduler.run(thumbnailTaskType, () =>
-                persistThumbnailFeaturesArtifact({
-                  exportsRoot,
-                  channelFolderPath,
-                  videoId: video.videoId,
-                  title: titleForFeatures,
-                  thumbnailAbsPath: thumbnailAbsolutePath,
-                  thumbnailLocalPath: thumbnailRelativePath,
-                  compute: {
-                    deterministic: cacheCheck.plan.needDerivedParts.thumbnailDeterministic,
-                    deterministicMode: cacheCheck.plan.needDerivedParts.thumbnailDeterministicMode,
-                    llm: cacheCheck.plan.needDerivedParts.thumbnailLlm
-                  },
-                  trace: thumbnailTaskStepId
-                    ? {
-                        onAutoGenWorkerRequestId: (workerRequestId) => {
-                          logEvent(callbacks, {
-                            scope: "autogen",
-                            action: "worker_request_map",
-                            videoId: video.videoId,
-                            stage: "writing_json",
-                            msg: "Mapped AutoGen worker request",
-                            data: {
-                              workerRequestId,
-                              stepId: thumbnailTaskStepId
-                            }
-                          });
-                        }
-                      }
-                    : undefined
-                })
-              );
-              derivedVideoFeaturesArtifactPath = derived.artifactAbsolutePath;
+            const thumbnailAccessibleForFeatures = await fileExists(thumbnailAbsolutePath);
+            if (!thumbnailAccessibleForFeatures) {
+              const warning = `Thumbnail features skipped for ${video.videoId}: thumbnail file is not accessible (${thumbnailAbsolutePath})`;
+              videoWarnings.push(warning);
+              addWarning(warning, video.videoId);
+            } else {
+              const thumbnailFeaturesStartedAt = Date.now();
               if (cacheCheck.plan.needDerivedParts.thumbnailDeterministic && env.thumbOcrEnabled) {
                 logEvent(callbacks, {
                   scope: "ocr",
-                  action: "ocr_done",
+                  action: "ocr_start",
                   videoId: video.videoId,
                   stage: "writing_json",
-                  msg: "OCR finished",
-                  data: {
-                    ocrWordCount:
-                      (derived.mergedBundle.thumbnailFeatures as { deterministic?: { ocrWordCount?: number } })?.deterministic
-                        ?.ocrWordCount ?? 0,
-                    textAreaRatio:
-                      (derived.mergedBundle.thumbnailFeatures as {
-                        deterministic?: { textAreaRatio?: number };
-                      })?.deterministic?.textAreaRatio ?? 0,
-                    ms: elapsedMs(thumbnailFeaturesStartedAt)
-                  }
+                  msg: "OCR started"
                 });
               }
-              if (thumbnailTaskStepId) {
-                logEvent(callbacks, {
-                  stepId: thumbnailTaskStepId,
-                  scope: "autogen",
-                  action: "autogen_task_done",
-                  videoId: video.videoId,
-                  stage: "writing_json",
-                  msg: "AutoGen thumbnail task finished",
-                  data: {
-                    taskName: "thumbnail",
-                    model: env.autoGenModelThumbnail,
-                    reasoningEffort: env.autoGenReasoningEffort,
-                    inputBytes: estimateSizeBytes({
-                      title: titleForFeatures,
-                      thumbnailLocalPath: thumbnailRelativePath
-                    }),
-                    outputBytes: estimateSizeBytes(derived.mergedBundle.thumbnailFeatures),
-                    ms: elapsedMs(thumbnailFeaturesStartedAt),
-                    ok: true
-                  }
-                });
-              }
-              markStageTiming("thumbnail_features", thumbnailFeaturesStartedAt);
+              const thumbnailTaskStepId = cacheCheck.plan.needDerivedParts.thumbnailLlm
+                ? logEvent(callbacks, {
+                    scope: "autogen",
+                    action: "autogen_task_start",
+                    videoId: video.videoId,
+                    stage: "writing_json",
+                    msg: "AutoGen thumbnail task started",
+                    data: {
+                      taskName: "thumbnail",
+                      model: env.autoGenModelThumbnail,
+                      reasoningEffort: env.autoGenReasoningEffort,
+                      inputBytes: estimateSizeBytes({
+                        title: titleForFeatures,
+                        thumbnailLocalPath: thumbnailRelativePath
+                      })
+                    }
+                  })
+                : null;
+              const thumbnailTaskType =
+                cacheCheck.plan.needDerivedParts.thumbnailLlm
+                  ? "llm"
+                  : cacheCheck.plan.needDerivedParts.thumbnailDeterministic && env.thumbOcrEnabled
+                    ? "ocr"
+                    : "fs";
+              try {
+                const derived = await scheduler.run(thumbnailTaskType, () =>
+                  persistThumbnailFeaturesArtifact({
+                    exportsRoot,
+                    channelFolderPath,
+                    videoId: video.videoId,
+                    title: titleForFeatures,
+                    thumbnailAbsPath: thumbnailAbsolutePath,
+                    thumbnailLocalPath: thumbnailRelativePath,
+                    compute: {
+                      deterministic: cacheCheck.plan.needDerivedParts.thumbnailDeterministic,
+                      deterministicMode: cacheCheck.plan.needDerivedParts.thumbnailDeterministicMode,
+                      llm: cacheCheck.plan.needDerivedParts.thumbnailLlm
+                    },
+                    trace: thumbnailTaskStepId
+                      ? {
+                          onAutoGenWorkerRequestId: (workerRequestId) => {
+                            logEvent(callbacks, {
+                              scope: "autogen",
+                              action: "worker_request_map",
+                              videoId: video.videoId,
+                              stage: "writing_json",
+                              msg: "Mapped AutoGen worker request",
+                              data: {
+                                workerRequestId,
+                                stepId: thumbnailTaskStepId
+                              }
+                            });
+                          }
+                        }
+                      : undefined
+                  })
+                );
+                derivedVideoFeaturesArtifactPath = derived.artifactAbsolutePath;
+                if (cacheCheck.plan.needDerivedParts.thumbnailDeterministic && env.thumbOcrEnabled) {
+                  logEvent(callbacks, {
+                    scope: "ocr",
+                    action: "ocr_done",
+                    videoId: video.videoId,
+                    stage: "writing_json",
+                    msg: "OCR finished",
+                    data: {
+                      ocrWordCount:
+                        (derived.mergedBundle.thumbnailFeatures as { deterministic?: { ocrWordCount?: number } })?.deterministic
+                          ?.ocrWordCount ?? 0,
+                      textAreaRatio:
+                        (derived.mergedBundle.thumbnailFeatures as {
+                          deterministic?: { textAreaRatio?: number };
+                        })?.deterministic?.textAreaRatio ?? 0,
+                      ms: elapsedMs(thumbnailFeaturesStartedAt)
+                    }
+                  });
+                }
+                if (thumbnailTaskStepId) {
+                  logEvent(callbacks, {
+                    stepId: thumbnailTaskStepId,
+                    scope: "autogen",
+                    action: "autogen_task_done",
+                    videoId: video.videoId,
+                    stage: "writing_json",
+                    msg: "AutoGen thumbnail task finished",
+                    data: {
+                      taskName: "thumbnail",
+                      model: env.autoGenModelThumbnail,
+                      reasoningEffort: env.autoGenReasoningEffort,
+                      inputBytes: estimateSizeBytes({
+                        title: titleForFeatures,
+                        thumbnailLocalPath: thumbnailRelativePath
+                      }),
+                      outputBytes: estimateSizeBytes(derived.mergedBundle.thumbnailFeatures),
+                      ms: elapsedMs(thumbnailFeaturesStartedAt),
+                      ok: true
+                    }
+                  });
+                }
+                markStageTiming("thumbnail_features", thumbnailFeaturesStartedAt);
 
-              for (const warning of derived.warnings) {
+                for (const warning of derived.warnings) {
+                  videoWarnings.push(warning);
+                  addWarning(warning, video.videoId);
+                }
+              } catch (error) {
+                logErrorAndWarn(callbacks, {
+                  scope: "ocr",
+                  action: "thumbnail_features",
+                  stage: "writing_json",
+                  videoId: video.videoId,
+                  err: error,
+                  msg: "Thumbnail features generation failed"
+                });
+                if (env.exportFailFast) {
+                  throw error;
+                }
+                if (thumbnailTaskStepId) {
+                  logEvent(callbacks, {
+                    stepId: thumbnailTaskStepId,
+                    scope: "autogen",
+                    action: "autogen_task_done",
+                    videoId: video.videoId,
+                    stage: "writing_json",
+                    msg: "AutoGen thumbnail task failed",
+                    data: {
+                      taskName: "thumbnail",
+                      model: env.autoGenModelThumbnail,
+                      reasoningEffort: env.autoGenReasoningEffort,
+                      inputBytes: estimateSizeBytes({
+                        title: titleForFeatures,
+                        thumbnailLocalPath: thumbnailRelativePath
+                      }),
+                      outputBytes: 0,
+                      ms: elapsedMs(thumbnailFeaturesStartedAt),
+                      ok: false
+                    }
+                  });
+                }
+                const warning = `Thumbnail features generation failed for ${video.videoId}: ${
+                  error instanceof Error ? error.message : "unknown error"
+                }`;
                 videoWarnings.push(warning);
                 addWarning(warning, video.videoId);
               }
-            } catch (error) {
-              logErrorAndWarn(callbacks, {
-                scope: "ocr",
-                action: "thumbnail_features",
-                stage: "writing_json",
-                videoId: video.videoId,
-                err: error,
-                msg: "Thumbnail features generation failed"
-              });
-              if (env.exportFailFast) {
-                throw error;
-              }
-              if (thumbnailTaskStepId) {
-                logEvent(callbacks, {
-                  stepId: thumbnailTaskStepId,
-                  scope: "autogen",
-                  action: "autogen_task_done",
-                  videoId: video.videoId,
-                  stage: "writing_json",
-                  msg: "AutoGen thumbnail task failed",
-                  data: {
-                    taskName: "thumbnail",
-                    model: env.autoGenModelThumbnail,
-                    reasoningEffort: env.autoGenReasoningEffort,
-                    inputBytes: estimateSizeBytes({
-                      title: titleForFeatures,
-                      thumbnailLocalPath: thumbnailRelativePath
-                    }),
-                    outputBytes: 0,
-                    ms: elapsedMs(thumbnailFeaturesStartedAt),
-                    ok: false
-                  }
-                });
-              }
-              const warning = `Thumbnail features generation failed for ${video.videoId}: ${
-                error instanceof Error ? error.message : "unknown error"
-              }`;
-              videoWarnings.push(warning);
-              addWarning(warning, video.videoId);
             }
           }
 

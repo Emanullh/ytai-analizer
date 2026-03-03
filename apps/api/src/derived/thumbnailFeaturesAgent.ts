@@ -40,6 +40,7 @@ const DETERMINISTIC_SIGNAL_FIELDS = new Set([
   "imageWidth",
   "imageHeight",
   "aspectRatio",
+  "ocrText",
   "ocrConfidenceMean",
   "ocrCharCount",
   "ocrWordCount",
@@ -53,6 +54,7 @@ const DETERMINISTIC_SIGNAL_FIELDS = new Set([
   "hasBigText"
 ]);
 const DETERMINISTIC_SIGNAL_PREFIXES = ["ocrSummary.", "imageStats.", "statsSummary.", "thumbMeta.", "deterministic."] as const;
+const SOFT_IGNORED_SIGNAL_FIELDS = new Set(["layout"]);
 
 type ArchetypeLabel = (typeof ARCHETYPE_LABELS)[number];
 type FaceCountBucket = (typeof FACE_COUNT_BUCKETS)[number];
@@ -665,6 +667,9 @@ function normalizeEvidenceSignals(raw: unknown, warnings: string[]): ThumbnailEv
       }
       const resolvedFieldName = resolveDeterministicSignalField(fieldName);
       if (!resolvedFieldName) {
+        if (SOFT_IGNORED_SIGNAL_FIELDS.has(fieldName.toLowerCase())) {
+          return null;
+        }
         warnings.push(`Discarded evidence signal '${fieldName}': unknown deterministic field`);
         return null;
       }
