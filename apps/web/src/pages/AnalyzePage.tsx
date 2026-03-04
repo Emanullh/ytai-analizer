@@ -348,8 +348,13 @@ export default function AnalyzePage() {
       ) : null}
 
       {exportModalState.isOpen ? (
-        <div className="fixed inset-x-3 bottom-3 z-50 mx-auto w-full max-w-2xl sm:inset-x-6 sm:bottom-6" role="dialog" aria-modal="false" aria-label="Progreso de exportación">
-          <section className="panel p-4 shadow-2xl shadow-slate-900/20">
+        <div
+          className="fixed inset-x-3 bottom-3 z-50 mx-auto flex max-h-[calc(100dvh-1.5rem)] w-full max-w-2xl sm:inset-x-6 sm:bottom-6 sm:max-h-[calc(100dvh-3rem)]"
+          role="dialog"
+          aria-modal="false"
+          aria-label="Progreso de exportación"
+        >
+          <section className="panel flex min-h-0 w-full flex-col overflow-hidden p-4 shadow-2xl shadow-slate-900/20">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="text-base font-semibold text-slate-900">Progreso de export</h3>
               <button
@@ -362,7 +367,7 @@ export default function AnalyzePage() {
               </button>
             </div>
 
-            <div className="mt-3 grid gap-3">
+            <div className="mt-3 grid min-h-0 gap-3 overflow-y-auto pr-1">
               {exportModalState.status === "starting" ? <p className="text-sm text-slate-600">Preparando export...</p> : null}
               <p className="text-sm text-slate-700">
                 General: <span className="font-semibold">{exportModalState.completed}</span>/{exportModalState.total}
@@ -405,7 +410,7 @@ export default function AnalyzePage() {
               {exportModalState.warnings.length ? (
                 <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
                   <p className="font-semibold">Warnings</p>
-                  <ul className="mt-2 list-disc space-y-1 pl-5">
+                  <ul className="mt-2 max-h-40 list-disc space-y-1 overflow-y-auto pl-5">
                     {exportModalState.warnings.map((warning, index) => (
                       <li key={`${warning}-${index}`}>{warning}</li>
                     ))}

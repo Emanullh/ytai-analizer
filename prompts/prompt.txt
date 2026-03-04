@@ -1,27 +1,4 @@
-Tarea: Investigar porque sucedieron estos warnings para el proyecto Modern_MBA y que posible soluciones hay, utliza el mejor modelo de codex para esto
+Tarea: Corregir el modal de muestra el progreso
 
 Contexto:
-Warnings
-
-Thumbnail download failed for niQ7mk13xew: Timeout while downloading: https://i.ytimg.com/vi/niQ7mk13xew/maxresdefault.jpg
-Discarded evidence signal 'ocrSummary.ocrText': unknown deterministic field
-Embeddings similarity failed: This model's maximum context length is 8192 tokens, however you requested 10978 tokens (10978 in your prompt; 0 for the completion). Please reduce your prompt; or completion length.
-Thumbnail download failed for Gi1GDBEp1yA: Timeout while downloading: https://i.ytimg.com/vi/Gi1GDBEp1yA/maxresdefault.jpg
-Embeddings similarity failed: fetch failed
-Thumbnail deterministic stats failed: cannot access file /Users/jenhde/Desktop/proyecto-ytai/ytai-analizer/apps/api/exports/Modern_MBA/thumbnails/niQ7mk13xew.jpg (ENOENT: no such file or directory, stat '/Users/jenhde/Desktop/proyecto-ytai/ytai-analizer/apps/api/exports/Modern_MBA/thumbnails/niQ7mk13xew.jpg')
-AutoGen thumbnail classifier skipped: thumbnail file is not accessible (/Users/jenhde/Desktop/proyecto-ytai/ytai-analizer/apps/api/exports/Modern_MBA/thumbnails/niQ7mk13xew.jpg)
-Embeddings similarity failed: This model's maximum context length is 8192 tokens, however you requested 11300 tokens (11300 in your prompt; 0 for the completion). Please reduce your prompt; or completion length.
-Thumbnail deterministic stats failed: cannot access file /Users/jenhde/Desktop/proyecto-ytai/ytai-analizer/apps/api/exports/Modern_MBA/thumbnails/Gi1GDBEp1yA.jpg (ENOENT: no such file or directory, stat '/Users/jenhde/Desktop/proyecto-ytai/ytai-analizer/apps/api/exports/Modern_MBA/thumbnails/Gi1GDBEp1yA.jpg')
-AutoGen thumbnail classifier skipped: thumbnail file is not accessible (/Users/jenhde/Desktop/proyecto-ytai/ytai-analizer/apps/api/exports/Modern_MBA/thumbnails/Gi1GDBEp1yA.jpg)
-Embeddings similarity failed: This model's maximum context length is 8192 tokens, however you requested 10024 tokens (10024 in your prompt; 0 for the completion). Please reduce your prompt; or completion length.
-Embeddings similarity failed: This model's maximum context length is 8192 tokens, however you requested 10265 tokens (10265 in your prompt; 0 for the completion). Please reduce your prompt; or completion length.
-Transcript unavailable for video eQ3LSNXwZ2Y (captions missing/disabled) | Local ASR fallback failed for video eQ3LSNXwZ2Y: Local ASR timeout after 900s
-Embeddings similarity skipped: transcript is empty
-Early 30s coverage used char-based fallback: transcript segments have no timestamps
-WPM metrics set to null: transcript segments have no timestamps
-Promise delivery score skipped: missing title or first 30s transcript text
-AutoGen transcript classifier skipped: empty segmentsSample
-
-Lee todo el contexto de logs y warnings en /Users/jenhde/Desktop/proyecto-ytai/ytai-analizer/apps/api/exports/ColdFusion
-
-Al finalizar implementa los fixes sugeridos en orden de prioridad
+Corregir el modal de muestra el progreso ya que al mostrar muchos warnings o contenido este modal sobrepasa el alto del navegador
