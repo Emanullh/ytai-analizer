@@ -9,8 +9,11 @@
   },
   "scripts": {
     "dev": "concurrently -n api,web -c yellow,cyan \"pnpm -C apps/api dev\" \"pnpm -C apps/web dev\"",
-    "build": "pnpm -r --filter './apps/*' run build",
-    "test": "pnpm -r --filter './apps/*' --if-present run test",
+    "build": "pnpm -r --filter \"./apps/*\" run build",
+    "test": "pnpm run test:api && pnpm run test:web",
+    "test:api": "pnpm -C apps/api test",
+    "test:web": "pnpm -C apps/web test",
+    "test:fix:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fix_test_permissions.ps1",
     "python:setup": "node scripts/setup_asr.mjs",
     "python:check": "node scripts/check_asr.mjs",
     "asr:setup": "pnpm python:setup",

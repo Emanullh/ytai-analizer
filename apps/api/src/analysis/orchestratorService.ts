@@ -215,7 +215,6 @@ function validateLlmArtifacts(input: {
     return { ok: false, warning: "LLM output invalid: templates.schemaVersion must be derived.templates.v1" };
   }
 
-  const sanitizeWarnings: string[] = [];
   const evidenceItems: PlaybookInsightLike[] = [];
   collectEvidenceItems(input.playbook, evidenceItems);
   collectEvidenceItems(input.templates, evidenceItems);
@@ -223,22 +222,26 @@ function validateLlmArtifacts(input: {
   const videoIds = new Set(input.rows.map((row) => row.videoId));
   for (const item of evidenceItems) {
     if (Object.prototype.hasOwnProperty.call(item, "supported_by")) {
-      const { sanitized, stripped } = sanitizeSupportedBy(item.supported_by, videoIds);
+      const { stripped } = sanitizeSupportedBy(item.supported_by, videoIds);
       if (stripped.length > 0) {
-        sanitizeWarnings.push(`Stripped unknown videoIds from supported_by: ${stripped.join(", ")}`);
+        return {
+          ok: false,
+          warning: `LLM output invalid: supported_by contains unknown videoId(s): ${stripped.join(", ")}`
+        };
       }
-      item.supported_by = sanitized;
     }
     if (Object.prototype.hasOwnProperty.call(item, "evidence_fields")) {
-      const { sanitized, stripped } = sanitizeEvidenceFields(item.evidence_fields, input.rows);
+      const { stripped } = sanitizeEvidenceFields(item.evidence_fields, input.rows);
       if (stripped.length > 0) {
-        sanitizeWarnings.push(`Stripped unknown evidence_fields paths: ${stripped.join(", ")}`);
+        return {
+          ok: false,
+          warning: `LLM output invalid: evidence_fields contains unknown path(s): ${stripped.join(", ")}`
+        };
       }
-      item.evidence_fields = sanitized;
     }
   }
 
-  return { ok: true, warnings: sanitizeWarnings };
+  return { ok: true, warnings: [] };
 }
 
 function toFallbackPlaybook(args: {

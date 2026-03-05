@@ -9,7 +9,7 @@ afterEach(() => {
 });
 
 describe("Tooltip", () => {
-  it("renders with aria-describedby and tooltip role", () => {
+  it("renders with aria-describedby and opens on focus", () => {
     render(
       <Tooltip content="Definicion">
         <button type="button">Campo</button>
@@ -18,6 +18,10 @@ describe("Tooltip", () => {
 
     const trigger = screen.getByRole("button", { name: "Campo" }).parentElement;
     expect(trigger).toHaveAttribute("aria-describedby");
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+
+    const button = screen.getByRole("button", { name: "Campo" });
+    fireEvent.focus(button);
     expect(screen.getByRole("tooltip")).toHaveTextContent("Definicion");
   });
 
@@ -29,12 +33,12 @@ describe("Tooltip", () => {
     );
 
     const trigger = screen.getByRole("button", { name: "Hover me" }).parentElement as HTMLElement;
-    const tooltip = screen.getByRole("tooltip");
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
 
     fireEvent.mouseEnter(trigger);
-    expect(tooltip.className).toContain("visible");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Hint");
 
     fireEvent.keyDown(trigger, { key: "Escape" });
-    expect(tooltip.className).toContain("invisible");
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   });
 });
