@@ -33,7 +33,6 @@ import {
   type ChannelModelSummary,
   type VideoPerformanceFeatures
 } from "../derived/performanceNormalization.js";
-import { runOrchestrator } from "../analysis/orchestratorService.js";
 import {
   buildCacheEntry,
   checkVideoCache,
@@ -2334,115 +2333,12 @@ export async function exportSelectedVideos(
         percent: 98
       });
     }
-    const orchestratorStartedAt = Date.now();
-    const orchestratorTaskStepId = logEvent(callbacks, {
+    logEvent(callbacks, {
       scope: "orchestrator",
-      action: "orchestrator_start",
-      msg: "Channel orchestrator started"
+      action: "orchestrator_skipped",
+      msg: "Channel orchestrator skipped during export (manual trigger only)"
     });
-    const autogenOrchestratorStepId = logEvent(callbacks, {
-      scope: "autogen",
-      action: "autogen_task_start",
-      msg: "AutoGen orchestrator task started",
-      data: {
-        taskName: "orchestrator",
-        model: env.autoGenModelOrchestrator,
-        reasoningEffort: env.autoGenReasoningEffortOrchestrator,
-        inputBytes: estimateSizeBytes({
-          channelId: request.channelId,
-          timeframe: request.timeframe,
-          selectedVideos: processedVideos.length
-        })
-      }
-    });
-    try {
-      const orchestratorResult = await scheduler.run("llm", () =>
-        runOrchestrator({
-          exportRoot: exportsRoot,
-          channelId: request.channelId,
-          channelName: request.channelName,
-          timeframe: request.timeframe,
-          jobId,
-          onAutoGenWorkerRequestId: (workerRequestId) => {
-            logEvent(callbacks, {
-              scope: "autogen",
-              action: "worker_request_map",
-              msg: "Mapped AutoGen worker request",
-              data: {
-                workerRequestId,
-                stepId: autogenOrchestratorStepId
-              }
-            });
-          }
-        })
-      );
-      orchestratorArtifactPaths = orchestratorResult.artifactPaths;
-      logEvent(callbacks, {
-        stepId: orchestratorTaskStepId,
-        scope: "orchestrator",
-        action: "orchestrator_done",
-        msg: "Channel orchestrator finished",
-        data: {
-          usedLlm: orchestratorResult.usedLlm,
-          artifacts: orchestratorResult.artifactPaths.map((artifactPath) =>
-            toRelativeExportPath(channelFolderPath, artifactPath)
-          ),
-          ms: elapsedMs(orchestratorStartedAt)
-        }
-      });
-      logEvent(callbacks, {
-        stepId: autogenOrchestratorStepId,
-        scope: "autogen",
-        action: "autogen_task_done",
-        msg: "AutoGen orchestrator task finished",
-        data: {
-          taskName: "orchestrator",
-          model: env.autoGenModelOrchestrator,
-          reasoningEffort: env.autoGenReasoningEffortOrchestrator,
-          inputBytes: estimateSizeBytes({
-            channelId: request.channelId,
-            timeframe: request.timeframe,
-            selectedVideos: processedVideos.length
-          }),
-          outputBytes: estimateSizeBytes(orchestratorResult.artifactPaths),
-          ms: elapsedMs(orchestratorStartedAt),
-          ok: orchestratorResult.usedLlm
-        }
-      });
-      for (const warning of orchestratorResult.warnings) {
-        addWarning(warning);
-      }
-    } catch (error) {
-      logErrorAndWarn(callbacks, {
-        scope: "orchestrator",
-        action: "orchestrator_run",
-        err: error,
-        msg: "Channel orchestrator failed"
-      });
-      logEvent(callbacks, {
-        stepId: autogenOrchestratorStepId,
-        scope: "autogen",
-        action: "autogen_task_done",
-        msg: "AutoGen orchestrator task failed",
-        data: {
-          taskName: "orchestrator",
-          model: env.autoGenModelOrchestrator,
-          reasoningEffort: env.autoGenReasoningEffortOrchestrator,
-          inputBytes: estimateSizeBytes({
-            channelId: request.channelId,
-            timeframe: request.timeframe,
-            selectedVideos: processedVideos.length
-          }),
-          outputBytes: 0,
-          ms: elapsedMs(orchestratorStartedAt),
-          ok: false
-        }
-      });
-      addWarning(`Channel orchestrator failed: ${error instanceof Error ? error.message : "unknown error"}`);
-      if (env.exportFailFast) {
-        throw error;
-      }
-    }
+    addWarning("Channel orchestrator skipped during export; run it manually from the Projects tab if needed.");
     for (const item of processedVideos) {
       callbacks.onVideoProgress?.({
         videoId: item.videoId,

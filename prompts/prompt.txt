@@ -1,4 +1,7 @@
-Tarea: Corregir el modal de muestra el progreso
+Tarea: Channel Orchestrator Manual
 
 Contexto:
-Corregir el modal de muestra el progreso ya que al mostrar muchos warnings o contenido este modal sobrepasa el alto del navegador
+AL momento de hacer el export evitar el ultimo paso que es:
+task == "channel_orchestrator_v1":
+        return await classify_channel_orchestrator(request)
+Ese paso se hace manual con un boton dentro del tab de proyectos, solo se hara si es necesario
