@@ -1,27 +1,25 @@
 # DATA CONTRACTS — ytai-analizer
 
-Fuente de verdad: `apps/api/src/server.ts`, `apps/api/src/types.ts`, `apps/api/src/services/exportJobService.ts`, `apps/api/src/services/exportService.ts`, `apps/api/src/services/projectsService.ts`, `apps/web/src/types.ts`.
+Fuente de verdad: `apps/api/src/server.ts`, `apps/api/src/types.ts`, `apps/api/src/services/exportJobService.ts`, `apps/api/src/services/exportService.ts`, `apps/api/src/services/projectsService.ts`, `apps/api/src/services/exportBundleService.ts`, `apps/web/src/types.ts`.
 
-## 1) Runtime base
+## 1) Runtime y base URL
 
-- API local: `http://localhost:3001`
-- Web dev proxy: `/api/*` -> `http://localhost:3001/*` (`apps/web/vite.config.ts`)
+- API dev: `http://localhost:3001`
+- Web usa proxy Vite: `/api/*` -> `http://localhost:3001/*` (`apps/web/vite.config.ts`)
 
-## 2) HTTP endpoints
+## 2) HTTP Endpoints
 
 ## 2.1 `GET /health`
 
 Response `200`:
 
 ```json
-{
-  "ok": true
-}
+{ "ok": true }
 ```
 
 ## 2.2 `POST /analyze`
 
-Request body:
+Request:
 
 ```json
 {
@@ -32,8 +30,8 @@ Request body:
 
 Validación:
 
-- `sourceInput`: `string` no vacío
-- `timeframe`: enum `1m | 6m | 1y`
+- `sourceInput`: string no vacío
+- `timeframe`: `"1m" | "6m" | "1y"`
 
 Response `200` (`AnalyzeResult`):
 
@@ -47,23 +45,18 @@ Response `200` (`AnalyzeResult`):
   "videos": [
     {
       "videoId": "abc123",
-      "title": "Video title",
-      "publishedAt": "2026-01-01T00:00:00.000Z",
+      "title": "Video",
+      "publishedAt": "2026-02-01T00:00:00.000Z",
       "viewCount": 12345,
-      "thumbnailUrl": "https://...jpg"
+      "thumbnailUrl": "https://..."
     }
   ]
 }
 ```
 
-Errores típicos:
+## 2.3 `POST /export`
 
-- `400`: body inválido
-- `500`: falta `YOUTUBE_API_KEY`
-
-## 2.3 `POST /export` (sincrónico)
-
-Request body:
+Request:
 
 ```json
 {
@@ -78,9 +71,9 @@ Request body:
 Validación:
 
 - `channelId`: regex `^UC[\w-]{22}$`
-- `channelName`: `string` no vacío
-- `sourceInput`: `string` no vacío
-- `timeframe`: enum `1m | 6m | 1y`
+- `channelName`: string no vacío
+- `sourceInput`: string no vacío
+- `timeframe`: `"1m" | "6m" | "1y"`
 - `selectedVideoIds`: array no vacío de strings no vacíos
 
 Response `200`:
@@ -93,21 +86,19 @@ Response `200`:
 }
 ```
 
-## 2.4 `POST /export/jobs` (async)
+## 2.4 `POST /export/jobs`
 
-Mismo body que `/export`.
+Request: mismo body de `POST /export`.
 
 Response `200`:
 
 ```json
-{
-  "jobId": "uuid-v4"
-}
+{ "jobId": "uuid-v4" }
 ```
 
 ## 2.5 `GET /export/jobs/:jobId`
 
-Params:
+Validación params:
 
 - `jobId`: UUID válido
 
@@ -141,10 +132,10 @@ Headers:
 
 Comportamiento:
 
-- stream de historial + eventos nuevos
-- cierre automático en `job_done` o `job_failed`
+- Reproduce historial del job y luego eventos live.
+- Cierra stream en `job_done` o `job_failed`.
 
-Formato wire:
+Wire format:
 
 ```text
 event: <event_name>
@@ -152,128 +143,90 @@ data: <json>
 
 ```
 
-## 2.7 `GET /projects`
+## 2.7 `POST /export/rerun-orchestrator`
 
-Lista proyectos detectados en `exports/*`.
-
-Response `200` (`ProjectsListItem[]`):
+Request:
 
 ```json
-[
-  {
-    "projectId": "Canal_Demo",
-    "channelId": "UC1234567890123456789012",
-    "channelName": "Canal Demo",
-    "exportVersion": "1.1",
-    "lastExportedAt": "2026-03-01T12:00:00.000Z",
-    "lastJobId": "uuid-v4",
-    "counts": {
-      "totalVideosSelected": 2,
-      "transcriptsOk": 1,
-      "transcriptsMissing": 1,
-      "transcriptsError": 0,
-      "thumbnailsOk": 2,
-      "thumbnailsFailed": 0
-    },
-    "warningsCount": 1,
-    "status": "partial",
-    "warnings": []
-  }
-]
+{ "channelName": "Canal Demo" }
 ```
 
-`status`: `ok | partial | failed | unknown`
+Prerequisitos (si faltan, responde `409`):
 
-## 2.8 `GET /projects/:projectId`
+- `exports/<channelFolder>/channel.json`
+- `exports/<channelFolder>/raw/videos.jsonl`
+- `exports/<channelFolder>/derived/video_features/*.json` (al menos 1)
 
-Params:
-
-- `projectId`: nombre de carpeta de proyecto (`exports/<projectId>`)
-
-Response `200` (`ProjectDetailResponse`):
+Response `200`:
 
 ```json
 {
-  "projectId": "Canal_Demo",
-  "channel": {
-    "channelId": "UC1234567890123456789012",
-    "channelName": "Canal Demo",
-    "sourceInput": "https://www.youtube.com/@demo",
-    "timeframe": "6m",
-    "exportedAt": "2026-03-01T12:00:00.000Z",
-    "timeframeResolved": {
-      "publishedAfter": "2025-09-01T00:00:00.000Z",
-      "publishedBefore": "2026-03-01T00:00:00.000Z"
-    }
-  },
-  "manifest": {},
-  "latestJob": {
-    "jobId": "uuid-v4",
-    "status": "done",
-    "startedAt": "2026-03-01T11:58:00.000Z",
-    "finishedAt": "2026-03-01T12:00:00.000Z",
-    "durationMs": 120000,
-    "warningsCount": 0,
-    "errorsCount": 0
-  },
-  "jobs": [
-    {
-      "jobId": "uuid-v4",
-      "status": "done",
-      "startedAt": "2026-03-01T11:58:00.000Z",
-      "finishedAt": "2026-03-01T12:00:00.000Z",
-      "durationMs": 120000,
-      "warningsCount": 0,
-      "errorsCount": 0,
-      "summaryPath": "logs/job_<id>.summary.json",
-      "eventsPath": "logs/job_<id>.events.jsonl",
-      "errorsPath": "logs/job_<id>.errors.jsonl",
-      "debugBundlePath": null
-    }
-  ],
-  "artifacts": {
-    "playbook": "analysis/playbook.json",
-    "templates": "derived/templates.json",
-    "channelModels": "derived/channel_models.json"
-  },
-  "warnings": []
+  "ok": true,
+  "exportPath": "/abs/path/exports/Canal_Demo",
+  "warnings": [],
+  "usedLlm": true,
+  "artifactPaths": ["/abs/path/exports/Canal_Demo/analysis/orchestrator_input.json"]
 }
 ```
 
-## 2.9 `GET /projects/:projectId/videos`
+Error `409`:
+
+```json
+{
+  "error": "Cannot re-run orchestrator: missing prerequisites: ...",
+  "checks": [
+    { "artifact": "channel.json", "exists": true, "detail": "optional" }
+  ]
+}
+```
+
+## 2.8 `GET /projects`
+
+Response `200` (`ProjectsListItem[]`):
+
+- `projectId`
+- `channelId | null`
+- `channelName | null`
+- `exportVersion | null`
+- `lastExportedAt | null`
+- `lastJobId | null`
+- `counts`: `{ totalVideosSelected, transcriptsOk, transcriptsMissing, transcriptsError, thumbnailsOk, thumbnailsFailed }`
+- `warningsCount`
+- `status`: `ok | partial | failed | unknown`
+- `warnings: string[]`
+
+## 2.9 `GET /projects/:projectId`
+
+Validación params:
+
+- `projectId` sin `/`, `\\`, `..`, ni path absoluto
+
+Response `200` (`ProjectDetailResponse`):
+
+- `projectId`
+- `channel`: metadata del canal
+- `manifest`: objeto manifest o `null`
+- `latestJob`: resumen último job o `null`
+- `jobs[]`: incluye rutas relativas de logs (`summaryPath`, `eventsPath`, `errorsPath`, `debugBundlePath`)
+- `artifacts`: `{ playbook, templates, channelModels }` con path relativo o `null`
+- `warnings: string[]`
+
+## 2.10 `GET /projects/:projectId/videos`
 
 Response `200` (`ProjectVideoSummaryItem[]`):
 
-```json
-[
-  {
-    "videoId": "abc123",
-    "title": "Video title",
-    "publishedAt": "2026-01-01T00:00:00.000Z",
-    "thumbnailPath": "thumbnails/abc123.jpg",
-    "transcriptStatus": "ok",
-    "transcriptSource": "captions",
-    "performance": {
-      "viewsPerDay": 1200,
-      "engagementRate": 0.08,
-      "residual": 0.35,
-      "percentile": 0.91
-    },
-    "hasLLM": {
-      "description": true,
-      "transcript": false,
-      "thumbnail": true
-    },
-    "cacheHit": "full"
-  }
-]
-```
+- `videoId`, `title`, `publishedAt`, `thumbnailPath`
+- `transcriptStatus`: `ok | missing | error`
+- `transcriptSource`: `captions | asr | none`
+- `performance`: `{ viewsPerDay, engagementRate, residual, percentile } | null`
+- `hasLLM`: `{ description, transcript, thumbnail }`
+- `cacheHit`: `full | partial | miss | unknown | null`
 
-## 2.10 `GET /projects/:projectId/videos/:videoId`
+## 2.11 `GET /projects/:projectId/videos/:videoId`
 
-Query params opcionales:
+Query opcional:
 
-- `maxSegments`: int `1..2000` (default efectivo `200`)
+- `maxSegments`: int `1..2000` (default interno `200`)
 - `truncateChars`: int `1..10000`
 
 Response `200`:
@@ -290,274 +243,68 @@ Response `200`:
 }
 ```
 
-## 2.11 `GET /projects/:projectId/artifacts/playbook`
+## 2.12 Artifacts JSON
 
-Response `200`: JSON de `analysis/playbook.json`.
+- `GET /projects/:projectId/artifacts/playbook`
+- `GET /projects/:projectId/artifacts/templates`
+- `GET /projects/:projectId/artifacts/channel_models`
 
-## 2.12 `GET /projects/:projectId/artifacts/templates`
+Response: JSON del artifact solicitado. `404` si no existe.
 
-Response `200`: JSON de `derived/templates.json`.
+## 2.13 Thumbnail proxy
 
-## 2.13 `GET /projects/:projectId/artifacts/channel_models`
-
-Response `200`: JSON de `derived/channel_models.json`.
-
-## 2.14 `GET /projects/:projectId/thumb/:videoId`
-
-Response `200`:
+`GET /projects/:projectId/thumb/:videoId`
 
 - `Content-Type: image/jpeg`
-- stream del archivo `thumbnails/<videoId>.jpg`
 - `Cache-Control: public, max-age=3600, immutable`
 
-## 2.15 `GET /projects/:projectId/bundle/meta`
+## 2.14 Bundle meta
 
-Query params opcionales:
+`GET /projects/:projectId/bundle/meta?export=latest|<jobId>`
 
-- `export`: `latest` o `jobId` específico
+Response `200` (`ProjectBundleMetaResponse`):
 
-Response `200`:
+- `projectId`, `channelId`, `exportJobId`, `exportedAt`, `timeframe`, `timeframeResolved`
+- `rawVideosMode`: `full | extract | missing`
+- `rawVideosEntryPath`: `raw/videos.jsonl | raw/videos.extract.jsonl | null`
+- `exemplarVideoIds: string[]`
+- `includedFiles[]`: `{ path, sizeBytes, source }`
+- `missingFiles[]`: `{ path, reason }`
+- `estimatedSizeBytes`, `estimatedSizeMb`
+- `confirmationThresholdMb`, `confirmationRequired`
+- `availableSuccessfulExportJobIds: string[]`
 
-```json
-{
-  "projectId": "Canal_Demo",
-  "channelId": "UC1234567890123456789012",
-  "exportJobId": "job-a1",
-  "rawVideosMode": "full",
-  "estimatedSizeBytes": 123456,
-  "estimatedSizeMb": 0.12,
-  "confirmationThresholdMb": 80,
-  "confirmationRequired": false,
-  "includedFiles": [],
-  "missingFiles": [],
-  "availableSuccessfulExportJobIds": ["job-a1"]
-}
-```
+## 2.15 Bundle download
 
-## 2.16 `GET /projects/:projectId/bundle`
-
-Query params opcionales:
-
-- `export`: `latest` o `jobId` específico
+- `GET /projects/:projectId/bundle?export=latest|<jobId>`
+- `GET /projects/:projectId/exports/:exportJobId/bundle`
 
 Response `200`:
 
 - `Content-Type: application/zip`
-- Descarga bundle cross-channel con:
-  - `bundle.json`
-  - `analysis/orchestrator_input.json` (obligatorio)
-  - `primary/channel.json`
-  - `primary/manifest.json`
-  - `raw/channel.json`
-  - `raw/videos.jsonl` o `raw/videos.extract.jsonl`
-  - `derived/video_features/<videoId>.json` (solo exemplars)
-  - `notes/missing_files.json` (si aplica)
+- `Content-Disposition: attachment; filename="bundle_<...>.zip"`
 
-Alias explícito por job:
+Entradas del zip:
 
-- `GET /projects/:projectId/exports/:exportJobId/bundle`
+- `bundle.json`
+- `analysis/orchestrator_input.json` (required)
+- `primary/channel.json` (si existe)
+- `primary/manifest.json` (si existe)
+- `raw/channel.json` (si existe)
+- `raw/videos.jsonl` o `raw/videos.extract.jsonl`
+- `derived/video_features/<videoId>.json` (solo exemplars)
+- `notes/missing_files.json` (si faltan archivos opcionales)
 
-## 3) SSE events
+## 3) SSE Contract
 
-Todos definidos en `apps/api/src/services/exportJobService.ts` y `apps/web/src/types.ts`.
+Eventos (`ExportJobEvent`) y payload:
 
-## 3.1 `job_started`
-
-```json
-{ "total": 10 }
-```
-
-## 3.2 `video_progress`
-
-```json
-{ "videoId": "abc123", "stage": "transcribing", "percent": 40 }
-```
-
-## 3.3 `job_progress`
-
-```json
-{ "completed": 4, "total": 10 }
-```
-
-## 3.4 `warning`
-
-```json
-{ "videoId": "abc123", "message": "warning text" }
-```
-
-`videoId` es opcional.
-
-## 3.5 `job_done`
-
-```json
-{ "exportPath": "/abs/path/exports/Canal_Demo" }
-```
-
-## 3.6 `job_failed`
-
-```json
-{ "message": "error text" }
-```
-
-## 4) Export filesystem contracts
-
-Root de salida: `exports/<channelFolder>/`
-
-`channelFolder` se deriva de `sanitizeFolderName(channelName)` (`apps/api/src/utils/sanitize.ts`).
-
-## 4.1 `channel.json` (schema principal)
-
-Definido por `ExportPayload` (`apps/api/src/types.ts`).
-
-```json
-{
-  "exportVersion": "1.1",
-  "exportedAt": "2026-03-01T12:00:00.000Z",
-  "channelName": "Canal Demo",
-  "channelId": "UC1234567890123456789012",
-  "sourceInput": "https://www.youtube.com/@demo",
-  "timeframe": "6m",
-  "timeframeResolved": {
-    "publishedAfter": "2025-09-01T00:00:00.000Z",
-    "publishedBefore": "2026-03-01T00:00:00.000Z"
-  },
-  "videos": [
-    {
-      "videoId": "abc123",
-      "title": "Video title",
-      "viewCount": 12345,
-      "publishedAt": "2026-01-01T00:00:00.000Z",
-      "thumbnailPath": "thumbnails/abc123.jpg",
-      "transcript": "texto completo",
-      "transcriptStatus": "ok",
-      "transcriptSource": "captions",
-      "transcriptPath": "raw/transcripts/abc123.jsonl"
-    }
-  ]
-}
-```
-
-## 4.2 `manifest.json`
-
-Definido por `ExportManifestV1` en `apps/api/src/services/exportService.ts`.
-
-```json
-{
-  "jobId": "uuid-v4",
-  "channelId": "UC1234567890123456789012",
-  "channelFolder": "Canal_Demo",
-  "exportVersion": "1.1",
-  "exportedAt": "2026-03-01T12:00:00.000Z",
-  "counts": {
-    "totalVideosSelected": 2,
-    "transcriptsOk": 1,
-    "transcriptsMissing": 1,
-    "transcriptsError": 0,
-    "thumbnailsOk": 2,
-    "thumbnailsFailed": 0
-  },
-  "warnings": [],
-  "artifacts": [
-    "channel.json",
-    "manifest.json",
-    "raw/channel.json",
-    "raw/videos.jsonl"
-  ]
-}
-```
-
-## 4.3 `raw/channel.json`
-
-Definido por `RawChannelExportV1`.
-
-Campos clave:
-
-- `exportVersion`, `exportedAt`, `jobId`
-- `channelId`, `channelName`, `sourceInput`, `timeframe`, `timeframeResolved`
-- `channelStats` (opcional)
-- `provenance.dataSources[]`
-- `provenance.warnings[]`
-- `provenance.env.LOCAL_ASR_ENABLED`
-- `provenance.env.TRANSCRIPT_LANG`
-
-## 4.4 `raw/videos.jsonl`
-
-Cada línea es `RawVideoRecordV1`.
-
-Campos clave:
-
-- metadata YouTube (`title`, `description`, `durationSec`, `statistics`, `thumbnails`)
-- `thumbnailLocalPath`, `thumbnailOriginalUrl`
-- `transcriptRef.transcriptPath`
-- `transcriptRef.transcriptSource`
-- `transcriptRef.transcriptStatus`
-- `daysSincePublish`, `viewsPerDay`, `likeRate`, `commentRate`
-- `warnings[]`
-
-## 4.5 `raw/transcripts/<videoId>.jsonl`
-
-Union de registros:
-
-1. `meta` (`RawTranscriptMetaRecordV1`)
-2. `segment` (`RawTranscriptSegmentRecordV1`)
-
-Ejemplo:
-
-```json
-{"type":"meta","videoId":"abc123","source":"captions","status":"ok","language":"en","model":null,"computeType":null,"createdAt":"...","transcriptCleaned":true}
-{"type":"segment","i":0,"startSec":0.0,"endSec":2.1,"text":"Hello","confidence":null}
-```
-
-## 4.6 `derived/video_features/<videoId>.json`
-
-Esquema base `derived.video_features.v1`.
-
-Secciones esperadas:
-
-- `schemaVersion`, `videoId`, `computedAt`
-- `titleFeatures` (deterministic + llm opcional)
-- `descriptionFeatures` (deterministic + llm opcional)
-- `transcriptFeatures` (deterministic + llm opcional)
-- `thumbnailFeatures` (deterministic + llm opcional)
-- `performance` (`viewsPerDay`, `likeRate`, `commentRate`, `engagementRate`, `residual`, `percentile`, etc.)
-
-## 4.7 `derived/channel_models.json`
-
-Esquema `derived.channel_models.v1` con:
-
-- `computedAt`
-- `channelId`
-- `timeframe`
-- `model` (baseline/performance normalization)
-
-## 4.8 `.cache/index.json`
-
-Esquema `cache.index.v1` (`apps/api/src/services/exportCacheService.ts`).
-
-Campos clave:
-
-- `schemaVersion`, `channelId`, `channelFolder`, `updatedAt`, `exportVersion`
-- `timeframes[1m|6m|1y].videos[videoId]`
-- hashes de entrada (`titleHash`, `descriptionHash`, `thumbnailHash`, `transcriptHash`)
-- fingerprints de config/modelos
-- estado de artifacts (`rawTranscript`, `thumbnail`, `derived`)
-
-## 4.9 `logs/`
-
-Por job:
-
-- `logs/job_<jobId>.events.jsonl`
-- `logs/job_<jobId>.errors.jsonl`
-- `logs/job_<jobId>.summary.json`
-- `logs/job_<jobId>.debug_bundle.json` (si aplica)
-
-## 5) Enums de referencia
-
-`timeframe`:
-
-- `1m`
-- `6m`
-- `1y`
+- `job_started` -> `{ total: number }`
+- `video_progress` -> `{ videoId: string, stage: ExportVideoStage, percent?: number }`
+- `job_progress` -> `{ completed: number, total: number }`
+- `warning` -> `{ videoId?: string, message: string }`
+- `job_done` -> `{ exportPath: string }`
+- `job_failed` -> `{ message: string }`
 
 `ExportVideoStage`:
 
@@ -570,38 +317,81 @@ Por job:
 - `warning`
 - `failed`
 
-`ExportJobStatus`:
+## 4) File Schemas (export)
 
-- `queued`
-- `running`
-- `done`
-- `failed`
+## 4.1 `channel.json`
 
-`transcriptStatus`:
+- Path: `exports/<channelFolder>/channel.json`
+- Tipo: `ExportPayload` (`apps/api/src/types.ts`)
+- Campos clave: `exportVersion`, `exportedAt`, `channelName`, `channelId`, `sourceInput`, `timeframe`, `timeframeResolved`, `videos[]`
 
-- `ok`
-- `missing`
-- `error`
+## 4.2 `manifest.json`
 
-`transcriptSource`:
+- Path: `exports/<channelFolder>/manifest.json`
+- Versión actual de export: `exportVersion: "1.1"` (const `EXPORT_VERSION`)
+- Campos clave: `jobId`, `channelId`, `channelFolder`, `counts`, `warnings`, `artifacts[]`
 
-- `captions`
-- `asr`
-- `none`
+## 4.3 `raw/channel.json`
 
-## 6) Versionado y compatibilidad
+- Incluye metadatos de export + `provenance`.
+- `provenance.dataSources`: `youtube-data-api-v3`, `youtube-transcript`, `local-asr-fallback`.
 
-- Versión actual de export runtime: `1.1` (`apps/api/src/services/exportService.ts`).
-- Consumidores deben validar `exportVersion` antes de parsear campos opcionales.
-- `channel.json` es el contrato estable para integraciones externas.
-- `raw/*`, `derived/*`, `.cache/*` están orientados a diagnóstico/procesamiento interno.
+## 4.4 `raw/videos.jsonl`
 
-## 7) Invariantes de seguridad de rutas
+Cada línea es `RawVideoRecordV1` con:
 
-`exportService` y `projectsService` validan path traversal con `ensureInsideRoot(...)` y validación de segmentos.
+- metadata básica de video
+- `statistics`
+- `thumbnailLocalPath`, `thumbnailOriginalUrl`
+- `transcriptRef`: `{ transcriptPath, transcriptSource, transcriptStatus }`
+- métricas derivadas simples (`viewsPerDay`, `likeRate`, `commentRate`)
 
-Esto aplica a:
+## 4.5 `raw/transcripts/<videoId>.jsonl`
 
-- escritura de exports
-- lectura de artifacts de proyectos
-- resolución de miniaturas por `projectId/videoId`
+Formato jsonl mixto:
+
+1. Línea meta (`type: "meta"`):
+
+```json
+{
+  "type": "meta",
+  "videoId": "abc123",
+  "source": "captions",
+  "status": "ok",
+  "language": "es",
+  "model": null,
+  "computeType": null,
+  "createdAt": "2026-03-05T00:00:00.000Z",
+  "transcriptCleaned": true,
+  "warning": "optional"
+}
+```
+
+2. Líneas segmento (`type: "segment"`):
+
+```json
+{
+  "type": "segment",
+  "i": 0,
+  "startSec": 0,
+  "endSec": 3.2,
+  "text": "...",
+  "confidence": null
+}
+```
+
+## 4.6 Derived artifacts
+
+- `derived/video_features/<videoId>.json` -> `schemaVersion: "derived.video_features.v1"`
+- `derived/channel_models.json` -> `schemaVersion: "derived.channel_models.v1"`
+- `derived/templates.json` -> generado por pipeline/orchestrator (si disponible)
+
+## 4.7 Bundle schema
+
+- `bundle.json` contiene `schemaVersion: "analysis.cross_channel_bundle.v1"`.
+- Incluye `thresholds.rawVideosExtractThresholdBytes` y `thresholds.confirmationThresholdMb`.
+- Expone `filesIncluded` y `filesMissing` como inventario explícito del zip.
+
+## 5) Seguridad de paths (contractual)
+
+En servicios de export/projects/bundle se usa validación de path (`ensureInsideRoot`, `validatePathSegment`) para evitar traversal fuera de `exports/`.

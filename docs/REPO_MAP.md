@@ -1,84 +1,64 @@
 # REPO MAP — ytai-analizer
 
-Mapa operativo de archivos, entry points y ownership técnico.
+Mapa práctico de módulos, ownership técnico y puntos de cambio.
 
 ## 1) Root
 
-- `AGENTS.md`: reglas de trabajo para agentes.
-- `README.md`: setup funcional del repo.
+- `AGENTS.md`: reglas de colaboración para agentes.
+- `README.md`: setup y flujo operativo.
 - `package.json`: scripts root (`dev`, `build`, `test`, `asr:setup`, `asr:check`).
 - `pnpm-workspace.yaml`: workspace `apps/*`.
-- `scripts/`: bootstrap/check cross-platform para ASR.
-- `docs/`: Context Pack y documentación técnica.
+- `scripts/`: bootstrap/check ASR cross-platform.
+- `docs/`: Context Pack (`AI_CONTEXT`, `DATA_CONTRACTS`, `REPO_MAP`).
 
 ## 2) apps/api
 
-## 2.1 Arranque y routing
+## 2.1 Arranque y rutas
 
-- `apps/api/src/server.ts`: Fastify app + rutas HTTP/SSE + validación zod.
-- `apps/api/src/config/env.ts`: carga `.env` y defaults.
+- `apps/api/src/server.ts`: registra endpoints y valida request params/body con zod.
+- `apps/api/src/config/env.ts`: parseo de env + defaults.
 
-Rutas definidas en `server.ts`:
+Rutas actuales en `server.ts`:
 
 - `GET /health`
 - `POST /analyze`
 - `POST /export`
 - `POST /export/jobs`
 - `GET /export/jobs/:jobId`
-- `GET /export/jobs/:jobId/events`
+- `GET /export/jobs/:jobId/events` (SSE)
+- `POST /export/rerun-orchestrator`
 - `GET /projects`
 - `GET /projects/:projectId`
 - `GET /projects/:projectId/videos`
 - `GET /projects/:projectId/videos/:videoId`
+- `GET /projects/:projectId/bundle/meta`
+- `GET /projects/:projectId/bundle`
+- `GET /projects/:projectId/exports/:exportJobId/bundle`
 - `GET /projects/:projectId/artifacts/playbook`
 - `GET /projects/:projectId/artifacts/templates`
 - `GET /projects/:projectId/artifacts/channel_models`
 - `GET /projects/:projectId/thumb/:videoId`
 
-## 2.2 Servicios principales
+## 2.2 Servicios de dominio
 
-- `apps/api/src/services/youtubeService.ts`:
-  - resolución de canal desde `sourceInput`
-  - listado de videos y enriquecimiento metadata
+- `apps/api/src/services/youtubeService.ts`: resolución de canal y fetch metadata de videos.
+- `apps/api/src/services/transcriptService.ts`: captions (`youtube-transcript`).
+- `apps/api/src/services/transcriptPipeline.ts`: fallback policy captions -> ASR.
+- `apps/api/src/services/localAsrService.ts`: cola de tareas y lifecycle del worker ASR.
+- `apps/api/src/services/asrRuntime.ts`: resuelve Python (`ASR_PYTHON_PATH`, `.venv-asr`, fallback).
+- `apps/api/src/services/exportService.ts`: pipeline central de export, escritura de artifacts y manifest.
+- `apps/api/src/services/exportJobService.ts`: jobs async + buffer de eventos SSE + estado.
+- `apps/api/src/services/exportBundleService.ts`: meta + zip bundle para cross-channel.
+- `apps/api/src/services/projectsService.ts`: lectura de exports para dashboard y detalles de video.
+- `apps/api/src/services/rerunOrchestratorService.ts`: rerun manual con prerequisitos.
+- `apps/api/src/services/exportCacheService.ts`: cache persistente por video en `.cache/index.json`.
+- `apps/api/src/services/taskScheduler.ts`: límites de concurrencia por tipo de tarea.
 
-- `apps/api/src/services/exportJobService.ts`:
-  - crea/gestiona jobs async
-  - mantiene estado y eventos para SSE
+## 2.3 Lógica derivada/orquestación
 
-- `apps/api/src/services/exportService.ts`:
-  - pipeline completo de export
-  - escribe `channel.json`, `manifest.json`, `raw/*`, `derived/*`, `logs/*`
-  - limpieza temporal en `exports/.tmp/<jobId>`
-
-- `apps/api/src/services/transcriptService.ts`:
-  - captions por `youtube-transcript`
-  - timeout/retry/cache en memoria
-
-- `apps/api/src/services/transcriptPipeline.ts`:
-  - captions-first + fallback ASR
-
-- `apps/api/src/services/localAsrService.ts`:
-  - cliente del worker Python
-  - cola, timeouts, restart
-
-- `apps/api/src/services/asrRuntime.ts`:
-  - resolución de python (`ASR_PYTHON_PATH` / `.venv-asr` / fallback)
-  - health-check `import faster_whisper`
-
-- `apps/api/src/services/projectsService.ts`:
-  - lectura de `exports/*` para dashboard de proyectos
-
-- `apps/api/src/services/exportCacheService.ts`:
-  - cache persistente por video en `.cache/index.json`
-
-- `apps/api/src/services/taskScheduler.ts`:
-  - límites de concurrencia por tipo (`video/http/asr/ocr/llm/embeddings/fs`)
-
-## 2.3 Lógica derivada y orquestación
-
-- `apps/api/src/derived/*.ts`: features por título/description/transcript/thumbnail.
-- `apps/api/src/analysis/orchestratorService.ts`: artifacts de orquestación de canal.
-- `apps/api/src/services/autogenRuntime.ts`: bridge Node <-> worker AutoGen.
+- `apps/api/src/derived/*.ts`: title/description/transcript/thumbnail features.
+- `apps/api/src/analysis/orchestratorService.ts`: genera artifacts de orquestación (`analysis/*`).
+- `apps/api/src/services/autogenRuntime.ts`: bridge de runtime para worker AutoGen.
 
 Assets:
 
@@ -86,7 +66,7 @@ Assets:
 - `apps/api/src/derived/assets/transcript-sentiment-lexicon.json`
 - `apps/api/src/derived/assets/transcript-emotions.json`
 
-## 2.4 Scripts Python en API
+## 2.4 Scripts Python del API
 
 - `apps/api/scripts/asr_worker.py`
 - `apps/api/scripts/autogen_worker.py`
@@ -96,17 +76,18 @@ Assets:
 ## 2.5 Tests API
 
 - `apps/api/tests/exportJobs.test.ts`
-- `apps/api/tests/transcriptPipeline.test.ts`
-- `apps/api/tests/transcriptService.test.ts`
-- `apps/api/tests/asrRuntime.test.ts`
+- `apps/api/tests/exportBundleService.test.ts`
 - `apps/api/tests/projectsApi.test.ts`
+- `apps/api/tests/transcriptPipeline.test.ts`
+- `apps/api/tests/asrRuntime.test.ts`
+- `apps/api/tests/taskScheduler.test.ts`
 
 ## 3) apps/web
 
-## 3.1 Entry points
+## 3.1 Entry points y rutas
 
-- `apps/web/src/main.tsx`: bootstrap React + router.
-- `apps/web/src/App.tsx`: layout + rutas.
+- `apps/web/src/main.tsx`: bootstrap React + `BrowserRouter`.
+- `apps/web/src/App.tsx`: layout principal y rutas.
 
 Rutas frontend:
 
@@ -114,31 +95,28 @@ Rutas frontend:
 - `/projects` -> `apps/web/src/pages/ProjectsList.tsx`
 - `/projects/:projectId` -> `apps/web/src/pages/ProjectDetail.tsx`
 
-## 3.2 Estado cliente export
+## 3.2 Flujo Analyze/export
 
-- `apps/web/src/exportJobState.ts`: reducer del modal de progreso.
-- `apps/web/src/types.ts`: contratos compartidos de API/SSE.
+- `apps/web/src/pages/AnalyzePage.tsx`: submit de analyze, selección de videos, creación de export job, `EventSource` SSE y modal de progreso.
+- `apps/web/src/exportJobState.ts`: reducer de estados del modal (`starting`, `running`, `done`, `failed`).
+- `apps/web/src/types.ts`: tipos de API/SSE usados por UI.
 
-## 3.3 UI semántica Projects Dashboard
+## 3.3 Flujo Projects
 
-- `apps/web/src/components/Tooltip.tsx`: tooltip reusable accesible (hover + focus + escape).
-- `apps/web/src/components/StatCard.tsx`: tarjetas de KPIs con hint contextual.
-- `apps/web/src/components/Badge.tsx`: badges de estado/variant.
-- `apps/web/src/components/Section.tsx`: bloque semántico de sección.
-- `apps/web/src/components/KeyValueTable.tsx`: tabla key/value para metadata y coeficientes.
-- `apps/web/src/components/Collapsible.tsx`: bloques colapsables para payloads extensos.
-- `apps/web/src/components/playbook/PlaybookView.tsx`: render semántico de `analysis.playbook.v1`.
-- `apps/web/src/components/templates/TemplatesView.tsx`: render semántico de `derived.templates.v1`.
-- `apps/web/src/components/model/ChannelModelView.tsx`: render semántico de `derived.channel_models.v1`.
-- `apps/web/src/lib/getByPath.ts`: navegación segura por path (`a.b.c`, `rows[0].x`) para drill-down.
-- `apps/web/src/lib/artifactUtils.ts`: guards/parsers para artifacts.
+- `apps/web/src/pages/ProjectsList.tsx`: lista proyectos + botón `Export bundle`.
+- `apps/web/src/pages/ProjectDetail.tsx`: tabs de artifacts, lista videos, detalle por video, rerun orchestrator.
+- `apps/web/src/components/playbook/PlaybookView.tsx`
+- `apps/web/src/components/templates/TemplatesView.tsx`
+- `apps/web/src/components/model/ChannelModelView.tsx`
+- `apps/web/src/lib/getByPath.ts`
+- `apps/web/src/lib/artifactUtils.ts`
 
-## 3.4 Infra web
+Infra web:
 
-- `apps/web/vite.config.ts`: proxy `/api` hacia `http://localhost:3001`.
+- `apps/web/vite.config.ts`: proxy `/api` a API local.
 - `apps/web/src/index.css`: estilos base.
 
-## 3.5 Tests web
+## 3.4 Tests web
 
 - `apps/web/src/exportJobState.test.ts`
 - `apps/web/src/pages/projectsPages.test.tsx`
@@ -149,18 +127,18 @@ Rutas frontend:
 
 ## 4) scripts (root)
 
-- `scripts/setup_asr.mjs`: dispatcher Bash/PowerShell.
-- `scripts/setup_asr.sh`: setup Unix de `.venv-asr` + pip install requirements.
-- `scripts/setup_asr.ps1`: setup Windows equivalente.
-- `scripts/check_asr.mjs`: chequeo de imports Python (`faster_whisper`, `autogen_agentchat`, `autogen_ext`).
+- `scripts/setup_asr.mjs`: dispatcher (bash/powershell según OS).
+- `scripts/setup_asr.sh`: crea/reusa `.venv-asr` e instala requirements.
+- `scripts/setup_asr.ps1`: equivalente para Windows.
+- `scripts/check_asr.mjs`: valida imports Python (`faster_whisper`, `autogen_agentchat`, `autogen_ext`).
 
-## 5) Export output map
+## 5) Exported filesystem map
 
-Root generado:
+Raíz de salida:
 
 - `exports/<channelFolder>/`
 
-Archivos esperados:
+Artifacts principales generados por `exportService.ts`:
 
 - `channel.json`
 - `manifest.json`
@@ -171,28 +149,34 @@ Archivos esperados:
 - `thumbnails/<videoId>.jpg`
 - `derived/video_features/<videoId>.json`
 - `derived/channel_models.json`
-- `derived/templates.json` (si existe)
+- `analysis/orchestrator_input.json` (si existe del pipeline/orchestrator)
 - `analysis/playbook.json` (si existe)
+- `derived/templates.json` (si existe)
 - `.cache/index.json`
 - `logs/job_<jobId>.events.jsonl`
 - `logs/job_<jobId>.errors.jsonl`
 - `logs/job_<jobId>.summary.json`
 - `logs/job_<jobId>.debug_bundle.json` (opcional)
 
-## 6) Puntos de cambio típicos
+Temporales:
 
-Si cambias contratos de API/SSE:
+- `exports/.tmp/<jobId>/audio/*.mp3`
+
+## 6) Dónde tocar según cambio
+
+Si cambias API/SSE:
 
 - `apps/api/src/server.ts`
 - `apps/api/src/services/exportJobService.ts`
 - `apps/web/src/types.ts`
 - `apps/web/src/exportJobState.ts`
 
-Si cambias schema de export:
+Si cambias schema export/filesystem:
 
 - `apps/api/src/types.ts`
 - `apps/api/src/services/exportService.ts`
 - `apps/api/src/services/projectsService.ts`
+- `apps/api/src/services/exportBundleService.ts`
 - `docs/DATA_CONTRACTS.md`
 
 Si cambias ASR local:
@@ -200,7 +184,5 @@ Si cambias ASR local:
 - `apps/api/scripts/asr_worker.py`
 - `apps/api/src/services/localAsrService.ts`
 - `apps/api/src/services/asrRuntime.ts`
-- `scripts/setup_asr.mjs`
-- `scripts/setup_asr.sh`
-- `scripts/setup_asr.ps1`
+- `scripts/setup_asr.*`
 - `scripts/check_asr.mjs`

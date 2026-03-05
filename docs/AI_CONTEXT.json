@@ -6,8 +6,8 @@
     "runtime": {
       "node": ">=20",
       "pnpm": "10.x",
-      "python": "3.10+ (ASR local)",
-      "ffmpeg": "required in PATH for local ASR"
+      "python": "3.10+",
+      "ffmpeg": "required in PATH for ASR"
     },
     "apps": [
       {
@@ -20,7 +20,8 @@
         "name": "web",
         "path": "apps/web",
         "entry": "apps/web/src/main.tsx",
-        "router": "apps/web/src/App.tsx"
+        "router": "apps/web/src/App.tsx",
+        "proxy": "apps/web/vite.config.ts"
       }
     ],
     "scripts": {
@@ -59,8 +60,8 @@
       "steps": [
         "POST /export/jobs",
         "GET /export/jobs/:jobId/events",
-        "SSE events -> reducer",
-        "write exports/<channel>/channel.json + manifest.json"
+        "reduce SSE events in exportJobState",
+        "write exports/<channelFolder>/channel.json + manifest.json"
       ]
     },
     {
@@ -72,29 +73,20 @@
         "apps/api/src/services/asrRuntime.ts",
         "apps/api/scripts/asr_worker.py"
       ],
-      "policy": "captions first, ASR fallback, transcript failure should not fail whole export"
+      "policy": "captions first, then local ASR, then warning without failing full export"
     },
     {
-      "name": "projects-dashboard",
+      "name": "projects-and-bundle",
       "frontend": [
         "apps/web/src/pages/ProjectsList.tsx",
-        "apps/web/src/pages/ProjectDetail.tsx",
-        "apps/web/src/components/playbook/PlaybookView.tsx",
-        "apps/web/src/components/templates/TemplatesView.tsx",
-        "apps/web/src/components/model/ChannelModelView.tsx",
-        "apps/web/src/components/Tooltip.tsx",
-        "apps/web/src/lib/getByPath.ts"
+        "apps/web/src/pages/ProjectDetail.tsx"
       ],
       "backend": [
-        "apps/api/src/server.ts",
-        "apps/api/src/services/projectsService.ts"
+        "apps/api/src/services/projectsService.ts",
+        "apps/api/src/services/exportBundleService.ts",
+        "apps/api/src/services/rerunOrchestratorService.ts"
       ],
-      "source": "exports/*",
-      "notes": [
-        "Artifact tabs load lazily (playbook/templates/model).",
-        "Fallback Raw JSON collapsable only in debug.",
-        "evidence_fields drill-down resolves values per videoId via getByPath."
-      ]
+      "source": "exports/*"
     }
   ],
   "endpoints": [
@@ -104,10 +96,14 @@
     { "method": "POST", "path": "/export/jobs" },
     { "method": "GET", "path": "/export/jobs/:jobId" },
     { "method": "GET", "path": "/export/jobs/:jobId/events", "kind": "SSE" },
+    { "method": "POST", "path": "/export/rerun-orchestrator" },
     { "method": "GET", "path": "/projects" },
     { "method": "GET", "path": "/projects/:projectId" },
     { "method": "GET", "path": "/projects/:projectId/videos" },
     { "method": "GET", "path": "/projects/:projectId/videos/:videoId" },
+    { "method": "GET", "path": "/projects/:projectId/bundle/meta" },
+    { "method": "GET", "path": "/projects/:projectId/bundle" },
+    { "method": "GET", "path": "/projects/:projectId/exports/:exportJobId/bundle" },
     { "method": "GET", "path": "/projects/:projectId/artifacts/playbook" },
     { "method": "GET", "path": "/projects/:projectId/artifacts/templates" },
     { "method": "GET", "path": "/projects/:projectId/artifacts/channel_models" },
@@ -120,39 +116,31 @@
       "source": "apps/api/src/services/exportService.ts"
     },
     "channelJson": {
-      "path": "exports/<channel>/channel.json",
+      "path": "exports/<channelFolder>/channel.json",
       "sourceType": "apps/api/src/types.ts::ExportPayload"
     },
     "manifest": {
-      "path": "exports/<channel>/manifest.json",
+      "path": "exports/<channelFolder>/manifest.json",
       "sourceType": "apps/api/src/services/exportService.ts::ExportManifestV1"
     },
-    "raw": {
-      "channel": "exports/<channel>/raw/channel.json",
-      "videos": "exports/<channel>/raw/videos.jsonl",
-      "transcripts": "exports/<channel>/raw/transcripts/<videoId>.jsonl"
+    "rawTranscriptJsonl": {
+      "path": "exports/<channelFolder>/raw/transcripts/<videoId>.jsonl",
+      "records": ["type=meta", "type=segment"]
     },
     "derived": {
-      "videoFeatures": "exports/<channel>/derived/video_features/<videoId>.json",
-      "channelModels": "exports/<channel>/derived/channel_models.json",
-      "templates": "exports/<channel>/derived/templates.json"
+      "videoFeatures": {
+        "path": "exports/<channelFolder>/derived/video_features/<videoId>.json",
+        "schemaVersion": "derived.video_features.v1"
+      },
+      "channelModels": {
+        "path": "exports/<channelFolder>/derived/channel_models.json",
+        "schemaVersion": "derived.channel_models.v1"
+      }
     },
-    "analysis": {
-      "playbook": "exports/<channel>/analysis/playbook.json"
-    },
-    "cache": {
-      "path": "exports/<channel>/.cache/index.json",
-      "schemaVersion": "cache.index.v1",
-      "source": "apps/api/src/services/exportCacheService.ts"
-    },
-    "logs": {
-      "path": "exports/<channel>/logs/",
-      "files": [
-        "job_<jobId>.events.jsonl",
-        "job_<jobId>.errors.jsonl",
-        "job_<jobId>.summary.json",
-        "job_<jobId>.debug_bundle.json"
-      ]
+    "bundle": {
+      "bundleJson": "bundle.json",
+      "schemaVersion": "analysis.cross_channel_bundle.v1",
+      "service": "apps/api/src/services/exportBundleService.ts"
     }
   },
   "runbook": {
@@ -164,14 +152,8 @@
       "asrCheck": "pnpm asr:check"
     },
     "env": {
-      "required": [
-        "YOUTUBE_API_KEY"
-      ],
-      "optionalCore": [
-        "PORT",
-        "TRANSCRIPT_LANG",
-        "OPENAI_API_KEY"
-      ],
+      "required": ["YOUTUBE_API_KEY"],
+      "optionalCore": ["PORT", "TRANSCRIPT_LANG", "OPENAI_API_KEY"],
       "optionalAsr": [
         "LOCAL_ASR_ENABLED",
         "LOCAL_ASR_MODEL",
@@ -191,9 +173,10 @@
     },
     "troubleshooting": [
       "Missing YOUTUBE_API_KEY -> configure apps/api/.env",
-      "ffmpeg not found -> install ffmpeg and check PATH",
-      "faster_whisper import failed -> run pnpm asr:setup && pnpm asr:check",
-      "SSE disconnected -> check /health and apps/web/vite.config.ts proxy"
+      "ffmpeg not found -> install ffmpeg and verify PATH",
+      "ASR imports fail -> run pnpm asr:setup && pnpm asr:check",
+      "SSE progress disconnected -> verify /health and Vite proxy",
+      "rerun orchestrator 409 -> ensure channel.json, raw/videos.jsonl, derived/video_features/*.json exist"
     ]
   }
 }

@@ -1,96 +1,133 @@
 Tarea:
-Implementar un botón “Export bundle” en el tab de Projects que genere y descargue (o guarde) un bundle por canal con un set de archivos estándar para análisis cross-channel.
+Reemplazar/mejorar el step OCR actual de thumbnails por un pipeline moderno en Python (detección de texto + reconocimiento), integrado al flujo existente del export en `apps/api`, sin romper pasos previos ni posteriores. Mantener compatibilidad de artefactos (`derived/video_features/<videoId>.json`) y del resto del export. El OCR con LLM solo como “último recurso” (NO implementar ahora salvo que quede un hook opcional).
 
 Contexto:
-Tenemos un pipeline de export por canal (job) que actualmente produce múltiples artefactos bajo el árbol de export (por ejemplo: analysis/orchestrator_input.json, channel.json, manifest.json, raw/*, derived/*, logs/*, etc.). Para análisis multi-canal (cross-data) necesitamos un “bundle” consistente por canal que incluya:
-- analysis/orchestrator_input.json
-- channel.json
-- manifest.json
-- raw/channel.json
-- raw/videos.jsonl (o un extract con campos clave si el archivo completo es muy grande)
-- derived/video_features/<videoId>.json SOLO para los videos incluidos en exemplars del orchestrator_input (top_videos, bottom_videos, mid_videos)
+- Monorepo pnpm con `apps/api` (Fastify + TS) y `apps/web` (React). El pipeline de export vive en `apps/api/src/services/exportService.ts` y escribe artifacts en `exports/<channelFolder>/`. :contentReference[oaicite:0]{index=0}
+- El export es async con jobs + SSE; no se deben cambiar los contratos de progreso ni stages del modal. :contentReference[oaicite:1]{index=1}
+- Ya existe infraestructura Python (ASR local) con runtime + worker (`apps/api/scripts/asr_worker.py`) y resolución de Python (`asrRuntime.ts`). Se debe reutilizar el patrón para OCR. :contentReference[oaicite:2]{index=2} :contentReference[oaicite:3]{index=3}
+- El step OCR actual usa `tesseract.js` (Node) y se integra en `thumbnailFeaturesAgent.ts` / `tesseractOcr.ts`, con cache por hash y cola `ocr` (EXPORT_OCR_CONCURRENCY). Este comportamiento (cache, concurrencia, eventos) debe seguir igual; solo cambia el “motor” y la calidad de resultados.
+- El output actual esperado en `derived/video_features.v1` incluye dentro de `thumbnailFeatures.deterministic` campos como:
+  - `ocrText`, `ocrConfidenceMean`, `ocrCharCount`, `ocrWordCount`, `textAreaRatio`, `thumb_ocr_title_overlap_jaccard`, `hasBigText`, y `ocrBoxes` (limitado a 50).
+  Estos campos deben mantenerse (no renombrar). Se permite agregar campos nuevos (additive), pero no romper consumidores.
 
 Objetivo:
-En la UI (Projects tab), agregar un botón “Export bundle” por proyecto/canal (según corresponda al modelo de tu app) que:
-1) Identifique el export/job seleccionado (o el más reciente si no hay selección explícita).
-2) Reúna los archivos listados arriba desde el storage del export.
-3) Construya un bundle comprimido (.zip) con una estructura de carpetas estable.
-4) Descargue el .zip al usuario (browser) o lo guarde como artifact descargable (según el patrón actual del producto).
-5) Sea robusto ante faltantes: si algún archivo no existe, registrar en un manifest dentro del bundle y continuar (no fallar todo el zip), excepto analysis/orchestrator_input.json que es obligatorio.
+Implementar OCR “moderno” con:
+1) Text detection (localizar regiones de texto) + 2) Text recognition (leer texto) en Python,
+para reducir ruido (texto basura/low confidence) y mejorar métricas derivadas (conteos, overlap, textAreaRatio, hasBigText).
 
 Requerimientos funcionales:
-A) UX/UI
-- Ubicación: tab “Projects”.
-- Un botón visible llamado “Export bundle”.
-- Estados: idle, loading (spinner), success (toast + descarga), error (toast).
-- Confirmación opcional: si el bundle excede X MB (configurable), mostrar modal “Esto puede tardar / tamaño estimado”.
+A) Integración sin romper el pipeline
+- Export pipeline (planificación, scheduler, concurrencia, cache, stages SSE, persistencia de artifacts) se mantiene igual.
+- El step “thumbnail derived” sigue existiendo y produce el mismo JSON de salida en `derived/video_features/<videoId>.json`.
+- Si el worker Python falla, debe haber fallback robusto:
+  - fallback a OCR actual (tesseract.js) O devolver un warning y continuar sin tumbar el job (mismo patrón que transcripts/ASR).
 
-B) Selección del export
-- Si el usuario está viendo un proyecto/canal con múltiples exports: permitir seleccionar cuál export bundlear; si no hay selector, usar “latest successful export”.
-- La definición de “successful” debe seguir el criterio existente en el sistema (ej. status=SUCCESS).
+B) Pipeline OCR nuevo (Python) – mínimo viable SOTA
+- Usar una librería Python que incluya detection + recognition (preferible):
+  - Opción recomendada: PaddleOCR (ppocr) con `paddleocr` + `opencv-python-headless` (CPU).
+  - Alternativa liviana: EasyOCR (si PaddleOCR es demasiado pesado).
+- Input: `thumbnailLocalPath` (ruta a JPG ya descargado).
+- Output del worker: lista de boxes con texto + confidence + coords; y texto concatenado (opcional).
+- El TS hará post-proceso y computará exactamente los campos “contractuales” en deterministic.
 
-C) Construcción del bundle
-- Estructura dentro del zip (propuesta):
-  /bundle.json                (metadatos del bundle)
-  /analysis/orchestrator_input.json
-  /primary/channel.json
-  /primary/manifest.json
-  /raw/channel.json
-  /raw/videos.jsonl           (o /raw/videos.extract.json)
-  /derived/video_features/<videoId>.json  (solo exemplars)
-  /notes/missing_files.json   (si aplica)
-- bundle.json debe incluir: projectId, channelId, exportJobId, exportedAt (si existe), timeframe/timeframeResolved (si existe), lista de archivos incluidos, lista de archivos faltantes, tamaños, y timestamp de creación del bundle.
+C) Calidad / “clean signals”
+- Implementar gating (sin LLM):
+  - Calcular `ocrConfidenceMean` real.
+  - Calcular “hi-confidence subset” (por ejemplo conf>=0.6) y derivar:
+    - `ocrWordCountHiConf`, `ocrCharCountHiConf` (NUEVOS campos opcionales, additive)
+  - `thumb_ocr_title_overlap_jaccard` debe calcularse SOLO con tokens hi-conf (si no hay, setear 0 o null, pero consistentemente).
+- Corregir/garantizar que `textAreaRatio` no sea siempre 0:
+  - calcular como sum(area cajas hi-conf)/area imagen (clamp [0,1]).
+- `hasBigText` debe basarse en cajas hi-conf y umbral de área relativa (p.ej. >= 0.08 de área imagen para la caja más grande), no en heurística frágil.
 
-D) Selección de exemplars para derived/video_features
-- Leer analysis/orchestrator_input.json.
-- Tomar videoIds de:
-  - exemplars.top_videos[*].videoId
-  - exemplars.bottom_videos[*].videoId
-  - exemplars.mid_videos[*].videoId
-- Unificar y deduplicar IDs.
-- Incluir derived/video_features/<videoId>.json para cada ID si existe.
-- Si falta alguno, registrarlo en missing_files.json y continuar.
+D) Configuración y flags (compatibles)
+- Mantener flags actuales:
+  - `THUMB_OCR_ENABLED`, `THUMB_OCR_LANGS`, `THUMB_VISION_DOWNSCALE_WIDTH`, `EXPORT_OCR_CONCURRENCY`.
+- Agregar 1 flag para engine (sin romper):
+  - `THUMB_OCR_ENGINE=python|tesseractjs` (default: python si worker disponible, sino tesseractjs)
+- Reusar patrón de runtime Python del ASR:
+  - resolver Python path (similar a `ASR_PYTHON_PATH`) con un nuevo `OCR_PYTHON_PATH` (opcional) o reusar el mismo resolver.
+- Mantener cache de OCR por hash y `ocrConfigHash`:
+  - El hash sigue calculándose en Node; el cambio de engine/langs/downscale debe invalidar cache como hoy.
 
-E) raw/videos.jsonl “completo vs extract”
-- Preferencia: incluir raw/videos.jsonl completo.
-- Si excede un umbral (configurable) o el backend lo indica, generar un extract con campos mínimos:
-  videoId, title, publishedAt, durationSec, viewCount, likeCount, commentCount, tags, categoryId, defaultLanguage, transcriptStatus, transcriptSource (si están disponibles)
-- Guardar el extract como /raw/videos.extract.json (o .jsonl) e indicarlo en bundle.json.
+E) Worker Python (arquitectura)
+- Implementar `apps/api/scripts/ocr_worker.py` y `apps/api/scripts/requirements-ocr.txt`.
+- Protocolo simple JSONL stdin/stdout, similar a worker ASR:
+  Request (una línea JSON):
+  {
+    "id": "<uuid>",
+    "imagePath": "/abs/path/to/thumb.jpg",
+    "langs": ["en"], 
+    "downscaleWidth": 960
+  }
+  Response:
+  {
+    "id": "<uuid>",
+    "ok": true,
+    "engine": "paddleocr",
+    "imageWidth": 1280,
+    "imageHeight": 720,
+    "boxes": [
+      { "x": 10, "y": 20, "w": 200, "h": 60, "conf": 0.91, "text": "TSMC" }
+    ],
+    "timingMs": { "load": 5, "ocr": 120 }
+  }
+  Error:
+  { "id": "...", "ok": false, "error": "..." }
+- El worker debe poder:
+  - arrancar rápido (cachear modelos en memoria),
+  - soportar langs (si el engine lo permite),
+  - devolver coords en píxeles.
 
-F) Backend/Frontend
-- Implementar la lógica preferentemente en backend (API endpoint) para:
-  - Leer de storage (S3/GCS/local) sin exponer rutas directas.
-  - Stream de zip para no cargar todo en memoria.
-- El frontend solo dispara la acción y descarga el resultado.
-- Si el producto ya tiene un patrón de “export artifact”, reutilizarlo.
+F) Servicios TS nuevos (paralelo a ASR)
+- Crear `apps/api/src/services/ocrRuntime.ts` (resolver python + health check del worker).
+- Crear `apps/api/src/services/localOcrService.ts` (cola, concurrencia, lifecycle del proceso, timeouts).
+- Integrar con `taskScheduler.ts` o el mecanismo actual de cola `ocr` (mantener EXPORT_OCR_CONCURRENCY).
+- Emitir eventos existentes `ocr_start/ocr_done` si ya existen en exportService (no cambiar nombres).
 
-Requerimientos no funcionales:
-- Performance: streaming zip, límite de memoria, y timeout razonable.
-- Seguridad: autorización por projectId; no filtrar paths internos.
-- Observabilidad: logs con exportJobId, counts de archivos, tiempo total, tamaño final.
-- Test: unit tests para selección de exemplars, manejo de faltantes, y estructura del zip; integration test del endpoint.
+G) Integración con thumbnailFeaturesAgent
+- En `apps/api/src/derived/thumbnailFeaturesAgent.ts`:
+  - Mantener `computeDeterministic()` y `computeDeterministicOcrOnly()` y `persistThumbnailFeaturesArtifact()` como están (misma firma, mismo contrato).
+  - Reemplazar la implementación interna de `runOcr()`:
+    - Si `THUMB_OCR_ENGINE=python` y worker OK -> usar `localOcrService`.
+    - Si falla -> fallback a `tesseractOcr.ts` o retornar warning.
+  - Post-proceso (en TS):
+    - limitar boxes a 50 por score (conf * area).
+    - normalizar texto (trim, colapsar espacios).
+    - calcular `ocrText` como join de textos hi-conf (ordenados por y/x).
+    - calcular `ocrConfidenceMean`, `ocrCharCount`, `ocrWordCount`, `textAreaRatio`, `thumb_ocr_title_overlap_jaccard`, `hasBigText`.
+    - agregar opcionalmente `ocrWordCountHiConf`, `ocrCharCountHiConf`, `ocrConfidenceP50/P90`.
+  - Asegurar que el JSON final quede en `derived/video_features/<videoId>.json` dentro de `thumbnailFeatures.deterministic` igual que hoy.
 
-Suposiciones a validar en código:
-- Dónde viven exactamente estos archivos en el export root (paths reales):
-  - analysis/orchestrator_input.json
-  - channel.json
-  - manifest.json
-  - raw/channel.json
-  - raw/videos.jsonl
-  - derived/video_features/<videoId>.json
-- Cómo se identifica el “latest successful export” para un proyecto/canal en el tab de Projects.
+H) UI (no romper)
+- No rediseñar UI. Solo, si agregas campos hi-conf:
+  - `ProjectDetail` tooltip puede mostrar “OCR confidence” y “hi-conf word count” si existen, sin requerirlos.
+- Mantener compatibilidad con el tooltip actual (si solo existe `ocrText`, debe seguir mostrando algo).
 
-Entregables:
-1) UI: botón “Export bundle” en Projects tab con estados y toasts.
-2) API endpoint (o función server) para generar/stream el zip:
-   - GET/POST /api/projects/:projectId/exports/:exportJobId/bundle
-   - o /api/projects/:projectId/bundle?export=latest
-3) Implementación del generador de zip con estructura estable y bundle.json.
-4) Tests + documentación breve (README) de qué incluye el bundle y por qué.
+I) Tests
+- Unit tests (API):
+  - test de post-proceso: textAreaRatio, overlap, hasBigText con cajas sintéticas.
+  - test de fallback: si worker no está disponible, usar tesseractjs o warning sin crash.
+- Integration test (opt-in):
+  - si `OCR_PYTHON_PATH` está disponible en CI, test de roundtrip 1 imagen.
+  - si no, mock localOcrService.
+
+No objetivos (explicitamente fuera de scope):
+- No cambiar el esquema del export version 1.1 salvo agregar campos additive en thumbnailFeatures.deterministic.
+- No introducir LLM para OCR (solo dejar hook futuro).
+- No cambiar stages SSE ni contratos HTTP.
+
+Pasos sugeridos de implementación (orden recomendado):
+1) Añadir worker Python `ocr_worker.py` + `requirements-ocr.txt`.
+2) Añadir runtime TS (`ocrRuntime.ts`) + service (`localOcrService.ts`) copiando patrón de ASR.
+3) Implementar engine switch (`THUMB_OCR_ENGINE`) y fallback robusto.
+4) Implementar post-proceso robusto (hi-conf gating + textAreaRatio + overlap + hasBigText).
+5) Actualizar persistencia en `thumbnailFeaturesAgent.ts` sin cambiar firmas.
+6) Tests + docs (README corto de cómo habilitar OCR python, cómo instalar deps, cómo correr health check).
 
 Criterios de aceptación:
-- Clic en “Export bundle” produce un .zip descargable con la estructura acordada.
-- Contiene siempre analysis/orchestrator_input.json.
-- Incluye primary/channel.json + primary/manifest.json + raw/channel.json + raw/videos.jsonl (o extract) y derived/video_features solo para exemplars.
-- Si faltan archivos opcionales, el zip igual se genera y missing_files.json/bundle.json lo reporta.
-- Funciona para al menos 3 canales distintos y exports diferentes.
+- Todos los pasos antes/después del OCR siguen funcionando: export jobs, SSE, artifacts, projects list/detail.
+- `derived/video_features/<videoId>.json` mantiene los campos deterministic existentes y deja de producir OCR “basura” en la mayoría de thumbnails.
+- `textAreaRatio` ya no es sistemáticamente 0 cuando hay texto detectable.
+- Si el worker Python falla, el export no se cae; hay warning y fallback.
+- El bundle export (zip) sigue generándose igual; no se rompe rerun orchestrator.

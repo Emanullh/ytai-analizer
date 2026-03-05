@@ -7,7 +7,7 @@
       "health": 1,
       "taskCount": 0,
       "config": {},
-      "createdAt": "2026-03-02T19:53:42.541Z",
+      "createdAt": "2026-03-05T20:12:25.019Z",
       "model": "haiku",
       "modelRoutedBy": "router"
     },
@@ -18,7 +18,7 @@
       "health": 1,
       "taskCount": 0,
       "config": {},
-      "createdAt": "2026-03-02T19:53:42.572Z",
+      "createdAt": "2026-03-05T20:12:25.068Z",
       "model": "sonnet",
       "modelRoutedBy": "router"
     },
@@ -29,7 +29,7 @@
       "health": 1,
       "taskCount": 0,
       "config": {},
-      "createdAt": "2026-03-02T19:53:42.582Z",
+      "createdAt": "2026-03-05T20:12:25.069Z",
       "model": "sonnet",
       "modelRoutedBy": "router"
     },
@@ -40,7 +40,7 @@
       "health": 1,
       "taskCount": 0,
       "config": {},
-      "createdAt": "2026-03-02T19:53:42.583Z",
+      "createdAt": "2026-03-05T20:12:25.068Z",
       "model": "haiku",
       "modelRoutedBy": "router"
     }
