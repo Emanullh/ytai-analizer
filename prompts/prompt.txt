@@ -1,7 +1,96 @@
-Tarea: Channel Orchestrator Manual
+Tarea:
+Implementar un botón “Export bundle” en el tab de Projects que genere y descargue (o guarde) un bundle por canal con un set de archivos estándar para análisis cross-channel.
 
 Contexto:
-AL momento de hacer el export evitar el ultimo paso que es:
-task == "channel_orchestrator_v1":
-        return await classify_channel_orchestrator(request)
-Ese paso se hace manual con un boton dentro del tab de proyectos, solo se hara si es necesario
+Tenemos un pipeline de export por canal (job) que actualmente produce múltiples artefactos bajo el árbol de export (por ejemplo: analysis/orchestrator_input.json, channel.json, manifest.json, raw/*, derived/*, logs/*, etc.). Para análisis multi-canal (cross-data) necesitamos un “bundle” consistente por canal que incluya:
+- analysis/orchestrator_input.json
+- channel.json
+- manifest.json
+- raw/channel.json
+- raw/videos.jsonl (o un extract con campos clave si el archivo completo es muy grande)
+- derived/video_features/<videoId>.json SOLO para los videos incluidos en exemplars del orchestrator_input (top_videos, bottom_videos, mid_videos)
+
+Objetivo:
+En la UI (Projects tab), agregar un botón “Export bundle” por proyecto/canal (según corresponda al modelo de tu app) que:
+1) Identifique el export/job seleccionado (o el más reciente si no hay selección explícita).
+2) Reúna los archivos listados arriba desde el storage del export.
+3) Construya un bundle comprimido (.zip) con una estructura de carpetas estable.
+4) Descargue el .zip al usuario (browser) o lo guarde como artifact descargable (según el patrón actual del producto).
+5) Sea robusto ante faltantes: si algún archivo no existe, registrar en un manifest dentro del bundle y continuar (no fallar todo el zip), excepto analysis/orchestrator_input.json que es obligatorio.
+
+Requerimientos funcionales:
+A) UX/UI
+- Ubicación: tab “Projects”.
+- Un botón visible llamado “Export bundle”.
+- Estados: idle, loading (spinner), success (toast + descarga), error (toast).
+- Confirmación opcional: si el bundle excede X MB (configurable), mostrar modal “Esto puede tardar / tamaño estimado”.
+
+B) Selección del export
+- Si el usuario está viendo un proyecto/canal con múltiples exports: permitir seleccionar cuál export bundlear; si no hay selector, usar “latest successful export”.
+- La definición de “successful” debe seguir el criterio existente en el sistema (ej. status=SUCCESS).
+
+C) Construcción del bundle
+- Estructura dentro del zip (propuesta):
+  /bundle.json                (metadatos del bundle)
+  /analysis/orchestrator_input.json
+  /primary/channel.json
+  /primary/manifest.json
+  /raw/channel.json
+  /raw/videos.jsonl           (o /raw/videos.extract.json)
+  /derived/video_features/<videoId>.json  (solo exemplars)
+  /notes/missing_files.json   (si aplica)
+- bundle.json debe incluir: projectId, channelId, exportJobId, exportedAt (si existe), timeframe/timeframeResolved (si existe), lista de archivos incluidos, lista de archivos faltantes, tamaños, y timestamp de creación del bundle.
+
+D) Selección de exemplars para derived/video_features
+- Leer analysis/orchestrator_input.json.
+- Tomar videoIds de:
+  - exemplars.top_videos[*].videoId
+  - exemplars.bottom_videos[*].videoId
+  - exemplars.mid_videos[*].videoId
+- Unificar y deduplicar IDs.
+- Incluir derived/video_features/<videoId>.json para cada ID si existe.
+- Si falta alguno, registrarlo en missing_files.json y continuar.
+
+E) raw/videos.jsonl “completo vs extract”
+- Preferencia: incluir raw/videos.jsonl completo.
+- Si excede un umbral (configurable) o el backend lo indica, generar un extract con campos mínimos:
+  videoId, title, publishedAt, durationSec, viewCount, likeCount, commentCount, tags, categoryId, defaultLanguage, transcriptStatus, transcriptSource (si están disponibles)
+- Guardar el extract como /raw/videos.extract.json (o .jsonl) e indicarlo en bundle.json.
+
+F) Backend/Frontend
+- Implementar la lógica preferentemente en backend (API endpoint) para:
+  - Leer de storage (S3/GCS/local) sin exponer rutas directas.
+  - Stream de zip para no cargar todo en memoria.
+- El frontend solo dispara la acción y descarga el resultado.
+- Si el producto ya tiene un patrón de “export artifact”, reutilizarlo.
+
+Requerimientos no funcionales:
+- Performance: streaming zip, límite de memoria, y timeout razonable.
+- Seguridad: autorización por projectId; no filtrar paths internos.
+- Observabilidad: logs con exportJobId, counts de archivos, tiempo total, tamaño final.
+- Test: unit tests para selección de exemplars, manejo de faltantes, y estructura del zip; integration test del endpoint.
+
+Suposiciones a validar en código:
+- Dónde viven exactamente estos archivos en el export root (paths reales):
+  - analysis/orchestrator_input.json
+  - channel.json
+  - manifest.json
+  - raw/channel.json
+  - raw/videos.jsonl
+  - derived/video_features/<videoId>.json
+- Cómo se identifica el “latest successful export” para un proyecto/canal en el tab de Projects.
+
+Entregables:
+1) UI: botón “Export bundle” en Projects tab con estados y toasts.
+2) API endpoint (o función server) para generar/stream el zip:
+   - GET/POST /api/projects/:projectId/exports/:exportJobId/bundle
+   - o /api/projects/:projectId/bundle?export=latest
+3) Implementación del generador de zip con estructura estable y bundle.json.
+4) Tests + documentación breve (README) de qué incluye el bundle y por qué.
+
+Criterios de aceptación:
+- Clic en “Export bundle” produce un .zip descargable con la estructura acordada.
+- Contiene siempre analysis/orchestrator_input.json.
+- Incluye primary/channel.json + primary/manifest.json + raw/channel.json + raw/videos.jsonl (o extract) y derived/video_features solo para exemplars.
+- Si faltan archivos opcionales, el zip igual se genera y missing_files.json/bundle.json lo reporta.
+- Funciona para al menos 3 canales distintos y exports diferentes.

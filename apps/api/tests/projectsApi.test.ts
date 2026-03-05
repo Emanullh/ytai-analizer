@@ -2,11 +2,56 @@ import os from "node:os";
 import path from "node:path";
 import { promises as fs } from "node:fs";
 import type { FastifyInstance } from "fastify";
+import yauzl from "yauzl";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 async function writeJson(filePath: string, value: unknown): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
+}
+
+async function readZipFiles(buffer: Buffer): Promise<Record<string, string>> {
+  return await new Promise((resolve, reject) => {
+    yauzl.fromBuffer(buffer, { lazyEntries: true }, (error, zipFile) => {
+      if (error || !zipFile) {
+        reject(error ?? new Error("Zip could not be opened"));
+        return;
+      }
+      const files: Record<string, string> = {};
+      zipFile.readEntry();
+
+      zipFile.on("entry", (entry) => {
+        if (entry.fileName.endsWith("/")) {
+          zipFile.readEntry();
+          return;
+        }
+        zipFile.openReadStream(entry, (streamError, readStream) => {
+          if (streamError || !readStream) {
+            reject(streamError ?? new Error("Zip stream error"));
+            return;
+          }
+          const chunks: Buffer[] = [];
+          readStream.on("data", (chunk: Buffer | string) => {
+            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+          });
+          readStream.on("error", (streamReadError) => {
+            reject(streamReadError);
+          });
+          readStream.on("end", () => {
+            files[entry.fileName] = Buffer.concat(chunks).toString("utf-8");
+            zipFile.readEntry();
+          });
+        });
+      });
+
+      zipFile.on("error", (zipError) => {
+        reject(zipError);
+      });
+      zipFile.on("end", () => {
+        resolve(files);
+      });
+    });
+  });
 }
 
 describe("projects API", () => {
@@ -93,6 +138,32 @@ describe("projects API", () => {
     await writeJson(path.resolve(projectA, "analysis", "playbook.json"), {
       summary: "playbook"
     });
+    await writeJson(path.resolve(projectA, "analysis", "orchestrator_input.json"), {
+      schemaVersion: "analysis.orchestrator_input.v1",
+      generatedAt: "2026-03-01T12:00:00.000Z",
+      channel: {
+        channelId: "UC1234567890123456789012",
+        channelName: "Canal Demo",
+        timeframe: "6m",
+        jobId: "job-a1"
+      },
+      exemplars: {
+        top_videos: [{ videoId: "videoA1" }],
+        bottom_videos: [{ videoId: "videoA2" }],
+        mid_videos: [{ videoId: "videoA3" }]
+      },
+      rows: [],
+      summary: {
+        totalVideos: 2,
+        withResidual: 1,
+        withPercentile: 1,
+        warningsCount: 0
+      },
+      channelModel: null,
+      cohorts: [],
+      drivers: [],
+      warnings: []
+    });
     await writeJson(path.resolve(projectA, "derived", "templates.json"), {
       titleTemplates: ["template-a"]
     });
@@ -136,6 +207,11 @@ describe("projects API", () => {
     );
 
     await fs.mkdir(path.resolve(projectA, "raw"), { recursive: true });
+    await writeJson(path.resolve(projectA, "raw", "channel.json"), {
+      channelId: "UC1234567890123456789012",
+      channelName: "Canal Demo",
+      timeframe: "6m"
+    });
     await fs.writeFile(
       path.resolve(projectA, "raw", "videos.jsonl"),
       JSON.stringify({ videoId: "videoA1", title: "Video A1", description: "desc" }) + "\n",
@@ -246,5 +322,42 @@ describe("projects API", () => {
     const response = await app.inject({ method: "GET", url: "/projects/.." });
     expect(response.statusCode).toBeGreaterThanOrEqual(400);
     expect(response.statusCode).toBeLessThan(500);
+  });
+
+  it("returns bundle metadata resolving latest successful export", async () => {
+    const response = await app.inject({ method: "GET", url: "/projects/Canal_Demo/bundle/meta?export=latest" });
+
+    expect(response.statusCode).toBe(200);
+    const payload = response.json() as Record<string, unknown>;
+    expect(payload.exportJobId).toBe("job-a1");
+    expect(payload.rawVideosMode).toBe("full");
+    expect(Array.isArray(payload.includedFiles)).toBe(true);
+    expect(Array.isArray(payload.missingFiles)).toBe(true);
+  });
+
+  it("downloads bundle zip and reports missing optional files", async () => {
+    const response = await app.inject({ method: "GET", url: "/projects/Canal_Demo/bundle?export=latest" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("application/zip");
+    const files = await readZipFiles(response.rawPayload);
+
+    expect(files["bundle.json"]).toBeTruthy();
+    expect(files["analysis/orchestrator_input.json"]).toBeTruthy();
+    expect(files["primary/channel.json"]).toBeTruthy();
+    expect(files["primary/manifest.json"]).toBeTruthy();
+    expect(files["raw/channel.json"]).toBeTruthy();
+    expect(files["raw/videos.jsonl"]).toBeTruthy();
+    expect(files["derived/video_features/videoA1.json"]).toBeTruthy();
+    expect(files["notes/missing_files.json"]).toBeTruthy();
+
+    const bundleJson = JSON.parse(files["bundle.json"]) as Record<string, unknown>;
+    expect(bundleJson.exportJobId).toBe("job-a1");
+
+    const missingJson = JSON.parse(files["notes/missing_files.json"]) as Record<string, unknown>;
+    const missingFiles = missingJson.files as Array<Record<string, unknown>>;
+    const missingPaths = missingFiles.map((item) => item.path);
+    expect(missingPaths).toContain("derived/video_features/videoA2.json");
+    expect(missingPaths).toContain("derived/video_features/videoA3.json");
   });
 });

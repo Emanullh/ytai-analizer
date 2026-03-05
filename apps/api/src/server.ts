@@ -15,6 +15,7 @@ import {
   readProjectArtifact,
   resolveProjectThumbnail
 } from "./services/projectsService.js";
+import { getProjectBundleMeta, prepareProjectBundleDownload } from "./services/exportBundleService.js";
 import { analyzeChannel } from "./services/youtubeService.js";
 import { HttpError } from "./utils/errors.js";
 import { rerunOrchestrator, PrerequisiteError } from "./services/rerunOrchestratorService.js";
@@ -54,6 +55,15 @@ const projectVideoParamsSchema = z.object({
 const projectVideoDetailQuerySchema = z.object({
   maxSegments: z.coerce.number().int().positive().max(2000).optional(),
   truncateChars: z.coerce.number().int().positive().max(10000).optional()
+});
+
+const projectBundleQuerySchema = z.object({
+  export: z.string().min(1).optional()
+});
+
+const projectExportBundleParamsSchema = z.object({
+  projectId: z.string().min(1),
+  exportJobId: z.string().min(1)
 });
 
 export async function buildServer() {
@@ -227,6 +237,121 @@ export async function buildServer() {
 
     const detail = await getProjectVideoDetail(params.data.projectId, params.data.videoId, query.data);
     return reply.send(detail);
+  });
+
+  app.get("/projects/:projectId/bundle/meta", async (request, reply) => {
+    const params = projectParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: params.error.issues[0]?.message ?? "Invalid params" });
+    }
+    const query = projectBundleQuerySchema.safeParse(request.query);
+    if (!query.success) {
+      return reply.status(400).send({ error: query.error.issues[0]?.message ?? "Invalid query params" });
+    }
+
+    const metadata = await getProjectBundleMeta({
+      projectId: params.data.projectId,
+      exportSelector: query.data.export
+    });
+    return reply.send(metadata);
+  });
+
+  app.get("/projects/:projectId/exports/:exportJobId/bundle", async (request, reply) => {
+    const params = projectExportBundleParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: params.error.issues[0]?.message ?? "Invalid params" });
+    }
+
+    const startedAt = Date.now();
+    const prepared = await prepareProjectBundleDownload({
+      projectId: params.data.projectId,
+      explicitExportJobId: params.data.exportJobId
+    });
+
+    const stream = prepared.stream;
+    let sizeBytes = 0;
+    stream.on("data", (chunk: Buffer | string) => {
+      sizeBytes += typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.length;
+    });
+    stream.on("end", () => {
+      app.log.info({
+        scope: "bundleExport",
+        projectId: prepared.projectId,
+        exportJobId: prepared.exportJobId,
+        includedCount: prepared.estimate.includedFiles.length,
+        missingCount: prepared.estimate.missingFiles.length,
+        durationMs: Date.now() - startedAt,
+        sizeBytes
+      });
+    });
+    stream.on("error", (error) => {
+      app.log.error({
+        scope: "bundleExport",
+        projectId: prepared.projectId,
+        exportJobId: prepared.exportJobId,
+        msg: "Bundle stream failed",
+        error: error instanceof Error ? error.message : "unknown error"
+      });
+    });
+    request.raw.on("close", () => {
+      void prepared.cleanup();
+    });
+
+    reply.header("Content-Type", "application/zip");
+    reply.header("Cache-Control", "no-store");
+    reply.header("Content-Disposition", `attachment; filename=\"${prepared.fileName}\"`);
+    return reply.send(stream);
+  });
+
+  app.get("/projects/:projectId/bundle", async (request, reply) => {
+    const params = projectParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: params.error.issues[0]?.message ?? "Invalid params" });
+    }
+    const query = projectBundleQuerySchema.safeParse(request.query);
+    if (!query.success) {
+      return reply.status(400).send({ error: query.error.issues[0]?.message ?? "Invalid query params" });
+    }
+
+    const startedAt = Date.now();
+    const prepared = await prepareProjectBundleDownload({
+      projectId: params.data.projectId,
+      exportSelector: query.data.export
+    });
+
+    const stream = prepared.stream;
+    let sizeBytes = 0;
+    stream.on("data", (chunk: Buffer | string) => {
+      sizeBytes += typeof chunk === "string" ? Buffer.byteLength(chunk) : chunk.length;
+    });
+    stream.on("end", () => {
+      app.log.info({
+        scope: "bundleExport",
+        projectId: prepared.projectId,
+        exportJobId: prepared.exportJobId,
+        includedCount: prepared.estimate.includedFiles.length,
+        missingCount: prepared.estimate.missingFiles.length,
+        durationMs: Date.now() - startedAt,
+        sizeBytes
+      });
+    });
+    stream.on("error", (error) => {
+      app.log.error({
+        scope: "bundleExport",
+        projectId: prepared.projectId,
+        exportJobId: prepared.exportJobId,
+        msg: "Bundle stream failed",
+        error: error instanceof Error ? error.message : "unknown error"
+      });
+    });
+    request.raw.on("close", () => {
+      void prepared.cleanup();
+    });
+
+    reply.header("Content-Type", "application/zip");
+    reply.header("Cache-Control", "no-store");
+    reply.header("Content-Disposition", `attachment; filename=\"${prepared.fileName}\"`);
+    return reply.send(stream);
   });
 
   app.get("/projects/:projectId/artifacts/playbook", async (request, reply) => {

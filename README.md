@@ -165,6 +165,30 @@ Stages por video:
 - `warning`
 - `failed`
 
+## Export bundle (cross-channel)
+
+Projects tab incluye botón `Export bundle` por proyecto. El backend genera un `.zip` con estructura estable para análisis cross-channel:
+
+- `bundle.json`
+- `analysis/orchestrator_input.json` (obligatorio)
+- `primary/channel.json`
+- `primary/manifest.json`
+- `raw/channel.json`
+- `raw/videos.jsonl` o `raw/videos.extract.jsonl` (si excede umbral)
+- `derived/video_features/<videoId>.json` solo para `exemplars.top_videos`, `exemplars.bottom_videos`, `exemplars.mid_videos`
+- `notes/missing_files.json` cuando faltan artifacts opcionales
+
+Endpoints:
+
+- `GET /projects/:projectId/bundle/meta?export=latest|<jobId>`
+- `GET /projects/:projectId/bundle?export=latest|<jobId>`
+- `GET /projects/:projectId/exports/:exportJobId/bundle`
+
+Variables de entorno relacionadas:
+
+- `EXPORT_BUNDLE_RAW_VIDEOS_MAX_BYTES` (default `31457280`)
+- `EXPORT_BUNDLE_CONFIRM_THRESHOLD_MB` (default `80`)
+
 ## Transcript pipeline
 
 - Si hay captions: se usan y `transcript` queda poblado.

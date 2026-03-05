@@ -310,6 +310,53 @@ Response `200`:
 - stream del archivo `thumbnails/<videoId>.jpg`
 - `Cache-Control: public, max-age=3600, immutable`
 
+## 2.15 `GET /projects/:projectId/bundle/meta`
+
+Query params opcionales:
+
+- `export`: `latest` o `jobId` específico
+
+Response `200`:
+
+```json
+{
+  "projectId": "Canal_Demo",
+  "channelId": "UC1234567890123456789012",
+  "exportJobId": "job-a1",
+  "rawVideosMode": "full",
+  "estimatedSizeBytes": 123456,
+  "estimatedSizeMb": 0.12,
+  "confirmationThresholdMb": 80,
+  "confirmationRequired": false,
+  "includedFiles": [],
+  "missingFiles": [],
+  "availableSuccessfulExportJobIds": ["job-a1"]
+}
+```
+
+## 2.16 `GET /projects/:projectId/bundle`
+
+Query params opcionales:
+
+- `export`: `latest` o `jobId` específico
+
+Response `200`:
+
+- `Content-Type: application/zip`
+- Descarga bundle cross-channel con:
+  - `bundle.json`
+  - `analysis/orchestrator_input.json` (obligatorio)
+  - `primary/channel.json`
+  - `primary/manifest.json`
+  - `raw/channel.json`
+  - `raw/videos.jsonl` o `raw/videos.extract.jsonl`
+  - `derived/video_features/<videoId>.json` (solo exemplars)
+  - `notes/missing_files.json` (si aplica)
+
+Alias explícito por job:
+
+- `GET /projects/:projectId/exports/:exportJobId/bundle`
+
 ## 3) SSE events
 
 Todos definidos en `apps/api/src/services/exportJobService.ts` y `apps/web/src/types.ts`.

@@ -94,6 +94,8 @@ export const env = {
   ),
   autoGenTimeoutSec: parsePositiveInt(process.env.AUTO_GEN_TIMEOUT_SEC, 60),
   autoGenTimeoutOrchestratorSec: parsePositiveInt(process.env.AUTO_GEN_TIMEOUT_ORCHESTRATOR_SEC, 300),
+  exportBundleRawVideosMaxBytes: parsePositiveInt(process.env.EXPORT_BUNDLE_RAW_VIDEOS_MAX_BYTES, 30 * 1024 * 1024),
+  exportBundleConfirmThresholdMb: parsePositiveInt(process.env.EXPORT_BUNDLE_CONFIRM_THRESHOLD_MB, 80),
   thumbOcrEnabled: parseBoolean(process.env.THUMB_OCR_ENABLED, true),
   thumbOcrLangs: process.env.THUMB_OCR_LANGS?.trim() || "eng",
   thumbVisionDownscaleWidth: parsePositiveInt(process.env.THUMB_VISION_DOWNSCALE_WIDTH, 256)

@@ -31,3 +31,5 @@ apps/api/exports/
 # .gitignore additions
 apps/api/eng.traineddata
 .swarm/
+
+.DS_Store
