@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const requestAutoGenTaskMock = vi.fn();
 const runOcrMock = vi.fn();
+const recognizeWithLocalOcrMock = vi.fn();
 
 vi.mock("../src/services/autogenRuntime.js", () => ({
   requestAutoGenTask: requestAutoGenTaskMock,
@@ -19,6 +20,10 @@ vi.mock("../src/derived/ocr/tesseractOcr.js", () => ({
   terminateOcrWorkers: vi.fn()
 }));
 
+vi.mock("../src/services/localOcrService.js", () => ({
+  recognizeWithLocalOcr: recognizeWithLocalOcrMock
+}));
+
 describe("thumbnailFeaturesAgent", () => {
   const originalEnv = { ...process.env };
   let tempDir = "";
@@ -27,8 +32,10 @@ describe("thumbnailFeaturesAgent", () => {
     vi.resetModules();
     requestAutoGenTaskMock.mockReset();
     runOcrMock.mockReset();
+    recognizeWithLocalOcrMock.mockReset();
     process.env = { ...originalEnv };
     process.env.THUMB_OCR_ENABLED = "true";
+    process.env.THUMB_OCR_ENGINE = "tesseractjs";
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ytai-thumbnail-features-"));
   });
 
@@ -75,6 +82,69 @@ describe("thumbnailFeaturesAgent", () => {
     expect(result.bundle.thumbnailFeatures.deterministic.hasBigText).toBe(true);
     expect(result.bundle.thumbnailFeatures.llm).toBeNull();
     expect(result.warnings.some((warning) => warning.includes("AUTO_GEN_ENABLED=false"))).toBe(true);
+  });
+
+  it("uses hi-confidence OCR boxes for overlap/textAreaRatio/hasBigText metrics", async () => {
+    process.env.AUTO_GEN_ENABLED = "false";
+    delete process.env.OPENAI_API_KEY;
+    process.env.THUMB_OCR_ENGINE = "tesseractjs";
+
+    runOcrMock.mockResolvedValue({
+      text: "alpha beta noise",
+      confidenceMean: 0.5,
+      boxes: [
+        { x: 0, y: 0, w: 80, h: 20, confidence: 0.95, text: "Alpha" },
+        { x: 50, y: 0, w: 40, h: 10, confidence: 0.7, text: "Beta" },
+        { x: 0, y: 20, w: 80, h: 20, confidence: 0.2, text: "garbage" }
+      ]
+    });
+
+    const thumbnailPath = path.join(tempDir, "thumb-metrics.jpg");
+    await writeThumbnail(thumbnailPath);
+    const { computeDeterministic } = await import("../src/derived/thumbnailFeaturesAgent.js");
+
+    const result = await computeDeterministic({
+      title: "Alpha Beta review",
+      thumbnailAbsPath: thumbnailPath,
+      thumbnailLocalPath: "thumbnails/video-metrics.jpg"
+    });
+
+    expect(result.value.ocrText).toBe("Alpha Beta");
+    expect(result.value.ocrWordCount).toBe(2);
+    expect(result.value.ocrWordCountHiConf).toBe(2);
+    expect(result.value.textAreaRatio).toBeCloseTo(0.208333, 5);
+    expect(result.value.thumb_ocr_title_overlap_jaccard).toBeCloseTo(2 / 3, 5);
+    expect(result.value.hasBigText).toBe(true);
+  });
+
+  it("falls back to tesseract when python OCR is unavailable", async () => {
+    process.env.AUTO_GEN_ENABLED = "false";
+    delete process.env.OPENAI_API_KEY;
+    process.env.THUMB_OCR_ENGINE = "python";
+
+    recognizeWithLocalOcrMock.mockResolvedValue({
+      status: "error",
+      warning: "Local OCR unavailable"
+    });
+    runOcrMock.mockResolvedValue({
+      text: "Fallback OCR",
+      confidenceMean: 0.8,
+      boxes: [{ x: 2, y: 2, w: 80, h: 20, confidence: 0.9, text: "Fallback OCR" }]
+    });
+
+    const thumbnailPath = path.join(tempDir, "thumb-fallback.jpg");
+    await writeThumbnail(thumbnailPath);
+    const { computeDeterministic } = await import("../src/derived/thumbnailFeaturesAgent.js");
+
+    const result = await computeDeterministic({
+      title: "Fallback OCR title",
+      thumbnailAbsPath: thumbnailPath,
+      thumbnailLocalPath: "thumbnails/video-fallback.jpg"
+    });
+
+    expect(recognizeWithLocalOcrMock).toHaveBeenCalledTimes(1);
+    expect(runOcrMock).toHaveBeenCalledTimes(1);
+    expect(result.value.ocrText).toContain("Fallback OCR");
   });
 
   it("merges thumbnail features and normalizes LLM output", async () => {

@@ -141,6 +141,7 @@ export class ExportJobService {
         AUTO_GEN_ENABLED: env.autoGenEnabled,
         LOCAL_ASR_ENABLED: env.localAsrEnabled,
         THUMB_OCR_ENABLED: env.thumbOcrEnabled,
+        THUMB_OCR_ENGINE: env.thumbOcrEngine,
         embeddingModel: "text-embedding-3-small",
         llmModels: {
           title: env.autoGenModelTitle,

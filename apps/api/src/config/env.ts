@@ -58,6 +58,17 @@ function parseReasoningEffort(
   return defaultValue;
 }
 
+function parseThumbOcrEngine(value: string | undefined, defaultValue: "python" | "tesseractjs"): "python" | "tesseractjs" {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === "python") {
+    return "python";
+  }
+  if (normalized === "tesseractjs") {
+    return "tesseractjs";
+  }
+  return defaultValue;
+}
+
 export const env = {
   localAsrMaxConcurrency: parsePositiveInt(process.env.LOCAL_ASR_MAX_CONCURRENCY, 1),
   exportAsrConcurrency: parsePositiveInt(
@@ -97,6 +108,7 @@ export const env = {
   exportBundleRawVideosMaxBytes: parsePositiveInt(process.env.EXPORT_BUNDLE_RAW_VIDEOS_MAX_BYTES, 30 * 1024 * 1024),
   exportBundleConfirmThresholdMb: parsePositiveInt(process.env.EXPORT_BUNDLE_CONFIRM_THRESHOLD_MB, 80),
   thumbOcrEnabled: parseBoolean(process.env.THUMB_OCR_ENABLED, true),
+  thumbOcrEngine: parseThumbOcrEngine(process.env.THUMB_OCR_ENGINE, "python"),
   thumbOcrLangs: process.env.THUMB_OCR_LANGS?.trim() || "eng",
   thumbVisionDownscaleWidth: parsePositiveInt(process.env.THUMB_VISION_DOWNSCALE_WIDTH, 256)
 };

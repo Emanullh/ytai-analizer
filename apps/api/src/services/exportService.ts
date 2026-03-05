@@ -44,6 +44,7 @@ import {
 } from "./exportCacheService.js";
 import { buildVideoPlan, validatePlan } from "./exportPlan.js";
 import { createScheduler } from "./taskScheduler.js";
+import { projectOperationLockService, ProjectLockError } from "./projectOperationLockService.js";
 
 export type ExportVideoStage =
   | "queue"
@@ -864,6 +865,24 @@ export async function exportSelectedVideos(
   callbacks: ExportProgressCallbacks = {},
   dependencies: ExportDependencies = defaultDependencies
 ): Promise<{ folderPath: string; warnings: string[]; exportedCount: number }> {
+  const folderName = sanitizeFolderName(request.channelName);
+  const jobId = request.jobId ?? randomUUID();
+  try {
+    projectOperationLockService.acquireOrThrow({
+      projectId: folderName,
+      operation: "export",
+      ownerId: jobId
+    });
+  } catch (error) {
+    if (error instanceof ProjectLockError) {
+      throw new HttpError(
+        409,
+        `Project is busy with ${error.conflict.currentOperation} (${error.conflict.currentOwnerId}). Try again later.`
+      );
+    }
+    throw error;
+  }
+
   const jobStepId = logEvent(callbacks, {
     scope: "exportService",
     action: "export_start",
@@ -897,29 +916,7 @@ export async function exportSelectedVideos(
     callbacks.onWarning?.({ videoId, message });
   };
 
-  logEvent(callbacks, {
-    scope: "youtube",
-    action: "selected_videos_fetch_start",
-    stepId: jobStepId,
-    msg: "Fetching selected videos metadata"
-  });
-  const details = await dependencies.getSelectedVideoDetails(request.channelId, request.timeframe, request.selectedVideoIds);
-  logEvent(callbacks, {
-    scope: "youtube",
-    action: "selected_videos_fetch_done",
-    msg: "Selected videos metadata fetched",
-    data: { total: details.videos.length, warnings: details.warnings.length }
-  });
-  for (const warning of details.warnings) {
-    addWarning(warning);
-  }
-
-  if (!details.videos.length) {
-    throw new HttpError(400, "No selected videos found to export");
-  }
-
   const exportsRoot = path.resolve(process.cwd(), "exports");
-  const jobId = request.jobId ?? randomUUID();
   const exportedAt = new Date().toISOString();
   const exportedAtDate = new Date(exportedAt);
   const timeframeResolved = resolveTimeframeRange(request.timeframe);
@@ -932,17 +929,38 @@ export async function exportSelectedVideos(
     embeddings: env.exportEmbeddingsConcurrency,
     fs: env.exportFsConcurrency
   });
-  const folderName = sanitizeFolderName(request.channelName);
   const channelFolderPath = path.resolve(exportsRoot, folderName);
   const thumbnailsFolderPath = path.resolve(channelFolderPath, "thumbnails");
   const tempRootPath = path.resolve(exportsRoot, ".tmp", jobId);
   const tempAudioPath = path.resolve(tempRootPath, "audio");
   const rawPaths = createRawPaths(channelFolderPath);
 
-  ensureInsideRoot(exportsRoot, channelFolderPath);
-  ensureInsideRoot(exportsRoot, thumbnailsFolderPath);
-  ensureInsideRoot(exportsRoot, tempRootPath);
-  ensureInsideRoot(exportsRoot, tempAudioPath);
+  try {
+    logEvent(callbacks, {
+      scope: "youtube",
+      action: "selected_videos_fetch_start",
+      stepId: jobStepId,
+      msg: "Fetching selected videos metadata"
+    });
+    const details = await dependencies.getSelectedVideoDetails(request.channelId, request.timeframe, request.selectedVideoIds);
+    logEvent(callbacks, {
+      scope: "youtube",
+      action: "selected_videos_fetch_done",
+      msg: "Selected videos metadata fetched",
+      data: { total: details.videos.length, warnings: details.warnings.length }
+    });
+    for (const warning of details.warnings) {
+      addWarning(warning);
+    }
+
+    if (!details.videos.length) {
+      throw new HttpError(400, "No selected videos found to export");
+    }
+
+    ensureInsideRoot(exportsRoot, channelFolderPath);
+    ensureInsideRoot(exportsRoot, thumbnailsFolderPath);
+    ensureInsideRoot(exportsRoot, tempRootPath);
+    ensureInsideRoot(exportsRoot, tempAudioPath);
 
   logEvent(callbacks, {
     scope: "exportService",
@@ -1031,15 +1049,14 @@ export async function exportSelectedVideos(
   const videoDetailsById = new Map(videoDetailsResult.videos.map((video) => [video.videoId, video]));
   const appendRawVideoRecord = createJsonLineAppender(rawPaths.rawVideosFilePath);
 
-  callbacks.onJobStarted?.({ total: details.videos.length });
-  for (const video of details.videos) {
-    callbacks.onVideoProgress?.({
-      videoId: video.videoId,
-      stage: "queue"
-    });
-  }
+    callbacks.onJobStarted?.({ total: details.videos.length });
+    for (const video of details.videos) {
+      callbacks.onVideoProgress?.({
+        videoId: video.videoId,
+        stage: "queue"
+      });
+    }
 
-  try {
     const processedVideos = await Promise.all(
       details.videos.map((video) =>
         scheduler.runVideo(video.videoId, async (): Promise<ProcessedVideo> => {
@@ -2510,6 +2527,10 @@ export async function exportSelectedVideos(
         path: toRelativeExportPath(exportsRoot, tempRootPath),
         ms: elapsedMs(cleanupStartedAt)
       }
+    });
+    projectOperationLockService.release({
+      projectId: folderName,
+      ownerId: jobId
     });
   }
 }

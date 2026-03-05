@@ -3,11 +3,38 @@ import path from "node:path";
 import { promises as fs } from "node:fs";
 import type { FastifyInstance } from "fastify";
 import yauzl from "yauzl";
+import sharp from "sharp";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 async function writeJson(filePath: string, value: unknown): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
+}
+
+async function writeThumbnail(filePath: string): Promise<void> {
+  const buffer = Buffer.alloc(64 * 64 * 3, 220);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await sharp(buffer, { raw: { width: 64, height: 64, channels: 3 } }).jpeg({ quality: 90 }).toFile(filePath);
+}
+
+async function waitForRerunJob(app: FastifyInstance, projectId: string, jobId: string): Promise<Record<string, unknown>> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 10_000) {
+    const response = await app.inject({
+      method: "GET",
+      url: `/projects/${encodeURIComponent(projectId)}/rerun/thumbnails/jobs/${jobId}`
+    });
+    if (response.statusCode !== 200) {
+      throw new Error(`Unexpected status while polling rerun job: ${response.statusCode}`);
+    }
+    const payload = response.json() as Record<string, unknown>;
+    const status = payload.status;
+    if (status === "done" || status === "failed") {
+      return payload;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting rerun job ${jobId}`);
 }
 
 async function readZipFiles(buffer: Buffer): Promise<Record<string, string>> {
@@ -58,11 +85,15 @@ describe("projects API", () => {
   let app: FastifyInstance;
   let originalCwd = process.cwd();
   let tempDir = "";
+  const originalThumbOcrEnabled = process.env.THUMB_OCR_ENABLED;
+  const originalAutoGenEnabled = process.env.AUTO_GEN_ENABLED;
 
   beforeEach(async () => {
     originalCwd = process.cwd();
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ytai-projects-"));
     process.chdir(tempDir);
+    process.env.THUMB_OCR_ENABLED = "false";
+    process.env.AUTO_GEN_ENABLED = "false";
 
     const exportsRoot = path.resolve(tempDir, "exports");
     const projectA = path.resolve(exportsRoot, "Canal_Demo");
@@ -218,8 +249,7 @@ describe("projects API", () => {
       "utf-8"
     );
 
-    await fs.mkdir(path.resolve(projectA, "thumbnails"), { recursive: true });
-    await fs.writeFile(path.resolve(projectA, "thumbnails", "videoA1.jpg"), "fake-jpg", "utf-8");
+    await writeThumbnail(path.resolve(projectA, "thumbnails", "videoA1.jpg"));
 
     await writeJson(path.resolve(projectB, "channel.json"), {
       exportVersion: "1.1",
@@ -267,6 +297,16 @@ describe("projects API", () => {
     await app.close();
     process.chdir(originalCwd);
     await fs.rm(tempDir, { recursive: true, force: true });
+    if (typeof originalThumbOcrEnabled === "string") {
+      process.env.THUMB_OCR_ENABLED = originalThumbOcrEnabled;
+    } else {
+      delete process.env.THUMB_OCR_ENABLED;
+    }
+    if (typeof originalAutoGenEnabled === "string") {
+      process.env.AUTO_GEN_ENABLED = originalAutoGenEnabled;
+    } else {
+      delete process.env.AUTO_GEN_ENABLED;
+    }
   });
 
   it("returns projects list from exports root", async () => {
@@ -359,5 +399,66 @@ describe("projects API", () => {
     const missingPaths = missingFiles.map((item) => item.path);
     expect(missingPaths).toContain("derived/video_features/videoA2.json");
     expect(missingPaths).toContain("derived/video_features/videoA3.json");
+  });
+
+  it("runs manual thumbnail rerun and updates derived thumbnailFeatures", async () => {
+    const createResponse = await app.inject({
+      method: "POST",
+      url: "/projects/Canal_Demo/rerun/thumbnails",
+      payload: {
+        scope: "selected",
+        videoIds: ["videoA1"],
+        engine: "python",
+        force: true
+      }
+    });
+
+    expect(createResponse.statusCode).toBe(200);
+    const createPayload = createResponse.json() as { jobId: string };
+    expect(createPayload.jobId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    );
+
+    const job = await waitForRerunJob(app, "Canal_Demo", createPayload.jobId);
+    expect(job.status).toBe("done");
+    expect(job.processed).toBe(1);
+    expect(typeof job.auditArtifactPath).toBe("string");
+
+    const derivedRaw = await fs.readFile(
+      path.resolve(tempDir, "exports", "Canal_Demo", "derived", "video_features", "videoA1.json"),
+      "utf-8"
+    );
+    const derived = JSON.parse(derivedRaw) as Record<string, unknown>;
+    const thumbnailFeatures = derived.thumbnailFeatures as Record<string, unknown>;
+    expect(thumbnailFeatures).toBeTruthy();
+    expect(thumbnailFeatures.deterministic).toBeTruthy();
+  });
+
+  it("supports thumbnails-and-orchestrator chained rerun", async () => {
+    const createResponse = await app.inject({
+      method: "POST",
+      url: "/projects/Canal_Demo/rerun/thumbnails-and-orchestrator",
+      payload: {
+        scope: "all",
+        engine: "python",
+        force: true
+      }
+    });
+
+    expect(createResponse.statusCode).toBe(200);
+    const createPayload = createResponse.json() as { jobId: string };
+
+    const job = await waitForRerunJob(app, "Canal_Demo", createPayload.jobId);
+    expect(job.status).toBe("done");
+    expect(job.orchestratorRebuilt).toBe(true);
+
+    const orchestratorRaw = await fs.readFile(
+      path.resolve(tempDir, "exports", "Canal_Demo", "analysis", "orchestrator_input.json"),
+      "utf-8"
+    );
+    const orchestratorInput = JSON.parse(orchestratorRaw) as Record<string, unknown>;
+    expect(orchestratorInput.schemaVersion).toBe("analysis.orchestrator_input.v1");
+    expect(Array.isArray(orchestratorInput.cohorts)).toBe(true);
+    expect(Array.isArray(orchestratorInput.drivers)).toBe(true);
   });
 });

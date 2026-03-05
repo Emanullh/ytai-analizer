@@ -6,6 +6,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 VENV_DIR="${REPO_ROOT}/.venv-asr"
 ASR_REQ_FILE="${REPO_ROOT}/apps/api/scripts/requirements-asr.txt"
 AUTOGEN_REQ_FILE="${REPO_ROOT}/apps/api/scripts/requirements-autogen.txt"
+OCR_REQ_FILE="${REPO_ROOT}/apps/api/scripts/requirements-ocr.txt"
 
 if [[ ! -f "${ASR_REQ_FILE}" ]]; then
   echo "[asr:setup] Missing requirements file: ${ASR_REQ_FILE}" >&2
@@ -14,6 +15,11 @@ fi
 
 if [[ ! -f "${AUTOGEN_REQ_FILE}" ]]; then
   echo "[asr:setup] Missing requirements file: ${AUTOGEN_REQ_FILE}" >&2
+  exit 1
+fi
+
+if [[ ! -f "${OCR_REQ_FILE}" ]]; then
+  echo "[asr:setup] Missing requirements file: ${OCR_REQ_FILE}" >&2
   exit 1
 fi
 
@@ -42,6 +48,7 @@ fi
 "${VENV_PYTHON}" -m pip install --upgrade pip
 "${VENV_PYTHON}" -m pip install -r "${ASR_REQ_FILE}"
 "${VENV_PYTHON}" -m pip install -r "${AUTOGEN_REQ_FILE}"
+"${VENV_PYTHON}" -m pip install -r "${OCR_REQ_FILE}"
 
-echo "[asr:setup] ASR + AutoGen dependencies installed in ${VENV_DIR}"
+echo "[asr:setup] ASR + AutoGen + OCR dependencies installed in ${VENV_DIR}"
 echo "[asr:setup] Python path: ${VENV_PYTHON}"

@@ -518,6 +518,7 @@ class JobLoggerImpl implements JobLogger {
       AUTO_GEN_MODEL_ORCHESTRATOR: env.autoGenModelOrchestrator,
       AUTO_GEN_REASONING_EFFORT: env.autoGenReasoningEffort,
       THUMB_OCR_ENABLED: env.thumbOcrEnabled,
+      THUMB_OCR_ENGINE: env.thumbOcrEngine,
       THUMB_OCR_LANGS: env.thumbOcrLangs,
       OPENAI_API_KEY_CONFIGURED: Boolean(env.openAiApiKey),
       YOUTUBE_API_KEY_CONFIGURED: Boolean(env.youtubeApiKey)

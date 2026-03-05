@@ -15,6 +15,8 @@ import { getByPath } from "../lib/getByPath";
 import { ProjectDetailResponse, ProjectVideoDetail, ProjectVideoSummary } from "../types";
 
 type ArtifactTab = "overview" | "playbook" | "templates" | "model" | "jobs";
+type ThumbnailRerunScope = "all" | "exemplars" | "selected";
+type ThumbnailRerunEngine = "python" | "tesseractjs" | "auto";
 
 type ArtifactState = {
   data: Record<string, unknown> | null;
@@ -29,12 +31,69 @@ interface EvidencePanelState {
   supportedBy: string[];
 }
 
+interface ThumbnailRerunModalState {
+  open: boolean;
+  scope: ThumbnailRerunScope;
+  selectedVideoIdsInput: string;
+  engine: ThumbnailRerunEngine;
+  force: boolean;
+  running: boolean;
+  jobId: string | null;
+  total: number;
+  completed: number;
+  processed: number;
+  skipped: number;
+  failed: number;
+  warnings: string[];
+  videoErrors: Array<{ videoId: string; message: string }>;
+  error: string | null;
+  done: boolean;
+  auditArtifactPath: string | null;
+  orchestratorRebuilt: boolean;
+  rebuildAnalysisRecommended: boolean;
+}
+
 const INITIAL_ARTIFACT_STATE: ArtifactState = {
   data: null,
   loading: false,
   error: null,
   loaded: false
 };
+
+function createInitialThumbnailRerunState(): ThumbnailRerunModalState {
+  return {
+    open: false,
+    scope: "all",
+    selectedVideoIdsInput: "",
+    engine: "python",
+    force: false,
+    running: false,
+    jobId: null,
+    total: 0,
+    completed: 0,
+    processed: 0,
+    skipped: 0,
+    failed: 0,
+    warnings: [],
+    videoErrors: [],
+    error: null,
+    done: false,
+    auditArtifactPath: null,
+    orchestratorRebuilt: false,
+    rebuildAnalysisRecommended: false
+  };
+}
+
+function parseVideoIdsInput(value: string): string[] {
+  return Array.from(
+    new Set(
+      value
+        .split(/[,\\n]/g)
+        .map((item) => item.trim())
+        .filter(Boolean)
+    )
+  );
+}
 
 function formatDate(value: string | null): string {
   if (!value) {
@@ -193,6 +252,11 @@ export default function ProjectDetail() {
     checks: Array<{ artifact: string; exists: boolean; detail?: string }> | null;
     result: { ok: boolean; warnings: string[]; usedLlm: boolean } | null;
   }>({ running: false, error: null, checks: null, result: null });
+
+  const thumbnailRerunEventSourceRef = useRef<EventSource | null>(null);
+  const [thumbnailRerunState, setThumbnailRerunState] = useState<ThumbnailRerunModalState>(
+    createInitialThumbnailRerunState()
+  );
 
   useEffect(() => {
     if (!projectId) {
@@ -476,6 +540,214 @@ export default function ProjectDetail() {
     }
   }, [detail, loadArtifact]);
 
+  const refreshVideosAfterThumbnailRerun = useCallback(async () => {
+    if (!projectId) {
+      return;
+    }
+    try {
+      const encodedId = encodeURIComponent(projectId);
+      const response = await fetch(`/api/projects/${encodedId}/videos`);
+      if (!response.ok) {
+        return;
+      }
+      const payload = (await response.json()) as ProjectVideoSummary[];
+      setVideos(payload);
+      setVideoDetailCache({});
+      setSelectedVideoDetail(null);
+      setSelectedVideoId(null);
+    } catch {
+      // silent refresh failure
+    }
+  }, [projectId]);
+
+  const closeThumbnailRerunModal = useCallback(() => {
+    if (thumbnailRerunState.running) {
+      return;
+    }
+    setThumbnailRerunState((prev) => ({ ...prev, open: false }));
+  }, [thumbnailRerunState.running]);
+
+  const handleRecomputeThumbnails = useCallback(async () => {
+    if (!projectId) {
+      return;
+    }
+
+    const selectedVideoIds =
+      thumbnailRerunState.scope === "selected" ? parseVideoIdsInput(thumbnailRerunState.selectedVideoIdsInput) : undefined;
+    if (thumbnailRerunState.scope === "selected" && (!selectedVideoIds || selectedVideoIds.length === 0)) {
+      setThumbnailRerunState((prev) => ({
+        ...prev,
+        error: "Debes ingresar al menos un videoId para scope=selected."
+      }));
+      return;
+    }
+
+    setThumbnailRerunState((prev) => ({
+      ...prev,
+      running: true,
+      done: false,
+      error: null,
+      warnings: [],
+      videoErrors: [],
+      total: 0,
+      completed: 0,
+      processed: 0,
+      skipped: 0,
+      failed: 0,
+      jobId: null,
+      auditArtifactPath: null,
+      orchestratorRebuilt: false,
+      rebuildAnalysisRecommended: false
+    }));
+
+    try {
+      const encodedId = encodeURIComponent(projectId);
+      const response = await fetch(`/api/projects/${encodedId}/rerun/thumbnails`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          scope: thumbnailRerunState.scope,
+          videoIds: selectedVideoIds,
+          engine: thumbnailRerunState.engine,
+          force: thumbnailRerunState.force
+        })
+      });
+
+      const payload = (await response.json().catch(() => null)) as { jobId?: string; error?: string } | null;
+      if (!response.ok || !payload?.jobId) {
+        setThumbnailRerunState((prev) => ({
+          ...prev,
+          running: false,
+          error: payload?.error ?? `No fue posible iniciar rerun (${response.status}).`
+        }));
+        return;
+      }
+
+      const { jobId } = payload;
+      setThumbnailRerunState((prev) => ({
+        ...prev,
+        jobId
+      }));
+
+      thumbnailRerunEventSourceRef.current?.close();
+      const eventSource = new EventSource(`/api/projects/${encodedId}/rerun/thumbnails/jobs/${jobId}/events`);
+      thumbnailRerunEventSourceRef.current = eventSource;
+      let closedByTerminalEvent = false;
+
+      const registerEvent = (name: string, handler: (data: Record<string, unknown>) => void) => {
+        eventSource.addEventListener(name, (event) => {
+          try {
+            const data = JSON.parse((event as MessageEvent<string>).data) as Record<string, unknown>;
+            handler(data);
+          } catch {
+            setThumbnailRerunState((prev) => ({
+              ...prev,
+              running: false,
+              error: "No se pudo parsear un evento de progreso."
+            }));
+          }
+        });
+      };
+
+      registerEvent("job_started", (data) => {
+        setThumbnailRerunState((prev) => ({
+          ...prev,
+          total: typeof data.total === "number" ? data.total : prev.total
+        }));
+      });
+
+      registerEvent("warning", (data) => {
+        const message = typeof data.message === "string" ? data.message : "Warning desconocido";
+        const videoId = typeof data.videoId === "string" ? data.videoId : null;
+        setThumbnailRerunState((prev) => ({
+          ...prev,
+          warnings: [...prev.warnings, videoId ? `${videoId}: ${message}` : message]
+        }));
+      });
+
+      registerEvent("video_progress", (data) => {
+        const status = typeof data.status === "string" ? data.status : "";
+        if (status === "failed") {
+          const videoId = typeof data.videoId === "string" ? data.videoId : "unknown";
+          const message = typeof data.message === "string" ? data.message : "Error desconocido";
+          setThumbnailRerunState((prev) => ({
+            ...prev,
+            videoErrors: [...prev.videoErrors, { videoId, message }]
+          }));
+        }
+      });
+
+      registerEvent("job_progress", (data) => {
+        setThumbnailRerunState((prev) => ({
+          ...prev,
+          completed: typeof data.completed === "number" ? data.completed : prev.completed,
+          total: typeof data.total === "number" ? data.total : prev.total,
+          processed: typeof data.processed === "number" ? data.processed : prev.processed,
+          skipped: typeof data.skipped === "number" ? data.skipped : prev.skipped,
+          failed: typeof data.failed === "number" ? data.failed : prev.failed
+        }));
+      });
+
+      registerEvent("job_done", (data) => {
+        closedByTerminalEvent = true;
+        eventSource.close();
+        if (thumbnailRerunEventSourceRef.current === eventSource) {
+          thumbnailRerunEventSourceRef.current = null;
+        }
+
+        setThumbnailRerunState((prev) => ({
+          ...prev,
+          running: false,
+          done: true,
+          completed: typeof data.completed === "number" ? data.completed : prev.completed,
+          total: typeof data.total === "number" ? data.total : prev.total,
+          processed: typeof data.processed === "number" ? data.processed : prev.processed,
+          skipped: typeof data.skipped === "number" ? data.skipped : prev.skipped,
+          failed: typeof data.failed === "number" ? data.failed : prev.failed,
+          auditArtifactPath: typeof data.auditArtifactPath === "string" ? data.auditArtifactPath : null,
+          orchestratorRebuilt: data.orchestratorRebuilt === true,
+          rebuildAnalysisRecommended: data.rebuildAnalysisRecommended === true
+        }));
+        void refreshVideosAfterThumbnailRerun();
+      });
+
+      registerEvent("job_failed", (data) => {
+        closedByTerminalEvent = true;
+        eventSource.close();
+        if (thumbnailRerunEventSourceRef.current === eventSource) {
+          thumbnailRerunEventSourceRef.current = null;
+        }
+        setThumbnailRerunState((prev) => ({
+          ...prev,
+          running: false,
+          done: false,
+          error: typeof data.message === "string" ? data.message : "Rerun falló."
+        }));
+      });
+
+      eventSource.onerror = () => {
+        if (closedByTerminalEvent) {
+          return;
+        }
+        eventSource.close();
+        if (thumbnailRerunEventSourceRef.current === eventSource) {
+          thumbnailRerunEventSourceRef.current = null;
+        }
+        setThumbnailRerunState((prev) => ({
+          ...prev,
+          running: false,
+          error: "Se perdió la conexión de progreso del rerun."
+        }));
+      };
+    } catch (requestError) {
+      setThumbnailRerunState((prev) => ({
+        ...prev,
+        running: false,
+        error: requestError instanceof Error ? requestError.message : "Error inesperado."
+      }));
+    }
+  }, [projectId, thumbnailRerunState, refreshVideosAfterThumbnailRerun]);
+
   useEffect(() => {
     if (!evidencePanel.open || evidencePanel.supportedBy.length === 0) {
       return;
@@ -503,6 +775,13 @@ export default function ProjectDetail() {
       canceled = true;
     };
   }, [evidencePanel, loadVideoDetail]);
+
+  useEffect(() => {
+    return () => {
+      thumbnailRerunEventSourceRef.current?.close();
+      thumbnailRerunEventSourceRef.current = null;
+    };
+  }, []);
 
   const allWarnings = useMemo(() => {
     const fromManifest = Array.isArray(detail?.manifest?.warnings)
@@ -720,29 +999,44 @@ export default function ProjectDetail() {
                       Valida que los prerequisitos (channel.json, videos.jsonl, video_features) existan antes de lanzar.
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    disabled={rerunState.running || !detail.channel.channelName}
-                    onClick={() => void handleRerunOrchestrator()}
-                    className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {rerunState.running ? (
-                      <>
-                        <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                        </svg>
-                        Ejecutando...
-                      </>
-                    ) : (
-                      <>
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
-                          <path fillRule="evenodd" d="M15.312 11.424a5.5 5.5 0 01-9.201 2.466l-.312-.311h2.433a.75.75 0 000-1.5H4.598a.75.75 0 00-.75.75v3.634a.75.75 0 001.5 0v-2.033l.312.311a7 7 0 0011.712-3.138.75.75 0 00-1.449-.39zm-1.873-7.263a7 7 0 00-11.712 3.138.75.75 0 001.449.39 5.5 5.5 0 019.201-2.467l.312.311H10.257a.75.75 0 000 1.5h3.634a.75.75 0 00.75-.75V2.649a.75.75 0 00-1.5 0v2.033l-.312-.311a6.972 6.972 0 00-.39-.21z" clipRule="evenodd" />
-                        </svg>
-                        Re-run Orchestrator
-                      </>
-                    )}
-                  </button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setThumbnailRerunState((prev) => ({
+                          ...prev,
+                          open: true,
+                          error: null
+                        }))
+                      }
+                      className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
+                    >
+                      Recompute thumbnails
+                    </button>
+                    <button
+                      type="button"
+                      disabled={rerunState.running || !detail.channel.channelName}
+                      onClick={() => void handleRerunOrchestrator()}
+                      className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {rerunState.running ? (
+                        <>
+                          <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                          </svg>
+                          Ejecutando...
+                        </>
+                      ) : (
+                        <>
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
+                            <path fillRule="evenodd" d="M15.312 11.424a5.5 5.5 0 01-9.201 2.466l-.312-.311h2.433a.75.75 0 000-1.5H4.598a.75.75 0 00-.75.75v3.634a.75.75 0 001.5 0v-2.033l.312.311a7 7 0 0011.712-3.138.75.75 0 00-1.449-.39zm-1.873-7.263a7 7 0 00-11.712 3.138.75.75 0 001.449.39 5.5 5.5 0 019.201-2.467l.312.311H10.257a.75.75 0 000 1.5h3.634a.75.75 0 00.75-.75V2.649a.75.75 0 00-1.5 0v2.033l-.312-.311a6.972 6.972 0 00-.39-.21z" clipRule="evenodd" />
+                          </svg>
+                          Re-run Orchestrator
+                        </>
+                      )}
+                    </button>
+                  </div>
                 </div>
 
                 {rerunState.error ? (
@@ -905,6 +1199,10 @@ export default function ProjectDetail() {
                   const deterministic = asRecord(thumbnailFeatures?.deterministic);
                   const llm = asRecord(thumbnailFeatures?.llm);
                   const ocrText = asString(deterministic?.ocrText);
+                  const ocrConfidence =
+                    typeof deterministic?.ocrConfidenceMean === "number" ? deterministic.ocrConfidenceMean : null;
+                  const ocrWordCountHiConf =
+                    typeof deterministic?.ocrWordCountHiConf === "number" ? deterministic.ocrWordCountHiConf : null;
                   const hasBigText = deterministic?.hasBigText;
                   const archetype = asString(llm?.archetype);
                   const isThumbnailLoading = thumbnailLoadingIds.includes(video.videoId);
@@ -921,6 +1219,8 @@ export default function ProjectDetail() {
                                 <p className="text-xs text-slate-100">
                                   ocrText: <span className="text-slate-200">{ocrText ?? (isThumbnailLoading ? "Cargando..." : "-")}</span>
                                 </p>
+                                <p className="text-xs text-slate-100">ocrConfidence: {formatMetric(ocrConfidence, 3)}</p>
+                                <p className="text-xs text-slate-100">hiConfWords: {valueToText(ocrWordCountHiConf)}</p>
                                 <p className="text-xs text-slate-100">hasBigText: {valueToText(hasBigText)}</p>
                                 <p className="text-xs text-slate-100">archetype: {archetype ?? "-"}</p>
                               </div>
@@ -981,6 +1281,161 @@ export default function ProjectDetail() {
           </div>
         ) : null}
       </section>
+
+      {thumbnailRerunState.open ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" role="dialog" aria-modal="true" aria-label="Recompute thumbnails">
+          <section className="w-full max-w-2xl rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl">
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <div>
+                <h3 className="text-base font-semibold text-slate-900">Recompute thumbnails</h3>
+                <p className="text-xs text-slate-500">Recalcula deterministic + OCR y actualiza `derived/video_features`.</p>
+              </div>
+              <button type="button" className="btn-ghost !rounded-lg !px-3 !py-1.5 !text-xs" onClick={closeThumbnailRerunModal} disabled={thumbnailRerunState.running}>
+                Cerrar
+              </button>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="text-xs font-medium text-slate-700">
+                Scope
+                <select
+                  value={thumbnailRerunState.scope}
+                  onChange={(event) =>
+                    setThumbnailRerunState((prev) => ({
+                      ...prev,
+                      scope: event.target.value as ThumbnailRerunScope
+                    }))
+                  }
+                  disabled={thumbnailRerunState.running}
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-2 text-xs text-slate-900 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+                >
+                  <option value="all">All videos</option>
+                  <option value="exemplars">Exemplars only</option>
+                  <option value="selected">Selected videoIds</option>
+                </select>
+              </label>
+
+              <label className="text-xs font-medium text-slate-700">
+                OCR Engine
+                <select
+                  value={thumbnailRerunState.engine}
+                  onChange={(event) =>
+                    setThumbnailRerunState((prev) => ({
+                      ...prev,
+                      engine: event.target.value as ThumbnailRerunEngine
+                    }))
+                  }
+                  disabled={thumbnailRerunState.running}
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-2 text-xs text-slate-900 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+                >
+                  <option value="python">python</option>
+                  <option value="tesseractjs">tesseractjs</option>
+                  <option value="auto">auto</option>
+                </select>
+              </label>
+            </div>
+
+            {thumbnailRerunState.scope === "selected" ? (
+              <label className="mt-3 block text-xs font-medium text-slate-700">
+                videoIds (coma o salto de línea)
+                <textarea
+                  value={thumbnailRerunState.selectedVideoIdsInput}
+                  onChange={(event) =>
+                    setThumbnailRerunState((prev) => ({
+                      ...prev,
+                      selectedVideoIdsInput: event.target.value
+                    }))
+                  }
+                  disabled={thumbnailRerunState.running}
+                  rows={4}
+                  placeholder="videoA1, videoA2"
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-2 text-xs text-slate-900 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+                />
+              </label>
+            ) : null}
+
+            <label className="mt-3 inline-flex items-center gap-2 text-xs text-slate-700">
+              <input
+                type="checkbox"
+                checked={thumbnailRerunState.force}
+                onChange={(event) =>
+                  setThumbnailRerunState((prev) => ({
+                    ...prev,
+                    force: event.target.checked
+                  }))
+                }
+                disabled={thumbnailRerunState.running}
+                className="h-4 w-4 rounded border-slate-300 text-teal-600 focus:ring-teal-500"
+              />
+              Force recompute (ignorar cache)
+            </label>
+
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void handleRecomputeThumbnails()}
+                disabled={thumbnailRerunState.running}
+                className="btn-primary !rounded-lg !px-3 !py-2 !text-xs"
+              >
+                {thumbnailRerunState.running ? "Procesando..." : "Start rerun"}
+              </button>
+              {thumbnailRerunState.done && thumbnailRerunState.rebuildAnalysisRecommended ? (
+                <button
+                  type="button"
+                  onClick={() => void handleRerunOrchestrator()}
+                  className="inline-flex items-center rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-700"
+                >
+                  Rebuild analysis now
+                </button>
+              ) : null}
+              {thumbnailRerunState.auditArtifactPath ? (
+                <p className="text-xs text-slate-500">Audit: {thumbnailRerunState.auditArtifactPath}</p>
+              ) : null}
+            </div>
+
+            <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
+              <p>
+                Progreso: <strong>{thumbnailRerunState.completed}</strong>/{thumbnailRerunState.total} · processed{" "}
+                <strong>{thumbnailRerunState.processed}</strong> · skipped <strong>{thumbnailRerunState.skipped}</strong> · failed{" "}
+                <strong>{thumbnailRerunState.failed}</strong>
+              </p>
+              {thumbnailRerunState.done && thumbnailRerunState.rebuildAnalysisRecommended ? (
+                <p className="mt-1 text-amber-700">
+                  Thumbnails actualizados; cohorts/drivers/templates pueden seguir viejos hasta ejecutar Rebuild analysis.
+                </p>
+              ) : null}
+            </div>
+
+            {thumbnailRerunState.error ? (
+              <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{thumbnailRerunState.error}</p>
+            ) : null}
+
+            {thumbnailRerunState.videoErrors.length > 0 ? (
+              <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 p-3">
+                <p className="text-xs font-semibold text-rose-800">Errores por video</p>
+                <ul className="mt-2 max-h-32 list-disc space-y-1 overflow-y-auto pl-5 text-xs text-rose-700">
+                  {thumbnailRerunState.videoErrors.map((item, index) => (
+                    <li key={`${item.videoId}-${index}`}>
+                      {item.videoId}: {item.message}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
+            {thumbnailRerunState.warnings.length > 0 ? (
+              <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
+                <p className="text-xs font-semibold text-amber-800">Warnings</p>
+                <ul className="mt-2 max-h-32 list-disc space-y-1 overflow-y-auto pl-5 text-xs text-amber-700">
+                  {thumbnailRerunState.warnings.map((warning, index) => (
+                    <li key={`${warning}-${index}`}>{warning}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </section>
+        </div>
+      ) : null}
 
       {evidencePanel.open ? (
         <div className="fixed inset-0 z-50 flex items-center justify-end bg-slate-900/35 p-4" role="dialog" aria-modal="true" aria-label="Evidence field detail">

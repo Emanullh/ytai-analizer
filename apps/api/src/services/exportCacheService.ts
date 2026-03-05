@@ -81,6 +81,8 @@ export interface ComputeHashesArgs {
   thumbnailFilePath?: string;
 }
 
+export type OcrEngine = "python" | "tesseractjs";
+
 export interface DerivedFeaturePresence {
   titleDeterministic: boolean;
   titleLlm: boolean;
@@ -506,12 +508,7 @@ export async function computeHashes(args: ComputeHashesArgs): Promise<HashBundle
       beamSize: env.localAsrBeamSize
     })
   );
-  const ocrConfigHash = hashStringSha1(
-    JSON.stringify({
-      langs: env.thumbOcrLangs,
-      downscaleWidth: env.thumbVisionDownscaleWidth
-    })
-  );
+  const ocrConfigHash = computeOcrConfigHash();
 
   let thumbnailHash = "";
   if (args.thumbnailFilePath && (await fileExists(args.thumbnailFilePath))) {
@@ -534,6 +531,23 @@ export async function computeHashes(args: ComputeHashesArgs): Promise<HashBundle
       thumbnail: env.autoGenModelThumbnail
     }
   };
+}
+
+export function computeOcrConfigHash(args?: {
+  engine?: OcrEngine;
+  langs?: string;
+  downscaleWidth?: number;
+}): string {
+  const engine = args?.engine ?? env.thumbOcrEngine;
+  const langs = args?.langs ?? env.thumbOcrLangs;
+  const downscaleWidth = args?.downscaleWidth ?? env.thumbVisionDownscaleWidth;
+  return hashStringSha1(
+    JSON.stringify({
+      engine,
+      langs,
+      downscaleWidth
+    })
+  );
 }
 
 function markThumbnailDeterministic(plan: VideoDerivedPartsPlan, mode: "full" | "ocr_only"): void {

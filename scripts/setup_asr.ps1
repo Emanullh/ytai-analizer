@@ -5,6 +5,7 @@ $repoRoot = Resolve-Path (Join-Path $scriptDir '..')
 $venvDir = Join-Path $repoRoot '.venv-asr'
 $asrRequirementsFile = Join-Path $repoRoot 'apps/api/scripts/requirements-asr.txt'
 $autogenRequirementsFile = Join-Path $repoRoot 'apps/api/scripts/requirements-autogen.txt'
+$ocrRequirementsFile = Join-Path $repoRoot 'apps/api/scripts/requirements-ocr.txt'
 $venvPython = Join-Path $venvDir 'Scripts/python.exe'
 
 if (-not (Test-Path $asrRequirementsFile)) {
@@ -13,6 +14,10 @@ if (-not (Test-Path $asrRequirementsFile)) {
 
 if (-not (Test-Path $autogenRequirementsFile)) {
   throw "[asr:setup] Missing requirements file: $autogenRequirementsFile"
+}
+
+if (-not (Test-Path $ocrRequirementsFile)) {
+  throw "[asr:setup] Missing requirements file: $ocrRequirementsFile"
 }
 
 if (-not (Test-Path $venvPython)) {
@@ -36,6 +41,7 @@ if (-not (Test-Path $venvPython)) {
 & $venvPython -m pip install --upgrade pip
 & $venvPython -m pip install -r $asrRequirementsFile
 & $venvPython -m pip install -r $autogenRequirementsFile
+& $venvPython -m pip install -r $ocrRequirementsFile
 
-Write-Host "[asr:setup] ASR + AutoGen dependencies installed in $venvDir"
+Write-Host "[asr:setup] ASR + AutoGen + OCR dependencies installed in $venvDir"
 Write-Host "[asr:setup] Python path: $venvPython"

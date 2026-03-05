@@ -17,7 +17,9 @@
     "python:setup": "node scripts/setup_asr.mjs",
     "python:check": "node scripts/check_asr.mjs",
     "asr:setup": "pnpm python:setup",
-    "asr:check": "pnpm python:check"
+    "asr:check": "pnpm python:check",
+    "ocr:setup": "pnpm python:setup",
+    "ocr:check": "pnpm python:check"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

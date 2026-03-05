@@ -4,7 +4,9 @@ import { randomUUID } from "node:crypto";
 import sharp from "sharp";
 import { env } from "../config/env.js";
 import { requestAutoGenTask } from "../services/autogenRuntime.js";
-import { runOcr, type OcrBox } from "./ocr/tesseractOcr.js";
+import { recognizeWithLocalOcr } from "../services/localOcrService.js";
+import { hashFileSha1, hashStringSha1 } from "../utils/hash.js";
+import { runOcr as runTesseractOcr, type OcrBox, type OcrResult } from "./ocr/tesseractOcr.js";
 import {
   computeBrightnessContrast,
   computeColorfulness,
@@ -42,8 +44,12 @@ const DETERMINISTIC_SIGNAL_FIELDS = new Set([
   "aspectRatio",
   "ocrText",
   "ocrConfidenceMean",
+  "ocrConfidenceP50",
+  "ocrConfidenceP90",
   "ocrCharCount",
   "ocrWordCount",
+  "ocrCharCountHiConf",
+  "ocrWordCountHiConf",
   "textAreaRatio",
   "brightnessMean",
   "contrastStd",
@@ -55,6 +61,12 @@ const DETERMINISTIC_SIGNAL_FIELDS = new Set([
 ]);
 const DETERMINISTIC_SIGNAL_PREFIXES = ["ocrSummary.", "imageStats.", "statsSummary.", "thumbMeta.", "deterministic."] as const;
 const SOFT_IGNORED_SIGNAL_FIELDS = new Set(["layout"]);
+const OCR_MAX_BOXES = 50;
+const OCR_HI_CONF_THRESHOLD = 0.6;
+const OCR_BIG_TEXT_AREA_THRESHOLD = 0.08;
+
+const ocrCache = new Map<string, OcrResult>();
+const ocrInFlight = new Map<string, Promise<{ result: OcrResult; warnings: string[] }>>();
 
 type ArchetypeLabel = (typeof ARCHETYPE_LABELS)[number];
 type FaceCountBucket = (typeof FACE_COUNT_BUCKETS)[number];
@@ -63,6 +75,13 @@ type FacePositionY = (typeof FACE_POSITION_Y)[number];
 type FaceEmotionTone = (typeof FACE_EMOTION_TONES)[number];
 type ClutterLevel = (typeof CLUTTER_LEVELS)[number];
 type StyleTag = (typeof STYLE_TAGS)[number];
+export type ThumbnailOcrEngine = "python" | "tesseractjs" | "auto";
+
+export interface ThumbnailOcrOptions {
+  engine?: ThumbnailOcrEngine;
+  langs?: string[];
+  downscaleWidth?: number;
+}
 
 export interface ThumbnailDeterministicFeatures {
   thumbnailLocalPath: string;
@@ -72,9 +91,13 @@ export interface ThumbnailDeterministicFeatures {
   aspectRatio: number;
   ocrText: string;
   ocrConfidenceMean: number;
+  ocrConfidenceP50: number;
+  ocrConfidenceP90: number;
   ocrBoxes: OcrBox[];
   ocrCharCount: number;
   ocrWordCount: number;
+  ocrCharCountHiConf: number;
+  ocrWordCountHiConf: number;
   textAreaRatio: number;
   brightnessMean: number;
   contrastStd: number;
@@ -165,6 +188,7 @@ export interface ComputeThumbnailFeaturesArgs {
 export interface PersistThumbnailFeaturesArgs extends ComputeThumbnailFeaturesArgs {
   exportsRoot: string;
   channelFolderPath: string;
+  ocr?: ThumbnailOcrOptions;
   compute?: {
     deterministic?: boolean;
     deterministicMode?: "full" | "ocr_only";
@@ -252,6 +276,271 @@ function countWords(input: string): number {
     .filter(Boolean).length;
 }
 
+function normalizeOcrText(input: string): string {
+  return input.replace(/\s+/g, " ").trim();
+}
+
+function resolveThumbOcrEngine(override?: ThumbnailOcrEngine): "python" | "tesseractjs" {
+  const resolved = override === "auto" || !override ? env.thumbOcrEngine : override;
+  return resolved === "tesseractjs" ? "tesseractjs" : "python";
+}
+
+function resolveThumbOcrLangs(override?: string[]): string[] {
+  if (Array.isArray(override) && override.length > 0) {
+    const normalized = override
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (normalized.length > 0) {
+      return normalized;
+    }
+  }
+
+  const tokens = env.thumbOcrLangs
+    .split(/[+,]/g)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return tokens.length ? tokens : ["eng"];
+}
+
+function scoreOcrBox(box: Pick<OcrBox, "confidence" | "w" | "h">): number {
+  return clamp01(box.confidence) * Math.max(0, box.w) * Math.max(0, box.h);
+}
+
+function normalizeOcrBox(raw: Partial<OcrBox>): OcrBox | null {
+  const text = typeof raw.text === "string" ? normalizeOcrText(raw.text) : "";
+  if (!text) {
+    return null;
+  }
+
+  const x = toFinitePositiveInt(raw.x);
+  const y = toFinitePositiveInt(raw.y);
+  const w = toFinitePositiveInt(raw.w);
+  const h = toFinitePositiveInt(raw.h);
+  if (w <= 0 || h <= 0) {
+    return null;
+  }
+
+  const confidence = typeof raw.confidence === "number" ? raw.confidence : 0;
+  return {
+    x,
+    y,
+    w,
+    h,
+    confidence: clamp01(confidence),
+    text
+  };
+}
+
+function sortOcrBoxesReadingOrder(boxes: OcrBox[]): OcrBox[] {
+  return [...boxes].sort((a, b) => {
+    if (a.y !== b.y) {
+      return a.y - b.y;
+    }
+    return a.x - b.x;
+  });
+}
+
+function joinOcrText(boxes: OcrBox[]): string {
+  if (!boxes.length) {
+    return "";
+  }
+  return normalizeOcrText(boxes.map((box) => box.text).join(" "));
+}
+
+function computeConfidenceMean(boxes: OcrBox[]): number {
+  if (!boxes.length) {
+    return 0;
+  }
+  const sum = boxes.reduce((acc, box) => acc + clamp01(box.confidence), 0);
+  return clamp01(sum / boxes.length);
+}
+
+function computeConfidencePercentile(boxes: OcrBox[], percentile: number): number {
+  if (!boxes.length) {
+    return 0;
+  }
+  const sorted = boxes.map((box) => clamp01(box.confidence)).sort((a, b) => a - b);
+  const p = Math.min(1, Math.max(0, percentile));
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * p)));
+  return sorted[index] ?? 0;
+}
+
+function computeBiggestBoxAreaRatio(boxes: OcrBox[], imageWidth: number, imageHeight: number): number {
+  const imageArea = Math.max(0, imageWidth) * Math.max(0, imageHeight);
+  if (imageArea <= 0 || boxes.length === 0) {
+    return 0;
+  }
+  const biggestArea = boxes.reduce((acc, box) => Math.max(acc, Math.max(0, box.w) * Math.max(0, box.h)), 0);
+  return clamp01(biggestArea / imageArea);
+}
+
+function buildOcrConfigHash(args: { engine: "python" | "tesseractjs"; langs: string[]; downscaleWidth: number }): string {
+  return hashStringSha1(
+    JSON.stringify({
+      engine: args.engine,
+      langs: args.langs.join("+"),
+      downscaleWidth: args.downscaleWidth
+    })
+  );
+}
+
+function cloneOcrResult(result: OcrResult): OcrResult {
+  return {
+    text: result.text,
+    confidenceMean: result.confidenceMean,
+    boxes: result.boxes.map((box) => ({ ...box }))
+  };
+}
+
+async function runThumbnailOcr(
+  inputPath: string,
+  ocrOptions?: ThumbnailOcrOptions
+): Promise<{ result: OcrResult; warnings: string[] }> {
+  const imageHash = await hashFileSha1(inputPath);
+  const engine = resolveThumbOcrEngine(ocrOptions?.engine);
+  const langs = resolveThumbOcrLangs(ocrOptions?.langs);
+  const downscaleWidth = ocrOptions?.downscaleWidth ?? env.thumbVisionDownscaleWidth;
+  const cacheKey = `${imageHash}:${buildOcrConfigHash({ engine, langs, downscaleWidth })}`;
+
+  const cached = ocrCache.get(cacheKey);
+  if (cached) {
+    return {
+      result: cloneOcrResult(cached),
+      warnings: []
+    };
+  }
+
+  const inFlight = ocrInFlight.get(cacheKey);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const task = (async (): Promise<{ result: OcrResult; warnings: string[] }> => {
+    const warnings: string[] = [];
+    let result: OcrResult | null = null;
+
+    if (engine === "python") {
+      const local = await recognizeWithLocalOcr({
+        imagePath: inputPath,
+        langs,
+        downscaleWidth
+      });
+
+      if (local.status === "ok") {
+        result = {
+          text: joinOcrText(
+            sortOcrBoxesReadingOrder(
+              local.boxes
+                .map((box) =>
+                  normalizeOcrBox({
+                    x: box.x,
+                    y: box.y,
+                    w: box.w,
+                    h: box.h,
+                    confidence: box.conf,
+                    text: box.text
+                  })
+                )
+                .filter((box): box is OcrBox => box !== null)
+            )
+          ),
+          confidenceMean: 0,
+          boxes: local.boxes
+            .map((box) =>
+              normalizeOcrBox({
+                x: box.x,
+                y: box.y,
+                w: box.w,
+                h: box.h,
+                confidence: box.conf,
+                text: box.text
+              })
+            )
+            .filter((box): box is OcrBox => box !== null)
+        };
+      } else {
+        warnings.push(local.warning);
+      }
+    }
+
+    if (!result) {
+      if (engine === "python") {
+        warnings.push("Thumbnail OCR fallback: switching from python to tesseractjs");
+      }
+      result = await runTesseractOcr(inputPath);
+    }
+
+    const normalizedResult: OcrResult = {
+      text: normalizeOcrText(result.text),
+      confidenceMean: clamp01(result.confidenceMean),
+      boxes: result.boxes
+        .map((box) => normalizeOcrBox(box))
+        .filter((box): box is OcrBox => box !== null)
+    };
+
+    ocrCache.set(cacheKey, cloneOcrResult(normalizedResult));
+    return { result: normalizedResult, warnings };
+  })();
+
+  ocrInFlight.set(cacheKey, task);
+  try {
+    return await task;
+  } finally {
+    ocrInFlight.delete(cacheKey);
+  }
+}
+
+function applyOcrDeterministicSignals(args: {
+  target: Pick<
+    ThumbnailDeterministicFeatures,
+    | "ocrText"
+    | "ocrConfidenceMean"
+    | "ocrConfidenceP50"
+    | "ocrConfidenceP90"
+    | "ocrBoxes"
+    | "ocrCharCount"
+    | "ocrWordCount"
+    | "ocrCharCountHiConf"
+    | "ocrWordCountHiConf"
+    | "textAreaRatio"
+    | "thumb_ocr_title_overlap_jaccard"
+    | "thumb_ocr_title_overlap_tokens"
+    | "hasBigText"
+  >;
+  title: string;
+  imageWidth: number;
+  imageHeight: number;
+  ocr: OcrResult;
+}): void {
+  const normalizedBoxes = args.ocr.boxes
+    .map((box) => normalizeOcrBox(box))
+    .filter((box): box is OcrBox => box !== null);
+  const sortedBoxes = sortOcrBoxesReadingOrder(normalizedBoxes);
+  const hiConfBoxes = sortedBoxes.filter((box) => box.confidence >= OCR_HI_CONF_THRESHOLD);
+  const hiConfText = joinOcrText(hiConfBoxes);
+  const limitedBoxes = limitOcrBoxes(sortedBoxes, OCR_MAX_BOXES);
+  const overlap = computeTitleOcrOverlap(args.title, hiConfText);
+
+  args.target.ocrText = hiConfText;
+  args.target.ocrBoxes = limitedBoxes;
+  args.target.ocrConfidenceMean = computeConfidenceMean(sortedBoxes);
+  args.target.ocrConfidenceP50 = computeConfidencePercentile(sortedBoxes, 0.5);
+  args.target.ocrConfidenceP90 = computeConfidencePercentile(sortedBoxes, 0.9);
+  args.target.ocrCharCount = hiConfText.length;
+  args.target.ocrWordCount = countWords(hiConfText);
+  args.target.ocrCharCountHiConf = hiConfText.length;
+  args.target.ocrWordCountHiConf = countWords(hiConfText);
+  args.target.textAreaRatio = computeTextAreaRatio(hiConfBoxes, args.imageWidth, args.imageHeight);
+  args.target.thumb_ocr_title_overlap_jaccard = overlap.jaccard;
+  args.target.thumb_ocr_title_overlap_tokens = {
+    titleTokens: overlap.titleTokens,
+    ocrTokens: overlap.ocrTokens,
+    overlapTokens: overlap.overlapTokens
+  };
+  args.target.hasBigText =
+    computeBiggestBoxAreaRatio(hiConfBoxes, args.imageWidth, args.imageHeight) >= OCR_BIG_TEXT_AREA_THRESHOLD;
+}
+
 function toFinitePositiveInt(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     return 0;
@@ -305,6 +594,10 @@ export function limitOcrBoxes(boxes: OcrBox[], maxItems = 50): OcrBox[] {
 
   return [...boxes]
     .sort((a, b) => {
+      const scoreDelta = scoreOcrBox(b) - scoreOcrBox(a);
+      if (scoreDelta !== 0) {
+        return scoreDelta;
+      }
       if (b.confidence !== a.confidence) {
         return b.confidence - a.confidence;
       }
@@ -361,6 +654,7 @@ export async function computeDeterministic(args: {
   title: string;
   thumbnailAbsPath: string;
   thumbnailLocalPath: string;
+  ocr?: ThumbnailOcrOptions;
 }): Promise<{ value: ThumbnailDeterministicFeatures; warnings: string[] }> {
   const warnings: string[] = [];
 
@@ -372,9 +666,13 @@ export async function computeDeterministic(args: {
     aspectRatio: 0,
     ocrText: "",
     ocrConfidenceMean: 0,
+    ocrConfidenceP50: 0,
+    ocrConfidenceP90: 0,
     ocrBoxes: [],
     ocrCharCount: 0,
     ocrWordCount: 0,
+    ocrCharCountHiConf: 0,
+    ocrWordCountHiConf: 0,
     textAreaRatio: 0,
     brightnessMean: 0,
     contrastStd: 0,
@@ -428,13 +726,15 @@ export async function computeDeterministic(args: {
 
   if (env.thumbOcrEnabled) {
     try {
-      const ocr = await runOcr(args.thumbnailAbsPath);
-      base.ocrText = ocr.text;
-      base.ocrConfidenceMean = clamp01(ocr.confidenceMean);
-      base.ocrBoxes = limitOcrBoxes(ocr.boxes, 50);
-      base.ocrCharCount = ocr.text.length;
-      base.ocrWordCount = countWords(ocr.text);
-      base.textAreaRatio = computeTextAreaRatio(ocr.boxes, base.imageWidth, base.imageHeight);
+      const ocr = await runThumbnailOcr(args.thumbnailAbsPath, args.ocr);
+      warnings.push(...ocr.warnings);
+      applyOcrDeterministicSignals({
+        target: base,
+        title: args.title,
+        imageWidth: base.imageWidth,
+        imageHeight: base.imageHeight,
+        ocr: ocr.result
+      });
     } catch (error) {
       warnings.push(
         `Thumbnail OCR failed for ${args.thumbnailAbsPath}: ${error instanceof Error ? error.message : "unknown error"}`
@@ -451,7 +751,6 @@ export async function computeDeterministic(args: {
     overlapTokens: overlap.overlapTokens
   };
   base.thumb_ocr_title_overlap_jaccard = overlap.jaccard;
-  base.hasBigText = base.textAreaRatio >= 0.08 || base.ocrWordCount >= 3;
 
   return {
     value: base,
@@ -464,6 +763,7 @@ async function computeDeterministicOcrOnly(args: {
   thumbnailAbsPath: string;
   thumbnailLocalPath: string;
   existing: ThumbnailDeterministicFeatures;
+  ocr?: ThumbnailOcrOptions;
 }): Promise<{ value: ThumbnailDeterministicFeatures; warnings: string[] }> {
   const warnings: string[] = [];
   const next: ThumbnailDeterministicFeatures = {
@@ -473,15 +773,15 @@ async function computeDeterministicOcrOnly(args: {
 
   if (env.thumbOcrEnabled) {
     try {
-      const ocr = await runOcr(args.thumbnailAbsPath);
-      const limitedBoxes = limitOcrBoxes(ocr.boxes, 50);
-      const ocrText = ocr.text.trim();
-      next.ocrText = ocrText;
-      next.ocrBoxes = limitedBoxes;
-      next.ocrConfidenceMean = clamp01(ocr.confidenceMean);
-      next.ocrCharCount = ocrText.length;
-      next.ocrWordCount = countWords(ocrText);
-      next.textAreaRatio = computeTextAreaRatio(limitedBoxes, next.imageWidth, next.imageHeight);
+      const ocr = await runThumbnailOcr(args.thumbnailAbsPath, args.ocr);
+      warnings.push(...ocr.warnings);
+      applyOcrDeterministicSignals({
+        target: next,
+        title: args.title,
+        imageWidth: next.imageWidth,
+        imageHeight: next.imageHeight,
+        ocr: ocr.result
+      });
     } catch (error) {
       warnings.push(
         `Thumbnail OCR failed for ${args.thumbnailAbsPath}: ${error instanceof Error ? error.message : "unknown error"}`
@@ -489,17 +789,27 @@ async function computeDeterministicOcrOnly(args: {
       next.ocrText = "";
       next.ocrBoxes = [];
       next.ocrConfidenceMean = 0;
+      next.ocrConfidenceP50 = 0;
+      next.ocrConfidenceP90 = 0;
       next.ocrCharCount = 0;
       next.ocrWordCount = 0;
+      next.ocrCharCountHiConf = 0;
+      next.ocrWordCountHiConf = 0;
       next.textAreaRatio = 0;
+      next.hasBigText = false;
     }
   } else {
     next.ocrText = "";
     next.ocrBoxes = [];
     next.ocrConfidenceMean = 0;
+    next.ocrConfidenceP50 = 0;
+    next.ocrConfidenceP90 = 0;
     next.ocrCharCount = 0;
     next.ocrWordCount = 0;
+    next.ocrCharCountHiConf = 0;
+    next.ocrWordCountHiConf = 0;
     next.textAreaRatio = 0;
+    next.hasBigText = false;
   }
 
   const overlap = computeTitleOcrOverlap(args.title, next.ocrText);
@@ -509,7 +819,6 @@ async function computeDeterministicOcrOnly(args: {
     ocrTokens: overlap.ocrTokens,
     overlapTokens: overlap.overlapTokens
   };
-  next.hasBigText = next.ocrCharCount >= 12 && next.textAreaRatio >= 0.08;
 
   return { value: next, warnings };
 }
@@ -869,7 +1178,8 @@ export async function computeThumbnailFeaturesBundle(
   const deterministicResult = await computeDeterministic({
     title: args.title,
     thumbnailAbsPath: args.thumbnailAbsPath,
-    thumbnailLocalPath: args.thumbnailLocalPath
+    thumbnailLocalPath: args.thumbnailLocalPath,
+    ocr: undefined
   });
 
   const llmResult = await callAutoGenThumbnailClassifier({
@@ -935,12 +1245,14 @@ export async function persistThumbnailFeaturesArtifact(
             title: args.title,
             thumbnailAbsPath: args.thumbnailAbsPath,
             thumbnailLocalPath: args.thumbnailLocalPath,
-            existing: deterministic
+            existing: deterministic,
+            ocr: args.ocr
           })
         : await computeDeterministic({
             title: args.title,
             thumbnailAbsPath: args.thumbnailAbsPath,
-            thumbnailLocalPath: args.thumbnailLocalPath
+            thumbnailLocalPath: args.thumbnailLocalPath,
+            ocr: args.ocr
           });
     deterministic = deterministicResult.value;
     warnings.push(...deterministicResult.warnings);
@@ -971,7 +1283,8 @@ export async function persistThumbnailFeaturesArtifact(
             await computeDeterministic({
               title: args.title,
               thumbnailAbsPath: args.thumbnailAbsPath,
-              thumbnailLocalPath: args.thumbnailLocalPath
+              thumbnailLocalPath: args.thumbnailLocalPath,
+              ocr: args.ocr
             })
           ).value,
         llm,
@@ -990,6 +1303,35 @@ export async function persistThumbnailFeaturesArtifact(
     artifactRelativePath: toSafeRelativePath(args.channelFolderPath, artifactAbsolutePath),
     mergedBundle
   };
+}
+
+export async function recomputeThumbnailFeaturesForVideo(args: {
+  exportsRoot: string;
+  channelFolderPath: string;
+  videoId: string;
+  title: string;
+  thumbnailAbsPath: string;
+  thumbnailLocalPath: string;
+  engine?: ThumbnailOcrEngine;
+  recomputeLlm?: boolean;
+  deterministicMode?: "full" | "ocr_only";
+}): Promise<PersistThumbnailFeaturesResult> {
+  return persistThumbnailFeaturesArtifact({
+    exportsRoot: args.exportsRoot,
+    channelFolderPath: args.channelFolderPath,
+    videoId: args.videoId,
+    title: args.title,
+    thumbnailAbsPath: args.thumbnailAbsPath,
+    thumbnailLocalPath: args.thumbnailLocalPath,
+    ocr: {
+      engine: args.engine
+    },
+    compute: {
+      deterministic: true,
+      deterministicMode: args.deterministicMode ?? "full",
+      llm: args.recomputeLlm === true
+    }
+  });
 }
 
 function readExistingThumbnailSection(existing: Record<string, unknown> | null): ThumbnailFeaturesSection | null {

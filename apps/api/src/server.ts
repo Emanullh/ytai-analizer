@@ -19,6 +19,11 @@ import { getProjectBundleMeta, prepareProjectBundleDownload } from "./services/e
 import { analyzeChannel } from "./services/youtubeService.js";
 import { HttpError } from "./utils/errors.js";
 import { rerunOrchestrator, PrerequisiteError } from "./services/rerunOrchestratorService.js";
+import {
+  rerunThumbnailsJobService,
+  toRerunLockHttpError,
+  type RerunThumbnailsEvent
+} from "./services/rerunThumbnailsService.js";
 
 const timeframeSchema = z.enum(["1m", "6m", "1y"]);
 
@@ -51,6 +56,28 @@ const projectVideoParamsSchema = z.object({
   projectId: z.string().min(1),
   videoId: z.string().min(1)
 });
+
+const projectRerunJobParamsSchema = z.object({
+  projectId: z.string().min(1),
+  jobId: z.string().uuid("Invalid jobId")
+});
+
+const rerunThumbnailsBodySchema = z
+  .object({
+    scope: z.enum(["all", "exemplars", "selected"]),
+    videoIds: z.array(z.string().min(1)).optional(),
+    engine: z.enum(["python", "tesseractjs", "auto"]).default("python"),
+    force: z.boolean().default(false)
+  })
+  .superRefine((value, ctx) => {
+    if (value.scope === "selected" && (!Array.isArray(value.videoIds) || value.videoIds.length === 0)) {
+      ctx.addIssue({
+        path: ["videoIds"],
+        code: z.ZodIssueCode.custom,
+        message: "videoIds is required when scope=selected"
+      });
+    }
+  });
 
 const projectVideoDetailQuerySchema = z.object({
   maxSegments: z.coerce.number().int().positive().max(2000).optional(),
@@ -185,6 +212,10 @@ export async function buildServer() {
       const result = await rerunOrchestrator(payload.data);
       return reply.send(result);
     } catch (error) {
+      const lockError = toRerunLockHttpError(error);
+      if (lockError) {
+        return reply.status(lockError.statusCode).send({ error: lockError.message });
+      }
       if (error instanceof PrerequisiteError) {
         return reply.status(409).send({
           error: error.message,
@@ -237,6 +268,137 @@ export async function buildServer() {
 
     const detail = await getProjectVideoDetail(params.data.projectId, params.data.videoId, query.data);
     return reply.send(detail);
+  });
+
+  app.post("/projects/:projectId/rerun/thumbnails", async (request, reply) => {
+    const params = projectParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: params.error.issues[0]?.message ?? "Invalid params" });
+    }
+
+    const payload = rerunThumbnailsBodySchema.safeParse(request.body);
+    if (!payload.success) {
+      return reply.status(400).send({ error: payload.error.issues[0]?.message ?? "Invalid request body" });
+    }
+
+    try {
+      const result = rerunThumbnailsJobService.createJob({
+        projectId: params.data.projectId,
+        scope: payload.data.scope,
+        videoIds: payload.data.videoIds,
+        engine: payload.data.engine,
+        force: payload.data.force,
+        rebuildAnalysis: false
+      });
+      return reply.send(result);
+    } catch (error) {
+      const lockError = toRerunLockHttpError(error);
+      if (lockError) {
+        return reply.status(lockError.statusCode).send({ error: lockError.message });
+      }
+      throw error;
+    }
+  });
+
+  app.post("/projects/:projectId/rerun/thumbnails-and-orchestrator", async (request, reply) => {
+    const params = projectParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: params.error.issues[0]?.message ?? "Invalid params" });
+    }
+
+    const payload = rerunThumbnailsBodySchema.safeParse(request.body);
+    if (!payload.success) {
+      return reply.status(400).send({ error: payload.error.issues[0]?.message ?? "Invalid request body" });
+    }
+
+    try {
+      const result = rerunThumbnailsJobService.createJob({
+        projectId: params.data.projectId,
+        scope: payload.data.scope,
+        videoIds: payload.data.videoIds,
+        engine: payload.data.engine,
+        force: payload.data.force,
+        rebuildAnalysis: true
+      });
+      return reply.send(result);
+    } catch (error) {
+      const lockError = toRerunLockHttpError(error);
+      if (lockError) {
+        return reply.status(lockError.statusCode).send({ error: lockError.message });
+      }
+      throw error;
+    }
+  });
+
+  app.get("/projects/:projectId/rerun/thumbnails/jobs/:jobId", async (request, reply) => {
+    const params = projectRerunJobParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: params.error.issues[0]?.message ?? "Invalid params" });
+    }
+
+    const job = rerunThumbnailsJobService.getJob(params.data.jobId);
+    if (!job || job.projectId !== params.data.projectId) {
+      return reply.status(404).send({ error: "Job not found" });
+    }
+
+    return reply.send(job);
+  });
+
+  app.get("/projects/:projectId/rerun/thumbnails/jobs/:jobId/events", async (request, reply) => {
+    const params = projectRerunJobParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: params.error.issues[0]?.message ?? "Invalid params" });
+    }
+
+    const job = rerunThumbnailsJobService.getJob(params.data.jobId);
+    if (!job || job.projectId !== params.data.projectId) {
+      return reply.status(404).send({ error: "Job not found" });
+    }
+
+    reply.hijack();
+    reply.raw.statusCode = 200;
+    reply.raw.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    reply.raw.setHeader("Cache-Control", "no-cache, no-transform");
+    reply.raw.setHeader("Connection", "keep-alive");
+    reply.raw.flushHeaders?.();
+
+    const sendEvent = (event: RerunThumbnailsEvent) => {
+      reply.raw.write(`event: ${event.event}\n`);
+      reply.raw.write(`data: ${JSON.stringify(event.data)}\n\n`);
+    };
+
+    const jobId = params.data.jobId;
+    const unsubscribe = rerunThumbnailsJobService.subscribe(jobId, (event) => {
+      sendEvent(event);
+      if (event.event === "job_done" || event.event === "job_failed") {
+        closeStream();
+      }
+    });
+
+    const history = rerunThumbnailsJobService.getJobEvents(jobId);
+    for (const event of history) {
+      sendEvent(event);
+    }
+    const postSubscribeEvents = rerunThumbnailsJobService.getJobEvents(jobId).slice(history.length);
+    for (const event of postSubscribeEvents) {
+      sendEvent(event);
+    }
+
+    const closeStream = () => {
+      unsubscribe();
+      if (!reply.raw.writableEnded) {
+        reply.raw.end();
+      }
+    };
+
+    request.raw.on("close", () => {
+      unsubscribe();
+    });
+
+    const latestJob = rerunThumbnailsJobService.getJob(jobId);
+    if (latestJob?.status === "done" || latestJob?.status === "failed") {
+      closeStream();
+    }
   });
 
   app.get("/projects/:projectId/bundle/meta", async (request, reply) => {

@@ -27,8 +27,16 @@ function resolvePythonPath() {
 }
 
 const pythonPath = resolvePythonPath();
-const modulesToCheck = ["faster_whisper", "autogen_agentchat", "autogen_ext"];
-const check = spawnSync(pythonPath, ["-c", modulesToCheck.map((moduleName) => `import ${moduleName}`).join("; ")], {
+const dependencySummary = "faster_whisper, autogen_agentchat, autogen_ext, cv2, paddleocr|easyocr";
+const checkScript = [
+  "import importlib.util as u",
+  "import faster_whisper",
+  "import autogen_agentchat",
+  "import autogen_ext",
+  'assert u.find_spec("cv2") is not None, "missing module: cv2"',
+  'assert (u.find_spec("paddleocr") is not None) or (u.find_spec("easyocr") is not None), "missing module: paddleocr or easyocr"'
+].join("; ");
+const check = spawnSync(pythonPath, ["-c", checkScript], {
   cwd: repoRoot,
   encoding: "utf-8"
 });
@@ -51,4 +59,4 @@ if (check.status !== 0) {
 }
 
 // eslint-disable-next-line no-console
-console.log(`[asr:check] OK using ${pythonPath} (${modulesToCheck.join(", ")})`);
+console.log(`[asr:check] OK using ${pythonPath} (${dependencySummary})`);

@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { Timeframe } from "../types.js";
 import { sanitizeFolderName } from "../utils/sanitize.js";
 import { runOrchestrator, type RunOrchestratorResult } from "../analysis/orchestratorService.js";
+import { projectOperationLockService } from "./projectOperationLockService.js";
 
 const VALID_TIMEFRAMES = new Set<string>(["1m", "6m", "1y"]);
 const EXPORTS_ROOT = path.resolve(process.cwd(), "exports");
@@ -81,71 +82,85 @@ export async function rerunOrchestrator(
   request: RerunOrchestratorRequest
 ): Promise<RerunOrchestratorResponse> {
   const folderName = sanitizeFolderName(request.channelName);
-  const exportPath = path.resolve(EXPORTS_ROOT, folderName);
-
-  const checks: PrerequisiteCheck[] = [];
-
-  const exportDirExists = await fileExists(exportPath);
-  checks.push({
-    artifact: "export folder",
-    path: exportPath,
-    exists: exportDirExists
+  const lockOwnerId = randomUUID();
+  projectOperationLockService.acquireOrThrow({
+    projectId: folderName,
+    operation: "rerun_orchestrator",
+    ownerId: lockOwnerId
   });
 
-  if (!exportDirExists) {
-    throw new PrerequisiteError(
-      `Export folder not found: "${folderName}". Run a full export first.`,
-      checks
-    );
-  }
+  try {
+    const exportPath = path.resolve(EXPORTS_ROOT, folderName);
 
-  const channelJsonPath = path.resolve(exportPath, "channel.json");
-  const videosJsonlPath = path.resolve(exportPath, "raw", "videos.jsonl");
-  const videoFeaturesDir = path.resolve(exportPath, "derived", "video_features");
+    const checks: PrerequisiteCheck[] = [];
 
-  const [channelJsonExists, videosJsonlExists, videoFeaturesCount] = await Promise.all([
-    fileExists(channelJsonPath),
-    fileExists(videosJsonlPath),
-    countJsonFiles(videoFeaturesDir)
-  ]);
+    const exportDirExists = await fileExists(exportPath);
+    checks.push({
+      artifact: "export folder",
+      path: exportPath,
+      exists: exportDirExists
+    });
 
-  checks.push(
-    { artifact: "channel.json", path: channelJsonPath, exists: channelJsonExists },
-    { artifact: "raw/videos.jsonl", path: videosJsonlPath, exists: videosJsonlExists },
-    {
-      artifact: "derived/video_features/*.json",
-      path: videoFeaturesDir,
-      exists: videoFeaturesCount > 0,
-      detail: `${videoFeaturesCount} file(s) found`
+    if (!exportDirExists) {
+      throw new PrerequisiteError(
+        `Export folder not found: "${folderName}". Run a full export first.`,
+        checks
+      );
     }
-  );
 
-  const missing = checks.filter((check) => !check.exists);
-  if (missing.length > 0) {
-    const missingNames = missing.map((m) => m.artifact).join(", ");
-    throw new PrerequisiteError(
-      `Cannot re-run orchestrator: missing prerequisites: ${missingNames}. Run a full export first.`,
-      checks
+    const channelJsonPath = path.resolve(exportPath, "channel.json");
+    const videosJsonlPath = path.resolve(exportPath, "raw", "videos.jsonl");
+    const videoFeaturesDir = path.resolve(exportPath, "derived", "video_features");
+
+    const [channelJsonExists, videosJsonlExists, videoFeaturesCount] = await Promise.all([
+      fileExists(channelJsonPath),
+      fileExists(videosJsonlPath),
+      countJsonFiles(videoFeaturesDir)
+    ]);
+
+    checks.push(
+      { artifact: "channel.json", path: channelJsonPath, exists: channelJsonExists },
+      { artifact: "raw/videos.jsonl", path: videosJsonlPath, exists: videosJsonlExists },
+      {
+        artifact: "derived/video_features/*.json",
+        path: videoFeaturesDir,
+        exists: videoFeaturesCount > 0,
+        detail: `${videoFeaturesCount} file(s) found`
+      }
     );
+
+    const missing = checks.filter((check) => !check.exists);
+    if (missing.length > 0) {
+      const missingNames = missing.map((m) => m.artifact).join(", ");
+      throw new PrerequisiteError(
+        `Cannot re-run orchestrator: missing prerequisites: ${missingNames}. Run a full export first.`,
+        checks
+      );
+    }
+
+    const channelMeta = await readChannelJson(channelJsonPath);
+
+    const result: RunOrchestratorResult = await runOrchestrator({
+      exportRoot: EXPORTS_ROOT,
+      channelId: channelMeta.channelId,
+      channelName: channelMeta.channelName,
+      timeframe: channelMeta.timeframe,
+      jobId: randomUUID()
+    });
+
+    return {
+      ok: true,
+      exportPath,
+      warnings: result.warnings,
+      usedLlm: result.usedLlm,
+      artifactPaths: result.artifactPaths
+    };
+  } finally {
+    projectOperationLockService.release({
+      projectId: folderName,
+      ownerId: lockOwnerId
+    });
   }
-
-  const channelMeta = await readChannelJson(channelJsonPath);
-
-  const result: RunOrchestratorResult = await runOrchestrator({
-    exportRoot: EXPORTS_ROOT,
-    channelId: channelMeta.channelId,
-    channelName: channelMeta.channelName,
-    timeframe: channelMeta.timeframe,
-    jobId: randomUUID()
-  });
-
-  return {
-    ok: true,
-    exportPath,
-    warnings: result.warnings,
-    usedLlm: result.usedLlm,
-    artifactPaths: result.artifactPaths
-  };
 }
 
 export class PrerequisiteError extends Error {
