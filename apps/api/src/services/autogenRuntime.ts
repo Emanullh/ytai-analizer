@@ -336,6 +336,8 @@ class AutoGenWorkerClient {
         stdio: ["pipe", "pipe", "pipe"],
         env: {
           ...process.env,
+          PYTHONUTF8: process.env.PYTHONUTF8 ?? "1",
+          PYTHONIOENCODING: process.env.PYTHONIOENCODING ?? "utf-8",
           OPENAI_API_KEY: env.openAiApiKey,
           AUTO_GEN_MODEL_TITLE: env.autoGenModelTitle,
           AUTO_GEN_MODEL_DESCRIPTION: env.autoGenModelDescription,

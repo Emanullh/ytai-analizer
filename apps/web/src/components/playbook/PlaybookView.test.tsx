@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import PlaybookView from "./PlaybookView";
 
 describe("PlaybookView", () => {
-  it("renders insights table and tooltip labels", () => {
+  it("renders insights table and shows tooltips on interaction", () => {
     const onEvidenceClick = vi.fn();
 
     render(
@@ -42,6 +42,9 @@ describe("PlaybookView", () => {
     expect(screen.getByText("Insights")).toBeInTheDocument();
     expect(screen.getByText("Insight A")).toBeInTheDocument();
     expect(screen.getByText("performance.residual")).toBeInTheDocument();
-    expect(screen.getAllByRole("tooltip").length).toBeGreaterThan(0);
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+
+    fireEvent.focus(screen.getByText("Confidence"));
+    expect(screen.getByRole("tooltip")).toHaveTextContent("0..1, basado en fuerza de evidencia");
   });
 });

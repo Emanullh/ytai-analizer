@@ -558,12 +558,34 @@ RESPONSES_ONLY_MODELS: set[str] = {
 }
 
 
+def configure_stdio_utf8() -> None:
+    for stream_name in ("stdin", "stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+configure_stdio_utf8()
+
+
 def log(message: str) -> None:
-    print(message, file=sys.stderr, flush=True)
+    text = str(message)
+    try:
+        print(text, file=sys.stderr, flush=True)
+    except UnicodeEncodeError:
+        print(text.encode("unicode_escape").decode("ascii"), file=sys.stderr, flush=True)
 
 
 def emit(payload: Dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    try:
+        sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    except UnicodeEncodeError:
+        # Fallback for hosts where stdout cannot emit UTF-8.
+        sys.stdout.write(json.dumps(payload, ensure_ascii=True) + "\n")
     sys.stdout.flush()
 
 
@@ -1909,7 +1931,8 @@ async def classify_channel_orchestrator(request: Dict[str, Any]) -> Dict[str, An
         request.get("model", os.environ.get("AUTO_GEN_MODEL_ORCHESTRATOR", "gpt-5.2-pro"))
     ).strip() or "gpt-5.2-pro"
     model = normalize_openai_model(requested_model)
-    user_prompt = json.dumps(payload, ensure_ascii=False)
+    # Use ASCII-only JSON to avoid Windows cp1252/charmap encoding failures.
+    user_prompt = json.dumps(payload, ensure_ascii=True)
 
     if is_responses_only_model(model):
         api_key = os.environ.get("OPENAI_API_KEY", "").strip()

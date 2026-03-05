@@ -319,6 +319,8 @@ class LocalAsrWorkerClient {
         stdio: ["pipe", "pipe", "pipe"],
         env: {
           ...process.env,
+          PYTHONUTF8: process.env.PYTHONUTF8 ?? "1",
+          PYTHONIOENCODING: process.env.PYTHONIOENCODING ?? "utf-8",
           LOCAL_ASR_MODEL: env.localAsrModel,
           LOCAL_ASR_COMPUTE_TYPE: env.localAsrComputeType,
           LOCAL_ASR_LANGUAGE: env.localAsrLanguage,
