@@ -242,7 +242,8 @@ describe("Projects pages", () => {
     fireEvent.click(screen.getByRole("button", { name: "Playbook" }));
     fireEvent.click(await screen.findByRole("button", { name: "Batch rerun feature" }));
     fireEvent.change(screen.getByLabelText("Feature"), { target: { value: "thumbnail" } });
-    fireEvent.click(screen.getByRole("button", { name: "Start rerun" }));
+    fireEvent.change(screen.getByLabelText("Mode"), { target: { value: "collect_assets" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start step" }));
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledTimes(3);
@@ -256,6 +257,7 @@ describe("Projects pages", () => {
     });
     expect(JSON.parse(String((rerunCall?.[1] as { body?: string } | undefined)?.body))).toMatchObject({
       feature: "thumbnail",
+      mode: "collect_assets",
       scope: "all",
     });
   });
@@ -493,7 +495,7 @@ describe("Projects pages", () => {
     expect(screen.getByText("Promise type")).toBeInTheDocument();
     expect(screen.getByText("Story arc")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Recalcular title" }));
+    fireEvent.click(screen.getByRole("button", { name: "Prestep title" }));
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledTimes(7);
@@ -502,7 +504,11 @@ describe("Projects pages", () => {
     const rerunCall = fetchMock.mock.calls[3];
     expect(rerunCall?.[0]).toBe("/api/projects/Canal_Demo/videos/video1/rerun/title");
     expect(rerunCall?.[1]).toMatchObject({
-      method: "POST"
+      method: "POST",
+      headers: { "Content-Type": "application/json" }
+    });
+    expect(JSON.parse(String((rerunCall?.[1] as { body?: string } | undefined)?.body))).toMatchObject({
+      mode: "prepare"
     });
   });
 
@@ -607,7 +613,7 @@ describe("Projects pages", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Playbook" }));
     fireEvent.click(await screen.findByRole("button", { name: "Batch rerun feature" }));
-    fireEvent.click(screen.getByRole("button", { name: "Start rerun" }));
+    fireEvent.click(screen.getByRole("button", { name: "Start step" }));
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledTimes(3);
@@ -621,6 +627,7 @@ describe("Projects pages", () => {
     });
     expect(JSON.parse(String((rerunCall?.[1] as { body?: string } | undefined)?.body))).toMatchObject({
       feature: "title",
+      mode: "full",
       scope: "all"
     });
   });

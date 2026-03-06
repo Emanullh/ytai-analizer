@@ -10,11 +10,19 @@ import type { TranscriptSegment } from "./transcriptModels.js";
 
 export type LocalAsrStage = "downloading_audio" | "transcribing";
 export type LocalAsrStatus = "ok" | "error";
+type LocalAsrWorkerMode = "download_and_transcribe" | "download_only";
 
 export interface LocalAsrRequest {
   videoId: string;
   outputMp3Path: string;
   language?: string;
+  onStage?: (stage: LocalAsrStage) => void;
+  onWorkerRequestId?: (workerRequestId: string) => void;
+}
+
+export interface LocalAsrDownloadRequest {
+  videoId: string;
+  outputMp3Path: string;
   onStage?: (stage: LocalAsrStage) => void;
   onWorkerRequestId?: (workerRequestId: string) => void;
 }
@@ -29,9 +37,21 @@ export interface LocalAsrResult {
   segments?: TranscriptSegment[];
 }
 
-interface WorkerTask extends LocalAsrRequest {
+export interface LocalAsrDownloadResult {
+  status: LocalAsrStatus;
+  warning?: string;
+  outputMp3Path?: string;
+}
+
+interface WorkerTask {
   id: string;
-  resolve: (result: LocalAsrResult) => void;
+  mode: LocalAsrWorkerMode;
+  videoId: string;
+  outputMp3Path: string;
+  language?: string;
+  onStage?: (stage: LocalAsrStage) => void;
+  onWorkerRequestId?: (workerRequestId: string) => void;
+  resolve: (result: LocalAsrResult | LocalAsrDownloadResult) => void;
   reject: (error: unknown) => void;
   timeout: NodeJS.Timeout;
 }
@@ -45,6 +65,7 @@ interface WorkerResponse {
   language?: string;
   model?: string;
   computeType?: string;
+  downloadedPath?: string;
   segments?: Array<{
     startSec?: unknown;
     endSec?: unknown;
@@ -156,51 +177,69 @@ class LocalAsrWorkerClient {
   }
 
   async runTaskWithRetry(request: LocalAsrRequest): Promise<LocalAsrResult> {
-    if (!runtimeLocalAsrEnabled) {
-      return {
+    return this.executeWithRetry(
+      {
+        ...request,
+        mode: "download_and_transcribe"
+      },
+      (warning) => ({
         transcript: "",
         status: "error",
-        warning: getLocalAsrDisabledWarning(request.videoId)
-      };
+        warning
+      })
+    );
+  }
+
+  async runDownloadTaskWithRetry(request: LocalAsrDownloadRequest): Promise<LocalAsrDownloadResult> {
+    return this.executeWithRetry(
+      {
+        ...request,
+        mode: "download_only"
+      },
+      (warning) => ({
+        status: "error",
+        warning
+      })
+    );
+  }
+
+  private async executeWithRetry<T extends LocalAsrResult | LocalAsrDownloadResult>(
+    request: Omit<WorkerTask, "id" | "resolve" | "reject" | "timeout">,
+    buildErrorResult: (warning: string) => T
+  ): Promise<T> {
+    if (!runtimeLocalAsrEnabled) {
+      return buildErrorResult(getLocalAsrDisabledWarning(request.videoId));
     }
 
     try {
-      return await this.enqueue(request);
+      return (await this.enqueue(request)) as T;
     } catch (error) {
       if (!(error instanceof WorkerCrashedError)) {
-        return {
-          transcript: "",
-          status: "error",
-          warning: normalizeLocalAsrWarning(request.videoId, error)
-        };
+        return buildErrorResult(normalizeLocalAsrWarning(request.videoId, error));
       }
 
       try {
         await this.restart();
       } catch (restartError) {
-        return {
-          transcript: "",
-          status: "error",
-          warning: runtimeLocalAsrEnabled
+        return buildErrorResult(
+          runtimeLocalAsrEnabled
             ? normalizeLocalAsrWarning(request.videoId, restartError)
             : getLocalAsrDisabledWarning(request.videoId)
-        };
+        );
       }
 
       try {
-        return await this.enqueue(request);
+        return (await this.enqueue(request)) as T;
       } catch (retryError) {
-        return {
-          transcript: "",
-          status: "error",
-          warning: normalizeLocalAsrWarning(request.videoId, retryError)
-        };
+        return buildErrorResult(normalizeLocalAsrWarning(request.videoId, retryError));
       }
     }
   }
 
-  private async enqueue(request: LocalAsrRequest): Promise<LocalAsrResult> {
-    return new Promise<LocalAsrResult>((resolve, reject) => {
+  private async enqueue(
+    request: Omit<WorkerTask, "id" | "resolve" | "reject" | "timeout">
+  ): Promise<LocalAsrResult | LocalAsrDownloadResult> {
+    return new Promise<LocalAsrResult | LocalAsrDownloadResult>((resolve, reject) => {
       const id = randomUUID();
       request.onWorkerRequestId?.(id);
       const timeoutMs = env.localAsrTimeoutSec * 1_000;
@@ -239,13 +278,22 @@ class LocalAsrWorkerClient {
         }
 
         clearTimeout(task.timeout);
-        task.resolve({
-          transcript: "",
-          status: "error",
-          warning: runtimeLocalAsrEnabled
-            ? normalizeLocalAsrWarning(task.videoId, error)
-            : getLocalAsrDisabledWarning(task.videoId)
-        });
+        task.resolve(
+          task.mode === "download_only"
+            ? {
+                status: "error",
+                warning: runtimeLocalAsrEnabled
+                  ? normalizeLocalAsrWarning(task.videoId, error)
+                  : getLocalAsrDisabledWarning(task.videoId)
+              }
+            : {
+                transcript: "",
+                status: "error",
+                warning: runtimeLocalAsrEnabled
+                  ? normalizeLocalAsrWarning(task.videoId, error)
+                  : getLocalAsrDisabledWarning(task.videoId)
+              }
+        );
       }
       return;
     }
@@ -259,6 +307,7 @@ class LocalAsrWorkerClient {
       this.inFlight.set(task.id, task);
       const payload = {
         id: task.id,
+        mode: task.mode,
         videoId: task.videoId,
         outputMp3Path: task.outputMp3Path,
         language: task.language ?? env.localAsrLanguage
@@ -384,6 +433,17 @@ class LocalAsrWorkerClient {
     }
 
     if (payload.ok) {
+      if (task.mode === "download_only") {
+        this.resolveTask(payload.id, {
+          status: "ok",
+          outputMp3Path:
+            typeof payload.downloadedPath === "string" && payload.downloadedPath.trim()
+              ? payload.downloadedPath.trim()
+              : task.outputMp3Path
+        });
+        return;
+      }
+
       const language = typeof payload.language === "string" && payload.language.trim() ? payload.language.trim() : undefined;
       const model = typeof payload.model === "string" && payload.model.trim() ? payload.model.trim() : undefined;
       const computeType =
@@ -402,14 +462,22 @@ class LocalAsrWorkerClient {
     }
 
     const message = payload.error ?? "unknown local ASR error";
-    this.resolveTask(payload.id, {
-      transcript: "",
-      status: "error",
-      warning: normalizeLocalAsrWarning(task.videoId, new Error(message))
-    });
+    this.resolveTask(
+      payload.id,
+      task.mode === "download_only"
+        ? {
+            status: "error",
+            warning: normalizeLocalAsrWarning(task.videoId, new Error(message))
+          }
+        : {
+            transcript: "",
+            status: "error",
+            warning: normalizeLocalAsrWarning(task.videoId, new Error(message))
+          }
+    );
   }
 
-  private resolveTask(taskId: string, result: LocalAsrResult): void {
+  private resolveTask(taskId: string, result: LocalAsrResult | LocalAsrDownloadResult): void {
     const task = this.inFlight.get(taskId);
     if (!task) {
       return;
@@ -460,4 +528,10 @@ const localAsrWorkerClient = new LocalAsrWorkerClient();
 
 export async function transcribeWithLocalAsr(request: LocalAsrRequest): Promise<LocalAsrResult> {
   return localAsrWorkerClient.runTaskWithRetry(request);
+}
+
+export async function downloadAudioWithLocalAsr(
+  request: LocalAsrDownloadRequest
+): Promise<LocalAsrDownloadResult> {
+  return localAsrWorkerClient.runDownloadTaskWithRetry(request);
 }

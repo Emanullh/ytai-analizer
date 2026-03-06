@@ -404,17 +404,26 @@ describe("export jobs + SSE progress", () => {
     });
     expect(manifest.artifacts).toEqual(
       expect.arrayContaining([
+        "channel.json",
         "raw/channel.json",
         "raw/videos.jsonl",
         "manifest.json",
-        "analysis/orchestrator_input.json",
-        "analysis/playbook.json",
         "derived/channel_models.json",
-        "derived/templates.json",
         "derived/video_features/video0000011.json",
-        "derived/video_features/video0000022.json"
+        "derived/video_features/video0000022.json",
+        "raw/transcripts/video0000011.jsonl",
+        "raw/transcripts/video0000022.jsonl",
+        "raw/audio/video0000011.mp3",
+        "raw/audio/video0000022.mp3",
+        "thumbnails/video0000011.jpg",
+        "thumbnails/video0000022.jpg",
+        "raw/thumbnails/video0000011.jpg",
+        "raw/thumbnails/video0000022.jpg"
       ])
     );
+    expect(manifest.artifacts).not.toContain("analysis/orchestrator_input.json");
+    expect(manifest.artifacts).not.toContain("analysis/playbook.json");
+    expect(manifest.artifacts).not.toContain("derived/templates.json");
     for (const artifact of manifest.artifacts) {
       expect(isSafeRelativeArtifact(artifact)).toBe(true);
       const resolvedArtifactPath = path.resolve(statusBody.exportPath as string, artifact);
@@ -534,27 +543,11 @@ describe("export jobs + SSE progress", () => {
       path.join(statusBody.exportPath as string, "derived", "channel_models.json"),
       "utf-8"
     );
-    const playbookRaw = await fs.readFile(path.join(statusBody.exportPath as string, "analysis", "playbook.json"), "utf-8");
-    const templatesRaw = await fs.readFile(path.join(statusBody.exportPath as string, "derived", "templates.json"), "utf-8");
-    await fs.access(path.join(statusBody.exportPath as string, "analysis", "orchestrator_input.json"));
-
-    const playbook = JSON.parse(playbookRaw) as {
-      schemaVersion: string;
-      warnings: string[];
-      insights: unknown[];
-    };
-    const templates = JSON.parse(templatesRaw) as {
-      schemaVersion: string;
-      warnings: string[];
-      titleTemplates: unknown[];
-    };
-
-    expect(playbook.schemaVersion).toBe("analysis.playbook.v1");
-    expect(templates.schemaVersion).toBe("derived.templates.v1");
-    expect(Array.isArray(playbook.insights)).toBe(true);
-    expect(Array.isArray(templates.titleTemplates)).toBe(true);
-    expect(playbook.warnings.some((warning) => warning.includes("Channel orchestrator LLM skipped"))).toBe(true);
-    expect(templates.warnings.some((warning) => warning.includes("Channel orchestrator LLM skipped"))).toBe(true);
+    await expect(
+      fs.access(path.join(statusBody.exportPath as string, "analysis", "orchestrator_input.json"))
+    ).rejects.toThrow();
+    await expect(fs.access(path.join(statusBody.exportPath as string, "analysis", "playbook.json"))).rejects.toThrow();
+    await expect(fs.access(path.join(statusBody.exportPath as string, "derived", "templates.json"))).rejects.toThrow();
 
     const channelModels = JSON.parse(channelModelsRaw) as {
       schemaVersion: string;
@@ -872,13 +865,13 @@ describe("export jobs + SSE progress", () => {
     const exportPath = firstStatus.exportPath as string;
 
     const firstChannelModelsRaw = await fs.readFile(path.join(exportPath, "derived", "channel_models.json"), "utf-8");
-    const firstPlaybookRaw = await fs.readFile(path.join(exportPath, "analysis", "playbook.json"), "utf-8");
-    const firstTemplatesRaw = await fs.readFile(path.join(exportPath, "derived", "templates.json"), "utf-8");
+    const firstManifestRaw = await fs.readFile(path.join(exportPath, "manifest.json"), "utf-8");
+    const firstChannelRaw = await fs.readFile(path.join(exportPath, "channel.json"), "utf-8");
     const transcriptBefore = await fs.readFile(path.join(exportPath, "raw", "transcripts", "video0000411.jsonl"), "utf-8");
 
     const firstChannelModels = JSON.parse(firstChannelModelsRaw) as { computedAt: string };
-    const firstPlaybook = JSON.parse(firstPlaybookRaw) as { generatedAt: string };
-    const firstTemplates = JSON.parse(firstTemplatesRaw) as { generatedAt: string };
+    const firstManifest = JSON.parse(firstManifestRaw) as { exportedAt: string };
+    const firstChannel = JSON.parse(firstChannelRaw) as { exportedAt: string };
 
     expect(getTranscriptWithFallbackMock).toHaveBeenCalledTimes(2);
     expect(downloadToBufferMock).toHaveBeenCalledTimes(2);
@@ -932,22 +925,22 @@ describe("export jobs + SSE progress", () => {
     expect(requestAutoGenTaskMock).toHaveBeenCalledTimes(0);
 
     const secondChannelModelsRaw = await fs.readFile(path.join(exportPath, "derived", "channel_models.json"), "utf-8");
-    const secondPlaybookRaw = await fs.readFile(path.join(exportPath, "analysis", "playbook.json"), "utf-8");
-    const secondTemplatesRaw = await fs.readFile(path.join(exportPath, "derived", "templates.json"), "utf-8");
+    const secondManifestRaw = await fs.readFile(path.join(exportPath, "manifest.json"), "utf-8");
+    const secondChannelRaw = await fs.readFile(path.join(exportPath, "channel.json"), "utf-8");
     const transcriptAfter = await fs.readFile(path.join(exportPath, "raw", "transcripts", "video0000411.jsonl"), "utf-8");
 
     const secondChannelModels = JSON.parse(secondChannelModelsRaw) as { computedAt: string };
-    const secondPlaybook = JSON.parse(secondPlaybookRaw) as { generatedAt: string };
-    const secondTemplates = JSON.parse(secondTemplatesRaw) as { generatedAt: string };
+    const secondManifest = JSON.parse(secondManifestRaw) as { exportedAt: string };
+    const secondChannel = JSON.parse(secondChannelRaw) as { exportedAt: string };
 
     expect(new Date(secondChannelModels.computedAt).getTime()).toBeGreaterThan(
       new Date(firstChannelModels.computedAt).getTime()
     );
-    expect(new Date(secondPlaybook.generatedAt).getTime()).toBeGreaterThan(
-      new Date(firstPlaybook.generatedAt).getTime()
+    expect(new Date(secondManifest.exportedAt).getTime()).toBeGreaterThan(
+      new Date(firstManifest.exportedAt).getTime()
     );
-    expect(new Date(secondTemplates.generatedAt).getTime()).toBeGreaterThan(
-      new Date(firstTemplates.generatedAt).getTime()
+    expect(new Date(secondChannel.exportedAt).getTime()).toBeGreaterThan(
+      new Date(firstChannel.exportedAt).getTime()
     );
     expect(transcriptAfter).toBe(transcriptBefore);
 
@@ -1291,6 +1284,7 @@ describe("export jobs + SSE progress", () => {
     expect(createResponse.statusCode).toBe(200);
     const { jobId } = createResponse.json() as { jobId: string };
 
+    let completed = false;
     for (let attempt = 0; attempt < 120; attempt += 1) {
       const statusResponse = await app.inject({
         method: "GET",
@@ -1298,6 +1292,7 @@ describe("export jobs + SSE progress", () => {
       });
       const status = statusResponse.json() as { status: string };
       if (status.status === "done") {
+        completed = true;
         break;
       }
       if (status.status === "failed") {
@@ -1306,6 +1301,7 @@ describe("export jobs + SSE progress", () => {
       await sleep(25);
     }
 
+    expect(completed).toBe(true);
     expect(maxActiveAsr).toBe(1);
   });
 });

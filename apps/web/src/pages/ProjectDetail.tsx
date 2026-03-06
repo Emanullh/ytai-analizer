@@ -11,7 +11,8 @@ import ChannelModelView from "../components/model/ChannelModelView";
 import PercentileDistributionChart from "../components/charts/PercentileDistributionChart";
 import VideoFeaturePanels, {
   type VideoFeatureActionState,
-  type VideoFeatureKind
+  type VideoFeatureKind,
+  type VideoFeatureRerunMode
 } from "../components/project/VideoFeaturePanels";
 import SectionExplainer from "../components/SectionExplainer";
 import { asRecord, asString, valueToText } from "../lib/artifactUtils";
@@ -21,6 +22,7 @@ import { ProjectDetailResponse, ProjectVideoDetail, ProjectVideoSummary } from "
 type ArtifactTab = "overview" | "playbook" | "templates" | "model" | "jobs";
 type ThumbnailRerunScope = "all" | "exemplars" | "selected";
 type ProjectBatchFeatureKind = "thumbnail" | "title" | "description" | "transcript";
+type ProjectBatchFeatureMode = VideoFeatureRerunMode;
 
 type ArtifactState = {
   data: Record<string, unknown> | null;
@@ -38,6 +40,7 @@ interface EvidencePanelState {
 interface FeatureBatchRerunModalState {
   open: boolean;
   feature: ProjectBatchFeatureKind;
+  mode: ProjectBatchFeatureMode;
   scope: ThumbnailRerunScope;
   selectedVideoIdsInput: string;
   running: boolean;
@@ -62,10 +65,10 @@ const INITIAL_ARTIFACT_STATE: ArtifactState = {
 
 function createInitialFeatureActionState(): Record<VideoFeatureKind, VideoFeatureActionState> {
   return {
-    thumbnail: { running: false, error: null, warnings: [] },
-    title: { running: false, error: null, warnings: [] },
-    description: { running: false, error: null, warnings: [] },
-    transcript: { running: false, error: null, warnings: [] }
+    thumbnail: { running: false, runningMode: null, error: null, warnings: [] },
+    title: { running: false, runningMode: null, error: null, warnings: [] },
+    description: { running: false, runningMode: null, error: null, warnings: [] },
+    transcript: { running: false, runningMode: null, error: null, warnings: [] }
   };
 }
 
@@ -73,6 +76,7 @@ function createInitialFeatureBatchRerunState(): FeatureBatchRerunModalState {
   return {
     open: false,
     feature: "title",
+    mode: "full",
     scope: "all",
     selectedVideoIdsInput: "",
     running: false,
@@ -615,7 +619,7 @@ export default function ProjectDetail() {
   );
 
   const handleRerunVideoFeature = useCallback(
-    async (feature: VideoFeatureKind) => {
+    async (feature: VideoFeatureKind, mode: VideoFeatureRerunMode) => {
       if (!projectId || !selectedVideoId) {
         return;
       }
@@ -624,6 +628,7 @@ export default function ProjectDetail() {
         ...prev,
         [feature]: {
           running: true,
+          runningMode: mode,
           error: null,
           warnings: []
         }
@@ -633,7 +638,9 @@ export default function ProjectDetail() {
         const response = await fetch(
           `/api/projects/${encodeURIComponent(projectId)}/videos/${encodeURIComponent(selectedVideoId)}/rerun/${feature}`,
           {
-            method: "POST"
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ mode })
           }
         );
         const payload = (await response.json().catch(() => null)) as { error?: string; warnings?: string[] } | null;
@@ -643,7 +650,8 @@ export default function ProjectDetail() {
             ...prev,
             [feature]: {
               running: false,
-              error: payload?.error ?? `No fue posible recalcular ${feature}.`,
+              runningMode: null,
+              error: payload?.error ?? `No fue posible ejecutar ${feature} (${mode}).`,
               warnings: []
             }
           }));
@@ -655,6 +663,7 @@ export default function ProjectDetail() {
           ...prev,
           [feature]: {
             running: false,
+            runningMode: null,
             error: null,
             warnings: Array.isArray(payload?.warnings) ? payload?.warnings.filter((item): item is string => typeof item === "string") : []
           }
@@ -664,7 +673,8 @@ export default function ProjectDetail() {
           ...prev,
           [feature]: {
             running: false,
-            error: requestError instanceof Error ? requestError.message : `Error inesperado recalculando ${feature}.`,
+            runningMode: null,
+            error: requestError instanceof Error ? requestError.message : `Error inesperado ejecutando ${feature}.`,
             warnings: []
           }
         }));
@@ -719,6 +729,7 @@ export default function ProjectDetail() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           feature: featureBatchRerunState.feature,
+          mode: featureBatchRerunState.mode,
           scope: featureBatchRerunState.scope,
           videoIds: selectedVideoIds
         })
@@ -763,6 +774,7 @@ export default function ProjectDetail() {
       registerEvent("job_started", (data) => {
         setFeatureBatchRerunState((prev) => ({
           ...prev,
+          mode: typeof data.mode === "string" ? (data.mode as ProjectBatchFeatureMode) : prev.mode,
           total: typeof data.total === "number" ? data.total : prev.total
         }));
       });
@@ -809,6 +821,7 @@ export default function ProjectDetail() {
           ...prev,
           running: false,
           done: true,
+          mode: typeof data.mode === "string" ? (data.mode as ProjectBatchFeatureMode) : prev.mode,
           completed: typeof data.completed === "number" ? data.completed : prev.completed,
           total: typeof data.total === "number" ? data.total : prev.total,
           processed: typeof data.processed === "number" ? data.processed : prev.processed,
@@ -1405,7 +1418,7 @@ export default function ProjectDetail() {
               <div>
                 <h3 className="text-base font-semibold text-slate-900">Batch rerun by feature</h3>
                 <p className="text-xs text-slate-500">
-                  Recalcula el feature seleccionado para varios videos del proyecto y refresca el dashboard al terminar.
+                  Ejecuta `assets`, `prestep` o `full` para varios videos del proyecto y refresca el dashboard al terminar.
                 </p>
               </div>
               <button type="button" className="btn-ghost !rounded-lg !px-3 !py-1.5 !text-xs" onClick={closeFeatureBatchRerunModal} disabled={featureBatchRerunState.running}>
@@ -1431,6 +1444,25 @@ export default function ProjectDetail() {
                   <option value="title">title</option>
                   <option value="description">description</option>
                   <option value="transcript">transcript</option>
+                </select>
+              </label>
+
+              <label className="text-xs font-medium text-slate-700">
+                Mode
+                <select
+                  value={featureBatchRerunState.mode}
+                  onChange={(event) =>
+                    setFeatureBatchRerunState((prev) => ({
+                      ...prev,
+                      mode: event.target.value as ProjectBatchFeatureMode
+                    }))
+                  }
+                  disabled={featureBatchRerunState.running}
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-2 text-xs text-slate-900 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+                >
+                  <option value="collect_assets">collect_assets</option>
+                  <option value="prepare">prepare</option>
+                  <option value="full">full</option>
                 </select>
               </label>
 
@@ -1480,7 +1512,7 @@ export default function ProjectDetail() {
                 disabled={featureBatchRerunState.running}
                 className="btn-primary !rounded-lg !px-3 !py-2 !text-xs"
               >
-                {featureBatchRerunState.running ? "Procesando..." : "Start rerun"}
+                {featureBatchRerunState.running ? "Procesando..." : "Start step"}
               </button>
               {featureBatchRerunState.auditArtifactPath ? (
                 <p className="text-xs text-slate-500">Audit: {featureBatchRerunState.auditArtifactPath}</p>
@@ -1489,7 +1521,7 @@ export default function ProjectDetail() {
 
             <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
               <p>
-                Progreso: <strong>{featureBatchRerunState.completed}</strong>/{featureBatchRerunState.total} · processed{" "}
+                Modo: <strong>{featureBatchRerunState.mode}</strong> · Progreso: <strong>{featureBatchRerunState.completed}</strong>/{featureBatchRerunState.total} · processed{" "}
                 <strong>{featureBatchRerunState.processed}</strong> · failed <strong>{featureBatchRerunState.failed}</strong>
               </p>
             </div>

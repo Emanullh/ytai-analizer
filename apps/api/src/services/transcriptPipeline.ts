@@ -1,6 +1,5 @@
 import { isLocalAsrEnabled, LocalAsrStage, transcribeWithLocalAsr } from "./localAsrService.js";
 import type { LocalAsrResult } from "./localAsrService.js";
-import { getTranscript } from "./transcriptService.js";
 import type { TranscriptResult } from "./transcriptService.js";
 import type { TranscriptAsrMeta, TranscriptSegment } from "./transcriptModels.js";
 
@@ -12,6 +11,7 @@ export interface TranscriptPipelineOptions {
 }
 
 export interface TranscriptPipelineDependencies {
+  // Legacy hook kept for compatibility with tests and older callers. The pipeline is ASR-only now.
   captionsProvider: (videoId: string) => Promise<TranscriptResult>;
   localAsrProvider: (params: {
     videoId: string;
@@ -34,11 +34,10 @@ export interface TranscriptPipelineResult {
 }
 
 const defaultDependencies: TranscriptPipelineDependencies = {
-  captionsProvider: async (videoId: string) =>
-    getTranscript(videoId, {
-      timeoutMs: 12_000,
-      maxRetries: 1
-    }),
+  captionsProvider: async () => ({
+    transcript: "",
+    status: "missing"
+  }),
   localAsrProvider: async ({ videoId, outputMp3Path, language, onStage, onWorkerRequestId }) =>
     transcribeWithLocalAsr({
       videoId,
@@ -68,30 +67,13 @@ export async function getTranscriptWithFallback(
 ): Promise<TranscriptPipelineResult> {
   const localAsrEnabled =
     typeof dependencies.localAsrEnabled === "function" ? dependencies.localAsrEnabled() : dependencies.localAsrEnabled;
-  const captions = await dependencies.captionsProvider(videoId);
-  if (captions.status === "ok" && captions.transcript.trim()) {
-    const result: TranscriptPipelineResult = {
-      transcript: captions.transcript.trim(),
-      status: "ok",
-      source: "captions",
-      warning: captions.warning
-    };
-
-    if (captions.language) {
-      result.language = captions.language;
-    }
-    if (captions.segments?.length) {
-      result.segments = captions.segments;
-    }
-    return result;
-  }
 
   if (!localAsrEnabled) {
     return {
       transcript: "",
-      status: captions.status === "missing" ? "missing" : "error",
+      status: "error",
       source: "none",
-      warning: mergeWarnings([captions.warning, `Local ASR disabled for video ${videoId}`])
+      warning: mergeWarnings([`Local ASR disabled for video ${videoId}`])
     };
   }
 
@@ -100,7 +82,7 @@ export async function getTranscriptWithFallback(
       transcript: "",
       status: "error",
       source: "none",
-      warning: mergeWarnings([captions.warning, `Local ASR output path missing for video ${videoId}`])
+      warning: mergeWarnings([`Local ASR output path missing for video ${videoId}`])
     };
   }
 
@@ -138,9 +120,6 @@ export async function getTranscriptWithFallback(
     transcript: "",
     status: "error",
     source: "none",
-    warning: mergeWarnings([
-      captions.warning,
-      localAsr.warning ?? `Local ASR returned empty transcript for video ${videoId}`
-    ])
+    warning: mergeWarnings([localAsr.warning ?? `Local ASR returned empty transcript for video ${videoId}`])
   };
 }

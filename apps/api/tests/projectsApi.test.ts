@@ -4,7 +4,26 @@ import { promises as fs } from "node:fs";
 import type { FastifyInstance } from "fastify";
 import yauzl from "yauzl";
 import sharp from "sharp";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const getTranscriptWithFallbackMock = vi.fn();
+const downloadToBufferMock = vi.fn();
+const downloadAudioWithLocalAsrMock = vi.fn();
+
+vi.mock("../src/services/transcriptPipeline.js", () => ({
+  getTranscriptWithFallback: getTranscriptWithFallbackMock
+}));
+
+vi.mock("../src/services/localAsrService.js", () => ({
+  downloadAudioWithLocalAsr: downloadAudioWithLocalAsrMock,
+  isLocalAsrEnabled: vi.fn(() => true),
+  transcribeWithLocalAsr: vi.fn()
+}));
+
+vi.mock("../src/utils/http.js", () => ({
+  fetchJson: vi.fn(),
+  downloadToBuffer: downloadToBufferMock
+}));
 
 async function writeJson(filePath: string, value: unknown): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -15,6 +34,11 @@ async function writeThumbnail(filePath: string): Promise<void> {
   const buffer = Buffer.alloc(64 * 64 * 3, 220);
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await sharp(buffer, { raw: { width: 64, height: 64, channels: 3 } }).jpeg({ quality: 90 }).toFile(filePath);
+}
+
+async function createThumbnailBuffer(): Promise<Buffer> {
+  const buffer = Buffer.alloc(64 * 64 * 3, 220);
+  return await sharp(buffer, { raw: { width: 64, height: 64, channels: 3 } }).jpeg({ quality: 90 }).toBuffer();
 }
 
 async function waitForProjectJob(
@@ -97,6 +121,9 @@ describe("projects API", () => {
     process.chdir(tempDir);
     process.env.THUMB_OCR_ENABLED = "false";
     process.env.AUTO_GEN_ENABLED = "false";
+    getTranscriptWithFallbackMock.mockReset();
+    downloadToBufferMock.mockReset();
+    downloadAudioWithLocalAsrMock.mockReset();
 
     const exportsRoot = path.resolve(tempDir, "exports");
     const projectA = path.resolve(exportsRoot, "Canal_Demo");
@@ -271,6 +298,7 @@ describe("projects API", () => {
     );
 
     await writeThumbnail(path.resolve(projectA, "thumbnails", "videoA1.jpg"));
+    await writeThumbnail(path.resolve(projectA, "thumbnails", "videoA2.jpg"));
 
     await writeJson(path.resolve(projectB, "channel.json"), {
       exportVersion: "1.1",
@@ -459,6 +487,21 @@ describe("projects API", () => {
   });
 
   it("reruns a single feature for one video", async () => {
+    getTranscriptWithFallbackMock.mockResolvedValue({
+      transcript: "title rerun transcript",
+      status: "ok",
+      source: "asr",
+      language: "es",
+      segments: [
+        {
+          startSec: 0,
+          endSec: 2,
+          text: "title rerun transcript",
+          confidence: null
+        }
+      ]
+    });
+
     const response = await app.inject({
       method: "POST",
       url: "/projects/Canal_Demo/videos/videoA1/rerun/title"
@@ -468,6 +511,7 @@ describe("projects API", () => {
     const payload = response.json() as Record<string, unknown>;
     expect(payload.ok).toBe(true);
     expect(payload.feature).toBe("title");
+    expect(payload.mode).toBe("full");
     expect(payload.videoId).toBe("videoA1");
 
     const derivedRaw = await fs.readFile(
@@ -478,6 +522,155 @@ describe("projects API", () => {
     const titleFeatures = derived.titleFeatures as Record<string, unknown>;
     expect(titleFeatures).toBeTruthy();
     expect(titleFeatures.deterministic).toBeTruthy();
+    expect(getTranscriptWithFallbackMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("collects audio assets without recomputing transcript features", async () => {
+    downloadAudioWithLocalAsrMock.mockImplementation(async ({ outputMp3Path }: { outputMp3Path: string }) => {
+      await fs.mkdir(path.dirname(outputMp3Path), { recursive: true });
+      await fs.writeFile(outputMp3Path, "fake-mp3", "utf-8");
+      return {
+        status: "ok",
+        outputMp3Path
+      };
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/projects/Canal_Demo/videos/videoA1/rerun/transcript",
+      payload: {
+        mode: "collect_assets"
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    const payload = response.json() as Record<string, unknown>;
+    expect(payload.ok).toBe(true);
+    expect(payload.mode).toBe("collect_assets");
+    expect(payload.stepsExecuted).toContain("collect_audio_asset");
+    expect((payload.preparedAssets as Record<string, unknown>).audioPath).toBe("raw/audio/videoA1.mp3");
+    expect(getTranscriptWithFallbackMock).not.toHaveBeenCalled();
+
+    await expect(fs.access(path.resolve(tempDir, "exports", "Canal_Demo", "raw", "audio", "videoA1.mp3"))).resolves.toBeUndefined();
+
+    const rawVideo = (
+      await fs.readFile(path.resolve(tempDir, "exports", "Canal_Demo", "raw", "videos.jsonl"), "utf-8")
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)[0];
+    expect(rawVideo.audioLocalPath).toBe("raw/audio/videoA1.mp3");
+  });
+
+  it("recovers a missing thumbnail before rerunning thumbnail features", async () => {
+    await fs.rm(path.resolve(tempDir, "exports", "Canal_Demo", "thumbnails", "videoA1.jpg"), { force: true });
+    await writeJson(path.resolve(tempDir, "exports", "Canal_Demo", "manifest.json"), {
+      jobId: "job-a1",
+      channelId: "UC1234567890123456789012",
+      channelFolder: "Canal_Demo",
+      exportVersion: "1.1",
+      exportedAt: "2026-03-01T12:00:00.000Z",
+      counts: {
+        totalVideosSelected: 2,
+        transcriptsOk: 1,
+        transcriptsMissing: 1,
+        transcriptsError: 0,
+        thumbnailsOk: 1,
+        thumbnailsFailed: 1
+      },
+      warnings: [],
+      artifacts: ["channel.json", "manifest.json"]
+    });
+    downloadToBufferMock.mockResolvedValue(await createThumbnailBuffer());
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/projects/Canal_Demo/videos/videoA1/rerun/thumbnail"
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(downloadToBufferMock).toHaveBeenCalled();
+    await expect(fs.access(path.resolve(tempDir, "exports", "Canal_Demo", "thumbnails", "videoA1.jpg"))).resolves.toBeUndefined();
+
+    const manifestJson = JSON.parse(
+      await fs.readFile(path.resolve(tempDir, "exports", "Canal_Demo", "manifest.json"), "utf-8")
+    ) as Record<string, unknown>;
+    expect((manifestJson.counts as Record<string, unknown>).thumbnailsOk).toBe(2);
+    expect((manifestJson.counts as Record<string, unknown>).thumbnailsFailed).toBe(0);
+  });
+
+  it("reruns transcript for one video with local ASR and refreshes project metadata", async () => {
+    getTranscriptWithFallbackMock.mockResolvedValue({
+      transcript: "nuevo transcript desde asr",
+      status: "ok",
+      source: "asr",
+      language: "es",
+      asrMeta: {
+        model: "large-v3-turbo",
+        computeType: "int8"
+      },
+      segments: [
+        {
+          startSec: 0,
+          endSec: 1.5,
+          text: "nuevo transcript",
+          confidence: null
+        },
+        {
+          startSec: 1.5,
+          endSec: 3,
+          text: "desde asr",
+          confidence: null
+        }
+      ]
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/projects/Canal_Demo/videos/videoA1/rerun/transcript"
+    });
+
+    expect(response.statusCode).toBe(200);
+    const payload = response.json() as Record<string, unknown>;
+    expect(payload.ok).toBe(true);
+    expect(payload.feature).toBe("transcript");
+    expect(getTranscriptWithFallbackMock).toHaveBeenCalledTimes(1);
+
+    const transcriptRaw = await fs.readFile(
+      path.resolve(tempDir, "exports", "Canal_Demo", "raw", "transcripts", "videoA1.jsonl"),
+      "utf-8"
+    );
+    const transcriptRows = transcriptRaw
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(transcriptRows[0]?.source).toBe("asr");
+    expect(transcriptRows[0]?.status).toBe("ok");
+    expect(transcriptRows[0]?.model).toBe("large-v3-turbo");
+    expect(transcriptRows[1]?.text).toBe("nuevo transcript");
+
+    const rawVideos = (
+      await fs.readFile(path.resolve(tempDir, "exports", "Canal_Demo", "raw", "videos.jsonl"), "utf-8")
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect((rawVideos[0]?.transcriptRef as Record<string, unknown>)?.transcriptSource).toBe("asr");
+    expect((rawVideos[0]?.transcriptRef as Record<string, unknown>)?.transcriptStatus).toBe("ok");
+
+    const channelJson = JSON.parse(
+      await fs.readFile(path.resolve(tempDir, "exports", "Canal_Demo", "channel.json"), "utf-8")
+    ) as Record<string, unknown>;
+    const channelVideo = (channelJson.videos as Array<Record<string, unknown>>).find((video) => video.videoId === "videoA1");
+    expect(channelVideo?.transcriptSource).toBe("asr");
+    expect(channelVideo?.transcriptStatus).toBe("ok");
+
+    const manifestJson = JSON.parse(
+      await fs.readFile(path.resolve(tempDir, "exports", "Canal_Demo", "manifest.json"), "utf-8")
+    ) as Record<string, unknown>;
+    expect((manifestJson.counts as Record<string, unknown>).transcriptsOk).toBe(1);
+    expect((manifestJson.counts as Record<string, unknown>).transcriptsMissing).toBe(1);
+    expect((manifestJson.counts as Record<string, unknown>).transcriptsError).toBe(0);
   });
 
   it("runs batch rerun for thumbnails through the unified feature route", async () => {
@@ -499,6 +692,7 @@ describe("projects API", () => {
     );
     expect(job.status).toBe("done");
     expect(job.feature).toBe("thumbnail");
+    expect(job.mode).toBe("full");
     expect(typeof job.auditArtifactPath).toBe("string");
 
     const derivedRaw = await fs.readFile(

@@ -2,37 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import { getTranscriptWithFallback } from "../src/services/transcriptPipeline.js";
 
 describe("transcriptPipeline", () => {
-  it("uses captions transcript and does not call local ASR when captions are available", async () => {
+  it("uses local ASR and does not consult captions providers anymore", async () => {
     const captionsProvider = vi.fn().mockResolvedValue({
       transcript: "hola desde captions",
       status: "ok"
-    });
-    const localAsrProvider = vi.fn();
-
-    const result = await getTranscriptWithFallback(
-      "video-1",
-      { outputMp3Path: "/tmp/video-1.mp3" },
-      {
-        captionsProvider,
-        localAsrProvider,
-        localAsrEnabled: true
-      }
-    );
-
-    expect(result).toEqual({
-      transcript: "hola desde captions",
-      status: "ok",
-      source: "captions",
-      warning: undefined
-    });
-    expect(localAsrProvider).not.toHaveBeenCalled();
-  });
-
-  it("calls local ASR when captions are missing", async () => {
-    const captionsProvider = vi.fn().mockResolvedValue({
-      transcript: "",
-      status: "missing",
-      warning: "captions missing"
     });
     const localAsrProvider = vi.fn().mockResolvedValue({
       transcript: "texto local",
@@ -40,8 +13,8 @@ describe("transcriptPipeline", () => {
     });
 
     const result = await getTranscriptWithFallback(
-      "video-2",
-      { outputMp3Path: "/tmp/video-2.mp3", language: "es" },
+      "video-1",
+      { outputMp3Path: "/tmp/video-1.mp3", language: "es" },
       {
         captionsProvider,
         localAsrProvider,
@@ -49,10 +22,11 @@ describe("transcriptPipeline", () => {
       }
     );
 
+    expect(captionsProvider).not.toHaveBeenCalled();
     expect(localAsrProvider).toHaveBeenCalledTimes(1);
     expect(localAsrProvider).toHaveBeenCalledWith({
-      videoId: "video-2",
-      outputMp3Path: "/tmp/video-2.mp3",
+      videoId: "video-1",
+      outputMp3Path: "/tmp/video-1.mp3",
       language: "es",
       onStage: undefined,
       onWorkerRequestId: undefined
@@ -65,10 +39,6 @@ describe("transcriptPipeline", () => {
   });
 
   it("propagates ASR segments and provenance when available", async () => {
-    const captionsProvider = vi.fn().mockResolvedValue({
-      transcript: "",
-      status: "missing"
-    });
     const localAsrProvider = vi.fn().mockResolvedValue({
       transcript: "texto local",
       status: "ok",
@@ -86,10 +56,10 @@ describe("transcriptPipeline", () => {
     });
 
     const result = await getTranscriptWithFallback(
-      "video-2b",
-      { outputMp3Path: "/tmp/video-2b.mp3", language: "es" },
+      "video-2",
+      { outputMp3Path: "/tmp/video-2.mp3", language: "es" },
       {
-        captionsProvider,
+        captionsProvider: vi.fn(),
         localAsrProvider,
         localAsrEnabled: true
       }
@@ -116,48 +86,35 @@ describe("transcriptPipeline", () => {
   });
 
   it("returns empty transcript and warning when local ASR fails", async () => {
-    const captionsProvider = vi.fn().mockResolvedValue({
-      transcript: "",
-      status: "missing",
-      warning: "captions missing"
-    });
-    const localAsrProvider = vi.fn().mockResolvedValue({
-      transcript: "",
-      status: "error",
-      warning: "gpu unavailable"
-    });
-
     const result = await getTranscriptWithFallback(
       "video-3",
       { outputMp3Path: "/tmp/video-3.mp3" },
       {
-        captionsProvider,
-        localAsrProvider,
+        captionsProvider: vi.fn(),
+        localAsrProvider: vi.fn().mockResolvedValue({
+          transcript: "",
+          status: "error",
+          warning: "gpu unavailable"
+        }),
         localAsrEnabled: true
       }
     );
 
-    expect(localAsrProvider).toHaveBeenCalledTimes(1);
     expect(result.transcript).toBe("");
     expect(result.status).toBe("error");
     expect(result.source).toBe("none");
-    expect(result.warning).toContain("captions missing");
     expect(result.warning).toContain("gpu unavailable");
+    expect(result.warning).not.toContain("captions");
   });
 
-  it("degrades to captions-only mode when local ASR is disabled at runtime", async () => {
-    const captionsProvider = vi.fn().mockResolvedValue({
-      transcript: "",
-      status: "missing",
-      warning: "captions missing"
-    });
+  it("returns an error when local ASR is disabled at runtime", async () => {
     const localAsrProvider = vi.fn();
 
     const result = await getTranscriptWithFallback(
       "video-4",
       { outputMp3Path: "/tmp/video-4.mp3" },
       {
-        captionsProvider,
+        captionsProvider: vi.fn(),
         localAsrProvider,
         localAsrEnabled: () => false
       }
@@ -165,9 +122,28 @@ describe("transcriptPipeline", () => {
 
     expect(localAsrProvider).not.toHaveBeenCalled();
     expect(result.transcript).toBe("");
-    expect(result.status).toBe("missing");
+    expect(result.status).toBe("error");
     expect(result.source).toBe("none");
-    expect(result.warning).toContain("captions missing");
     expect(result.warning).toContain("Local ASR disabled");
+  });
+
+  it("returns an error when the ASR output path is missing", async () => {
+    const localAsrProvider = vi.fn();
+
+    const result = await getTranscriptWithFallback(
+      "video-5",
+      {},
+      {
+        captionsProvider: vi.fn(),
+        localAsrProvider,
+        localAsrEnabled: true
+      }
+    );
+
+    expect(localAsrProvider).not.toHaveBeenCalled();
+    expect(result.transcript).toBe("");
+    expect(result.status).toBe("error");
+    expect(result.source).toBe("none");
+    expect(result.warning).toContain("output path missing");
   });
 });

@@ -22,6 +22,7 @@ import { resetLocalOcrRuntime } from "./localOcrService.js";
 import { hashFileSha1 } from "../utils/hash.js";
 import { projectOperationLockService, ProjectLockError } from "./projectOperationLockService.js";
 import { downloadToBuffer } from "../utils/http.js";
+import { syncManifestThumbnailCounts } from "./projectManifestSyncService.js";
 
 const RERUN_AUDIT_SCHEMA = "operations.rerun_thumbnails.v1";
 const VALID_TIMEFRAMES = new Set(["1m", "6m", "1y"] as const);
@@ -1022,6 +1023,8 @@ class RerunThumbnailsJobService {
           })
         )
       );
+
+      await syncManifestThumbnailCounts(project.projectRoot);
 
       const finishedAt = nowIso();
       record.finishedAt = finishedAt;

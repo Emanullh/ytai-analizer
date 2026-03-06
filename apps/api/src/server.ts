@@ -68,6 +68,10 @@ const projectVideoFeatureParamsSchema = z.object({
   feature: z.enum(["thumbnail", "title", "description", "transcript"])
 });
 
+const rerunVideoFeatureBodySchema = z.object({
+  mode: z.enum(["collect_assets", "prepare", "full"]).default("full")
+});
+
 const projectRerunJobParamsSchema = z.object({
   projectId: z.string().min(1),
   jobId: z.string().uuid("Invalid jobId")
@@ -94,6 +98,7 @@ const rerunThumbnailsBodySchema = z
 const rerunProjectFeaturesBodySchema = z
   .object({
     feature: z.enum(["thumbnail", "title", "description", "transcript"]),
+    mode: z.enum(["collect_assets", "prepare", "full"]).default("full"),
     scope: z.enum(["all", "exemplars", "selected"]),
     videoIds: z.array(z.string().min(1)).optional()
   })
@@ -304,8 +309,16 @@ export async function buildServer() {
       return reply.status(400).send({ error: params.error.issues[0]?.message ?? "Invalid params" });
     }
 
+    const payload = rerunVideoFeatureBodySchema.safeParse(request.body ?? {});
+    if (!payload.success) {
+      return reply.status(400).send({ error: payload.error.issues[0]?.message ?? "Invalid request body" });
+    }
+
     try {
-      const result = await rerunVideoFeature(params.data);
+      const result = await rerunVideoFeature({
+        ...params.data,
+        mode: payload.data.mode
+      });
       return reply.send(result);
     } catch (error) {
       const lockError = toRerunLockHttpError(error);

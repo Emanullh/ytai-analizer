@@ -4,9 +4,11 @@ import { asRecord, asString, valueToText } from "../../lib/artifactUtils";
 import type { ProjectVideoDetail } from "../../types";
 
 export type VideoFeatureKind = "thumbnail" | "title" | "description" | "transcript";
+export type VideoFeatureRerunMode = "collect_assets" | "prepare" | "full";
 
 export interface VideoFeatureActionState {
   running: boolean;
+  runningMode: VideoFeatureRerunMode | null;
   error: string | null;
   warnings: string[];
 }
@@ -18,7 +20,7 @@ interface VideoFeaturePanelsProps {
   transcriptRows: Array<Record<string, unknown>>;
   transcriptSearch: string;
   onTranscriptSearchChange: (value: string) => void;
-  onRerunFeature: (feature: VideoFeatureKind) => void;
+  onRerunFeature: (feature: VideoFeatureKind, mode: VideoFeatureRerunMode) => void;
   actionStateByFeature: Record<VideoFeatureKind, VideoFeatureActionState>;
   rerunDisabled: boolean;
 }
@@ -65,6 +67,16 @@ function joinOrDash(values: string[], limit = 4): string {
   return values.slice(0, limit).join(", ");
 }
 
+function rerunModeLabel(mode: VideoFeatureRerunMode): string {
+  if (mode === "collect_assets") {
+    return "Assets";
+  }
+  if (mode === "prepare") {
+    return "Prestep";
+  }
+  return "Recalcular";
+}
+
 function FeatureRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-start justify-between gap-3 border-b border-slate-100 py-2 last:border-b-0">
@@ -82,7 +94,7 @@ function FeatureCard(props: {
   warnings: string[];
   action: VideoFeatureActionState;
   disabled: boolean;
-  onRerun: (feature: VideoFeatureKind) => void;
+  onRerun: (feature: VideoFeatureKind, mode: VideoFeatureRerunMode) => void;
   children: ReactNode;
 }) {
   return (
@@ -101,16 +113,26 @@ function FeatureCard(props: {
           ) : (
             <p className="mt-1 text-xs text-slate-500">Feature listo para inspección y rerun individual.</p>
           )}
+          {props.action.running && props.action.runningMode ? (
+            <p className="mt-2 text-xs font-medium text-teal-700">
+              Ejecutando {rerunModeLabel(props.action.runningMode).toLowerCase()} para {props.feature}.
+            </p>
+          ) : null}
         </div>
 
-        <button
-          type="button"
-          onClick={() => props.onRerun(props.feature)}
-          disabled={props.disabled}
-          className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {props.action.running ? "Procesando..." : `Recalcular ${props.feature}`}
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {(["collect_assets", "prepare", "full"] as VideoFeatureRerunMode[]).map((mode) => (
+            <button
+              key={mode}
+              type="button"
+              onClick={() => props.onRerun(props.feature, mode)}
+              disabled={props.disabled || props.action.running}
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {rerunModeLabel(mode)} {props.feature}
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="mt-3 space-y-1">{props.children}</div>
@@ -139,6 +161,7 @@ export default function VideoFeaturePanels(props: VideoFeaturePanelsProps) {
   const titleSection = asRecord(derived?.titleFeatures);
   const titleDeterministic = asRecord(titleSection?.deterministic);
   const titleLlm = asRecord(titleSection?.llm);
+  const titleWarnings = toStringList(titleSection?.warnings);
 
   const descriptionSection = asRecord(derived?.descriptionFeatures);
   const descriptionDeterministic = asRecord(descriptionSection?.deterministic);
@@ -179,6 +202,8 @@ export default function VideoFeaturePanels(props: VideoFeaturePanelsProps) {
         .map((item) => asString(item.brand) ?? "")
         .filter(Boolean)
     : [];
+  const transcriptRef = asRecord(rawVideo?.transcriptRef);
+  const audioLocalPath = asString(rawVideo?.audioLocalPath) ?? "-";
 
   return (
     <div className="space-y-4">
@@ -201,6 +226,9 @@ export default function VideoFeaturePanels(props: VideoFeaturePanelsProps) {
               </Badge>
               <Badge variant={transcriptDeterministic ? "success" : "warning"}>
                 Transcript {props.detail.transcriptJsonl ? "loaded" : "missing"}
+              </Badge>
+              <Badge variant={asString(rawVideo?.audioLocalPath) ? "info" : "neutral"}>
+                Audio asset {asString(rawVideo?.audioLocalPath) ? "ready" : "missing"}
               </Badge>
             </div>
             <FeatureRow label="Publicado" value={asString(rawVideo?.publishedAt) ?? "-"} />
@@ -235,11 +263,12 @@ export default function VideoFeaturePanels(props: VideoFeaturePanelsProps) {
             title="Title"
             deterministicReady={Boolean(titleDeterministic)}
             llmReady={Boolean(titleLlm)}
-            warnings={props.actionStateByFeature.title.warnings}
+            warnings={titleWarnings}
             action={props.actionStateByFeature.title}
             disabled={props.rerunDisabled}
             onRerun={props.onRerunFeature}
           >
+            <FeatureRow label="Audio asset" value={audioLocalPath} />
             <FeatureRow label="Words" value={valueToText(titleDeterministic?.title_len_words)} />
             <FeatureRow label="Caps ratio" value={formatRatio(toNumber(titleDeterministic?.caps_ratio))} />
             <FeatureRow label="Has number" value={valueToText(titleDeterministic?.has_number)} />
@@ -286,6 +315,8 @@ export default function VideoFeaturePanels(props: VideoFeaturePanelsProps) {
             disabled={props.rerunDisabled}
             onRerun={props.onRerunFeature}
           >
+            <FeatureRow label="Audio asset" value={audioLocalPath} />
+            <FeatureRow label="Transcript ref" value={asString(transcriptRef?.transcriptPath) ?? "-"} />
             <FeatureRow
               label="Title coverage"
               value={formatRatio(toNumber(transcriptDeterministic?.title_keyword_coverage))}

@@ -5,7 +5,11 @@ import { env } from "../config/env.js";
 import { collectExemplarVideoIds } from "./exportBundleService.js";
 import { createScheduler } from "./taskScheduler.js";
 import { ProjectLockError, projectOperationLockService } from "./projectOperationLockService.js";
-import { rerunVideoFeature, type VideoFeatureKind } from "./videoFeatureRerunService.js";
+import {
+  rerunVideoFeature,
+  type VideoFeatureKind,
+  type VideoFeatureRerunMode
+} from "./videoFeatureRerunService.js";
 
 export type ProjectFeatureRerunScope = "all" | "exemplars" | "selected";
 export type BatchProjectFeatureKind = VideoFeatureKind;
@@ -14,6 +18,7 @@ export type ProjectFeatureRerunJobStatus = "queued" | "running" | "done" | "fail
 export interface ProjectFeatureRerunRequest {
   projectId: string;
   feature: BatchProjectFeatureKind;
+  mode: VideoFeatureRerunMode;
   scope: ProjectFeatureRerunScope;
   videoIds?: string[];
 }
@@ -25,6 +30,7 @@ export type ProjectFeatureRerunEvent =
         jobId: string;
         projectId: string;
         feature: BatchProjectFeatureKind;
+        mode: VideoFeatureRerunMode;
         total: number;
         scope: ProjectFeatureRerunScope;
       };
@@ -52,6 +58,7 @@ export type ProjectFeatureRerunEvent =
       data: {
         projectId: string;
         feature: BatchProjectFeatureKind;
+        mode: VideoFeatureRerunMode;
         completed: number;
         total: number;
         processed: number;
@@ -65,6 +72,7 @@ export interface ProjectFeatureRerunJobState {
   jobId: string;
   projectId: string;
   feature: BatchProjectFeatureKind;
+  mode: VideoFeatureRerunMode;
   status: ProjectFeatureRerunJobStatus;
   total: number;
   completed: number;
@@ -241,6 +249,7 @@ function cloneJobState(record: ProjectFeatureRerunJobRecord): ProjectFeatureReru
     jobId: record.jobId,
     projectId: record.projectId,
     feature: record.feature,
+    mode: record.mode,
     status: record.status,
     total: record.total,
     completed: record.completed,
@@ -273,6 +282,7 @@ class RerunProjectFeaturesJobService {
       jobId,
       projectId: request.projectId,
       feature: request.feature,
+      mode: request.mode,
       request,
       status: "queued",
       total: 0,
@@ -368,6 +378,7 @@ class RerunProjectFeaturesJobService {
           jobId: record.jobId,
           projectId: record.projectId,
           feature: record.feature,
+          mode: record.mode,
           total: record.total,
           scope: record.request.scope
         }
@@ -400,7 +411,8 @@ class RerunProjectFeaturesJobService {
                 {
                   projectId: record.projectId,
                   videoId,
-                  feature: record.feature
+                  feature: record.feature,
+                  mode: record.mode
                 },
                 {
                   bypassProjectLock: true
@@ -418,7 +430,12 @@ class RerunProjectFeaturesJobService {
                 data: {
                   videoId,
                   status: "done",
-                  message: `${record.feature} refreshed`
+                  message:
+                    record.mode === "collect_assets"
+                      ? `${record.feature} assets collected`
+                      : record.mode === "prepare"
+                        ? `${record.feature} prepared`
+                        : `${record.feature} refreshed`
                 }
               });
               this.emitProgress(record);
@@ -457,6 +474,7 @@ class RerunProjectFeaturesJobService {
         projectId: record.projectId,
         jobId: record.jobId,
         feature: record.feature,
+        mode: record.mode,
         scope: record.request.scope,
         startedAt: record.startedAt,
         finishedAt,
@@ -479,6 +497,7 @@ class RerunProjectFeaturesJobService {
         data: {
           projectId: record.projectId,
           feature: record.feature,
+          mode: record.mode,
           completed: record.completed,
           total: record.total,
           processed: record.processed,

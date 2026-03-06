@@ -115,6 +115,9 @@ def download_audio(video_id: str, output_mp3_path: Path) -> Path:
     if not FFMPEG_BIN:
         raise RuntimeError("ffmpeg is required for mp3 extraction but was not found in PATH")
 
+    if output_mp3_path.exists():
+        return output_mp3_path
+
     output_mp3_path.parent.mkdir(parents=True, exist_ok=True)
     cleanup_download_artifacts(output_mp3_path)
 
@@ -194,6 +197,10 @@ for raw_line in sys.stdin:
     try:
         payload = json.loads(line)
         request_id = str(payload.get("id", "")).strip()
+        mode = str(payload.get("mode", "download_and_transcribe")).strip() or "download_and_transcribe"
+        if mode not in {"download_and_transcribe", "download_only"}:
+            raise ValueError(f"unsupported worker mode: {mode}")
+
         video_id = str(payload.get("videoId", "")).strip()
         output_mp3_raw = str(payload.get("outputMp3Path", "")).strip()
         language = str(payload.get("language", DEFAULT_LANGUAGE)).strip() or DEFAULT_LANGUAGE
@@ -208,6 +215,16 @@ for raw_line in sys.stdin:
         output_mp3_path = Path(output_mp3_raw).resolve()
         emit({"id": request_id, "event": "downloading_audio"})
         mp3_path = download_audio(video_id, output_mp3_path)
+
+        if mode == "download_only":
+            emit(
+                {
+                    "id": request_id,
+                    "ok": True,
+                    "downloadedPath": str(mp3_path),
+                }
+            )
+            continue
 
         emit({"id": request_id, "event": "transcribing"})
         transcription = transcribe_audio(mp3_path, language)
