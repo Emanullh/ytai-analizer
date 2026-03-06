@@ -9,6 +9,10 @@ import PlaybookView from "../components/playbook/PlaybookView";
 import TemplatesView from "../components/templates/TemplatesView";
 import ChannelModelView from "../components/model/ChannelModelView";
 import PercentileDistributionChart from "../components/charts/PercentileDistributionChart";
+import VideoFeaturePanels, {
+  type VideoFeatureActionState,
+  type VideoFeatureKind
+} from "../components/project/VideoFeaturePanels";
 import SectionExplainer from "../components/SectionExplainer";
 import { asRecord, asString, valueToText } from "../lib/artifactUtils";
 import { getByPath } from "../lib/getByPath";
@@ -16,7 +20,7 @@ import { ProjectDetailResponse, ProjectVideoDetail, ProjectVideoSummary } from "
 
 type ArtifactTab = "overview" | "playbook" | "templates" | "model" | "jobs";
 type ThumbnailRerunScope = "all" | "exemplars" | "selected";
-type ThumbnailRerunEngine = "python" | "auto";
+type ProjectBatchFeatureKind = "thumbnail" | "title" | "description" | "transcript";
 
 type ArtifactState = {
   data: Record<string, unknown> | null;
@@ -31,19 +35,16 @@ interface EvidencePanelState {
   supportedBy: string[];
 }
 
-interface ThumbnailRerunModalState {
+interface FeatureBatchRerunModalState {
   open: boolean;
+  feature: ProjectBatchFeatureKind;
   scope: ThumbnailRerunScope;
   selectedVideoIdsInput: string;
-  engine: ThumbnailRerunEngine;
-  force: boolean;
-  redownloadMissingThumbnails: boolean;
   running: boolean;
   jobId: string | null;
   total: number;
   completed: number;
   processed: number;
-  skipped: number;
   failed: number;
   warnings: string[];
   videoErrors: Array<{ videoId: string; message: string }>;
@@ -59,20 +60,26 @@ const INITIAL_ARTIFACT_STATE: ArtifactState = {
   loaded: false
 };
 
-function createInitialThumbnailRerunState(): ThumbnailRerunModalState {
+function createInitialFeatureActionState(): Record<VideoFeatureKind, VideoFeatureActionState> {
+  return {
+    thumbnail: { running: false, error: null, warnings: [] },
+    title: { running: false, error: null, warnings: [] },
+    description: { running: false, error: null, warnings: [] },
+    transcript: { running: false, error: null, warnings: [] }
+  };
+}
+
+function createInitialFeatureBatchRerunState(): FeatureBatchRerunModalState {
   return {
     open: false,
+    feature: "title",
     scope: "all",
     selectedVideoIdsInput: "",
-    engine: "python",
-    force: false,
-    redownloadMissingThumbnails: false,
     running: false,
     jobId: null,
     total: 0,
     completed: 0,
     processed: 0,
-    skipped: 0,
     failed: 0,
     warnings: [],
     videoErrors: [],
@@ -231,6 +238,9 @@ export default function ProjectDetail() {
   const [videoDetailLoading, setVideoDetailLoading] = useState(false);
   const [videoDetailError, setVideoDetailError] = useState<string | null>(null);
   const [transcriptSearch, setTranscriptSearch] = useState("");
+  const [featureActionState, setFeatureActionState] = useState<Record<VideoFeatureKind, VideoFeatureActionState>>(
+    createInitialFeatureActionState()
+  );
 
   const [videoDetailCache, setVideoDetailCache] = useState<Record<string, ProjectVideoDetail>>({});
   const videoDetailInFlightRef = useRef(new Map<string, Promise<ProjectVideoDetail>>());
@@ -251,9 +261,9 @@ export default function ProjectDetail() {
     result: { ok: boolean; warnings: string[]; usedLlm: boolean } | null;
   }>({ running: false, error: null, checks: null, result: null });
 
-  const thumbnailRerunEventSourceRef = useRef<EventSource | null>(null);
-  const [thumbnailRerunState, setThumbnailRerunState] = useState<ThumbnailRerunModalState>(
-    createInitialThumbnailRerunState()
+  const featureBatchEventSourceRef = useRef<EventSource | null>(null);
+  const [featureBatchRerunState, setFeatureBatchRerunState] = useState<FeatureBatchRerunModalState>(
+    createInitialFeatureBatchRerunState()
   );
 
   useEffect(() => {
@@ -263,21 +273,14 @@ export default function ProjectDetail() {
 
     let canceled = false;
 
-    const fetchJson = async <T,>(url: string): Promise<T> => {
-      const response = await fetch(url);
-      if (!response.ok) {
-        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(payload?.error ?? `Error al cargar ${url}`);
-      }
-      return (await response.json()) as T;
-    };
-
     const run = async () => {
       setLoading(true);
       setError(null);
       setSelectedVideoId(null);
       setSelectedVideoDetail(null);
       setVideoDetailCache({});
+      setFeatureActionState(createInitialFeatureActionState());
+      setFeatureBatchRerunState(createInitialFeatureBatchRerunState());
       setEvidencePanel({ open: false, fieldPath: "", supportedBy: [] });
       setPlaybookState(INITIAL_ARTIFACT_STATE);
       setTemplatesState(INITIAL_ARTIFACT_STATE);
@@ -287,13 +290,23 @@ export default function ProjectDetail() {
       try {
         const encodedId = encodeURIComponent(projectId);
         const [projectDetail, projectVideos] = await Promise.all([
-          fetchJson<ProjectDetailResponse>(`/api/projects/${encodedId}`),
-          fetchJson<ProjectVideoSummary[]>(`/api/projects/${encodedId}/videos`)
+          fetch(`/api/projects/${encodedId}`),
+          fetch(`/api/projects/${encodedId}/videos`)
         ]);
 
+        if (!projectDetail.ok || !projectVideos.ok) {
+          const payload = (await projectDetail.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(payload?.error ?? "No fue posible cargar el proyecto.");
+        }
+
+        const [projectDetailPayload, projectVideosPayload] = (await Promise.all([
+          projectDetail.json(),
+          projectVideos.json()
+        ])) as [ProjectDetailResponse, ProjectVideoSummary[]];
+
         if (!canceled) {
-          setDetail(projectDetail);
-          setVideos(projectVideos);
+          setDetail(projectDetailPayload);
+          setVideos(projectVideosPayload);
         }
       } catch (requestError) {
         if (!canceled) {
@@ -312,6 +325,44 @@ export default function ProjectDetail() {
       canceled = true;
     };
   }, [projectId]);
+
+  const fetchProjectSnapshot = useCallback(async (): Promise<[ProjectDetailResponse, ProjectVideoSummary[]]> => {
+    if (!projectId) {
+      throw new Error("Project inválido");
+    }
+
+    const encodedId = encodeURIComponent(projectId);
+    const [detailResponse, videosResponse] = await Promise.all([
+      fetch(`/api/projects/${encodedId}`),
+      fetch(`/api/projects/${encodedId}/videos`)
+    ]);
+
+    if (!detailResponse.ok || !videosResponse.ok) {
+      const detailPayload = (await detailResponse.json().catch(() => null)) as { error?: string } | null;
+      throw new Error(detailPayload?.error ?? "No fue posible refrescar el proyecto.");
+    }
+
+    return (await Promise.all([detailResponse.json(), videosResponse.json()])) as [ProjectDetailResponse, ProjectVideoSummary[]];
+  }, [projectId]);
+
+  const fetchVideoDetailRequest = useCallback(
+    async (videoId: string, options?: { maxSegments?: number }): Promise<ProjectVideoDetail> => {
+      if (!projectId) {
+        throw new Error("Project inválido");
+      }
+
+      const maxSegments = options?.maxSegments ?? 200;
+      const response = await fetch(
+        `/api/projects/${encodeURIComponent(projectId)}/videos/${encodeURIComponent(videoId)}?maxSegments=${maxSegments}`
+      );
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(payload?.error ?? "No fue posible cargar detalles del video.");
+      }
+      return (await response.json()) as ProjectVideoDetail;
+    },
+    [projectId]
+  );
 
   const loadArtifact = useCallback(
     async (kind: "playbook" | "templates" | "channelModels") => {
@@ -401,17 +452,7 @@ export default function ProjectDetail() {
       }
 
       const maxSegments = options?.maxSegments ?? 200;
-
-      const request = fetch(
-        `/api/projects/${encodeURIComponent(projectId)}/videos/${encodeURIComponent(videoId)}?maxSegments=${maxSegments}`
-      )
-        .then(async (response) => {
-          if (!response.ok) {
-            const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-            throw new Error(payload?.error ?? "No fue posible cargar detalles del video.");
-          }
-          return (await response.json()) as ProjectVideoDetail;
-        })
+      const request = fetchVideoDetailRequest(videoId, { maxSegments })
         .then((payload) => {
           setVideoDetailCache((prev) => ({ ...prev, [videoId]: payload }));
           return payload;
@@ -423,7 +464,7 @@ export default function ProjectDetail() {
       videoDetailInFlightRef.current.set(videoId, request);
       return request;
     },
-    [projectId, videoDetailCache]
+    [fetchVideoDetailRequest, projectId, videoDetailCache]
   );
 
   const openVideoDetail = async (videoId: string) => {
@@ -431,6 +472,7 @@ export default function ProjectDetail() {
     setVideoDetailLoading(true);
     setVideoDetailError(null);
     setTranscriptSearch("");
+    setFeatureActionState(createInitialFeatureActionState());
 
     try {
       const payload = await loadVideoDetail(videoId, { maxSegments: 200 });
@@ -465,6 +507,7 @@ export default function ProjectDetail() {
     setSelectedVideoDetail(null);
     setVideoDetailError(null);
     setTranscriptSearch("");
+    setFeatureActionState(createInitialFeatureActionState());
   };
 
   const openEvidenceField = useCallback((fieldPath: string, supportedBy: string[]) => {
@@ -538,59 +581,123 @@ export default function ProjectDetail() {
     }
   }, [detail, loadArtifact]);
 
-  const refreshVideosAfterThumbnailRerun = useCallback(async () => {
-    if (!projectId) {
-      return;
-    }
-    try {
-      const encodedId = encodeURIComponent(projectId);
-      const [detailResponse, videosResponse] = await Promise.all([
-        fetch(`/api/projects/${encodedId}`),
-        fetch(`/api/projects/${encodedId}/videos`)
-      ]);
-      if (!detailResponse.ok || !videosResponse.ok) {
+  const refreshProjectData = useCallback(
+    async (options?: { reopenVideoId?: string | null }) => {
+      const reopenVideoId = options?.reopenVideoId ?? null;
+      try {
+        const [detailPayload, videosPayload] = await fetchProjectSnapshot();
+        setDetail(detailPayload);
+        setVideos(videosPayload);
+        setVideoDetailCache({});
+        setPlaybookState(INITIAL_ARTIFACT_STATE);
+        setTemplatesState(INITIAL_ARTIFACT_STATE);
+        setChannelModelState(INITIAL_ARTIFACT_STATE);
+
+        if (!reopenVideoId) {
+          setSelectedVideoDetail(null);
+          setSelectedVideoId(null);
+          return;
+        }
+
+        setSelectedVideoId(reopenVideoId);
+        setVideoDetailLoading(true);
+        setVideoDetailError(null);
+        const freshDetail = await fetchVideoDetailRequest(reopenVideoId, { maxSegments: 200 });
+        setSelectedVideoDetail(freshDetail);
+        setVideoDetailCache({ [reopenVideoId]: freshDetail });
+      } catch {
+        // silent refresh failure
+      } finally {
+        setVideoDetailLoading(false);
+      }
+    },
+    [fetchProjectSnapshot, fetchVideoDetailRequest]
+  );
+
+  const handleRerunVideoFeature = useCallback(
+    async (feature: VideoFeatureKind) => {
+      if (!projectId || !selectedVideoId) {
         return;
       }
-      const [detailPayload, videosPayload] = (await Promise.all([
-        detailResponse.json(),
-        videosResponse.json()
-      ])) as [ProjectDetailResponse, ProjectVideoSummary[]];
-      setDetail(detailPayload);
-      setVideos(videosPayload);
-      setVideoDetailCache({});
-      setSelectedVideoDetail(null);
-      setSelectedVideoId(null);
-      setPlaybookState(INITIAL_ARTIFACT_STATE);
-      setTemplatesState(INITIAL_ARTIFACT_STATE);
-      setChannelModelState(INITIAL_ARTIFACT_STATE);
-    } catch {
-      // silent refresh failure
-    }
-  }, [projectId]);
 
-  const closeThumbnailRerunModal = useCallback(() => {
-    if (thumbnailRerunState.running) {
+      setFeatureActionState((prev) => ({
+        ...prev,
+        [feature]: {
+          running: true,
+          error: null,
+          warnings: []
+        }
+      }));
+
+      try {
+        const response = await fetch(
+          `/api/projects/${encodeURIComponent(projectId)}/videos/${encodeURIComponent(selectedVideoId)}/rerun/${feature}`,
+          {
+            method: "POST"
+          }
+        );
+        const payload = (await response.json().catch(() => null)) as { error?: string; warnings?: string[] } | null;
+
+        if (!response.ok) {
+          setFeatureActionState((prev) => ({
+            ...prev,
+            [feature]: {
+              running: false,
+              error: payload?.error ?? `No fue posible recalcular ${feature}.`,
+              warnings: []
+            }
+          }));
+          return;
+        }
+
+        await refreshProjectData({ reopenVideoId: selectedVideoId });
+        setFeatureActionState((prev) => ({
+          ...prev,
+          [feature]: {
+            running: false,
+            error: null,
+            warnings: Array.isArray(payload?.warnings) ? payload?.warnings.filter((item): item is string => typeof item === "string") : []
+          }
+        }));
+      } catch (requestError) {
+        setFeatureActionState((prev) => ({
+          ...prev,
+          [feature]: {
+            running: false,
+            error: requestError instanceof Error ? requestError.message : `Error inesperado recalculando ${feature}.`,
+            warnings: []
+          }
+        }));
+      }
+    },
+    [projectId, refreshProjectData, selectedVideoId]
+  );
+
+  const closeFeatureBatchRerunModal = useCallback(() => {
+    if (featureBatchRerunState.running) {
       return;
     }
-    setThumbnailRerunState((prev) => ({ ...prev, open: false }));
-  }, [thumbnailRerunState.running]);
+    setFeatureBatchRerunState((prev) => ({ ...prev, open: false }));
+  }, [featureBatchRerunState.running]);
 
-  const handleRecomputeThumbnails = useCallback(async () => {
+  const handleBatchFeatureRerun = useCallback(async () => {
     if (!projectId) {
       return;
     }
 
     const selectedVideoIds =
-      thumbnailRerunState.scope === "selected" ? parseVideoIdsInput(thumbnailRerunState.selectedVideoIdsInput) : undefined;
-    if (thumbnailRerunState.scope === "selected" && (!selectedVideoIds || selectedVideoIds.length === 0)) {
-      setThumbnailRerunState((prev) => ({
+      featureBatchRerunState.scope === "selected"
+        ? parseVideoIdsInput(featureBatchRerunState.selectedVideoIdsInput)
+        : undefined;
+    if (featureBatchRerunState.scope === "selected" && (!selectedVideoIds || selectedVideoIds.length === 0)) {
+      setFeatureBatchRerunState((prev) => ({
         ...prev,
         error: "Debes ingresar al menos un videoId para scope=selected."
       }));
       return;
     }
 
-    setThumbnailRerunState((prev) => ({
+    setFeatureBatchRerunState((prev) => ({
       ...prev,
       running: true,
       done: false,
@@ -600,7 +707,6 @@ export default function ProjectDetail() {
       total: 0,
       completed: 0,
       processed: 0,
-      skipped: 0,
       failed: 0,
       jobId: null,
       auditArtifactPath: null
@@ -608,21 +714,19 @@ export default function ProjectDetail() {
 
     try {
       const encodedId = encodeURIComponent(projectId);
-      const response = await fetch(`/api/projects/${encodedId}/rerun/thumbnails`, {
+      const response = await fetch(`/api/projects/${encodedId}/rerun/features`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          scope: thumbnailRerunState.scope,
-          videoIds: selectedVideoIds,
-          engine: thumbnailRerunState.engine,
-          force: thumbnailRerunState.force,
-          redownloadMissingThumbnails: thumbnailRerunState.redownloadMissingThumbnails
+          feature: featureBatchRerunState.feature,
+          scope: featureBatchRerunState.scope,
+          videoIds: selectedVideoIds
         })
       });
 
       const payload = (await response.json().catch(() => null)) as { jobId?: string; error?: string } | null;
       if (!response.ok || !payload?.jobId) {
-        setThumbnailRerunState((prev) => ({
+        setFeatureBatchRerunState((prev) => ({
           ...prev,
           running: false,
           error: payload?.error ?? `No fue posible iniciar rerun (${response.status}).`
@@ -631,14 +735,14 @@ export default function ProjectDetail() {
       }
 
       const { jobId } = payload;
-      setThumbnailRerunState((prev) => ({
+      setFeatureBatchRerunState((prev) => ({
         ...prev,
         jobId
       }));
 
-      thumbnailRerunEventSourceRef.current?.close();
-      const eventSource = new EventSource(`/api/projects/${encodedId}/rerun/thumbnails/jobs/${jobId}/events`);
-      thumbnailRerunEventSourceRef.current = eventSource;
+      featureBatchEventSourceRef.current?.close();
+      const eventSource = new EventSource(`/api/projects/${encodedId}/rerun/features/jobs/${jobId}/events`);
+      featureBatchEventSourceRef.current = eventSource;
       let closedByTerminalEvent = false;
 
       const registerEvent = (name: string, handler: (data: Record<string, unknown>) => void) => {
@@ -647,7 +751,7 @@ export default function ProjectDetail() {
             const data = JSON.parse((event as MessageEvent<string>).data) as Record<string, unknown>;
             handler(data);
           } catch {
-            setThumbnailRerunState((prev) => ({
+            setFeatureBatchRerunState((prev) => ({
               ...prev,
               running: false,
               error: "No se pudo parsear un evento de progreso."
@@ -657,7 +761,7 @@ export default function ProjectDetail() {
       };
 
       registerEvent("job_started", (data) => {
-        setThumbnailRerunState((prev) => ({
+        setFeatureBatchRerunState((prev) => ({
           ...prev,
           total: typeof data.total === "number" ? data.total : prev.total
         }));
@@ -666,7 +770,7 @@ export default function ProjectDetail() {
       registerEvent("warning", (data) => {
         const message = typeof data.message === "string" ? data.message : "Warning desconocido";
         const videoId = typeof data.videoId === "string" ? data.videoId : null;
-        setThumbnailRerunState((prev) => ({
+        setFeatureBatchRerunState((prev) => ({
           ...prev,
           warnings: [...prev.warnings, videoId ? `${videoId}: ${message}` : message]
         }));
@@ -677,7 +781,7 @@ export default function ProjectDetail() {
         if (status === "failed") {
           const videoId = typeof data.videoId === "string" ? data.videoId : "unknown";
           const message = typeof data.message === "string" ? data.message : "Error desconocido";
-          setThumbnailRerunState((prev) => ({
+          setFeatureBatchRerunState((prev) => ({
             ...prev,
             videoErrors: [...prev.videoErrors, { videoId, message }]
           }));
@@ -685,12 +789,11 @@ export default function ProjectDetail() {
       });
 
       registerEvent("job_progress", (data) => {
-        setThumbnailRerunState((prev) => ({
+        setFeatureBatchRerunState((prev) => ({
           ...prev,
           completed: typeof data.completed === "number" ? data.completed : prev.completed,
           total: typeof data.total === "number" ? data.total : prev.total,
           processed: typeof data.processed === "number" ? data.processed : prev.processed,
-          skipped: typeof data.skipped === "number" ? data.skipped : prev.skipped,
           failed: typeof data.failed === "number" ? data.failed : prev.failed
         }));
       });
@@ -698,31 +801,30 @@ export default function ProjectDetail() {
       registerEvent("job_done", (data) => {
         closedByTerminalEvent = true;
         eventSource.close();
-        if (thumbnailRerunEventSourceRef.current === eventSource) {
-          thumbnailRerunEventSourceRef.current = null;
+        if (featureBatchEventSourceRef.current === eventSource) {
+          featureBatchEventSourceRef.current = null;
         }
 
-        setThumbnailRerunState((prev) => ({
+        setFeatureBatchRerunState((prev) => ({
           ...prev,
           running: false,
           done: true,
           completed: typeof data.completed === "number" ? data.completed : prev.completed,
           total: typeof data.total === "number" ? data.total : prev.total,
           processed: typeof data.processed === "number" ? data.processed : prev.processed,
-          skipped: typeof data.skipped === "number" ? data.skipped : prev.skipped,
           failed: typeof data.failed === "number" ? data.failed : prev.failed,
           auditArtifactPath: typeof data.auditArtifactPath === "string" ? data.auditArtifactPath : null
         }));
-        void refreshVideosAfterThumbnailRerun();
+        void refreshProjectData();
       });
 
       registerEvent("job_failed", (data) => {
         closedByTerminalEvent = true;
         eventSource.close();
-        if (thumbnailRerunEventSourceRef.current === eventSource) {
-          thumbnailRerunEventSourceRef.current = null;
+        if (featureBatchEventSourceRef.current === eventSource) {
+          featureBatchEventSourceRef.current = null;
         }
-        setThumbnailRerunState((prev) => ({
+        setFeatureBatchRerunState((prev) => ({
           ...prev,
           running: false,
           done: false,
@@ -735,23 +837,23 @@ export default function ProjectDetail() {
           return;
         }
         eventSource.close();
-        if (thumbnailRerunEventSourceRef.current === eventSource) {
-          thumbnailRerunEventSourceRef.current = null;
+        if (featureBatchEventSourceRef.current === eventSource) {
+          featureBatchEventSourceRef.current = null;
         }
-        setThumbnailRerunState((prev) => ({
+        setFeatureBatchRerunState((prev) => ({
           ...prev,
           running: false,
           error: "Se perdió la conexión de progreso del rerun."
         }));
       };
     } catch (requestError) {
-      setThumbnailRerunState((prev) => ({
+      setFeatureBatchRerunState((prev) => ({
         ...prev,
         running: false,
         error: requestError instanceof Error ? requestError.message : "Error inesperado."
       }));
     }
-  }, [projectId, thumbnailRerunState, refreshVideosAfterThumbnailRerun]);
+  }, [featureBatchRerunState, projectId, refreshProjectData]);
 
   useEffect(() => {
     if (!evidencePanel.open || evidencePanel.supportedBy.length === 0) {
@@ -783,8 +885,8 @@ export default function ProjectDetail() {
 
   useEffect(() => {
     return () => {
-      thumbnailRerunEventSourceRef.current?.close();
-      thumbnailRerunEventSourceRef.current = null;
+      featureBatchEventSourceRef.current?.close();
+      featureBatchEventSourceRef.current = null;
     };
   }, []);
 
@@ -836,6 +938,14 @@ export default function ProjectDetail() {
   }, [evidencePanel, videoDetailCache]);
 
   const debugRawJson = (import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV ?? false;
+  const selectedVideoSummary = useMemo(
+    () => (selectedVideoId ? videos.find((video) => video.videoId === selectedVideoId) ?? null : null),
+    [selectedVideoId, videos]
+  );
+  const anyFeatureRerunRunning = useMemo(
+    () => Object.values(featureActionState).some((state) => state.running),
+    [featureActionState]
+  );
 
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-4 px-4 py-6 sm:px-6">
@@ -1008,7 +1118,7 @@ export default function ProjectDetail() {
                     <button
                       type="button"
                       onClick={() =>
-                        setThumbnailRerunState((prev) => ({
+                        setFeatureBatchRerunState((prev) => ({
                           ...prev,
                           open: true,
                           error: null
@@ -1016,7 +1126,7 @@ export default function ProjectDetail() {
                       }
                       className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50"
                     >
-                      Recompute thumbnails
+                      Batch rerun feature
                     </button>
                     <button
                       type="button"
@@ -1269,6 +1379,7 @@ export default function ProjectDetail() {
                         <Badge variant={cacheVariant(video.cacheHit)}>{video.cacheHit ?? "-"}</Badge>
                       </td>
                       <td className="px-3 py-2 text-xs text-slate-700">
+                        <p>title: {video.hasLLM.title ? "yes" : "no"}</p>
                         <p>desc: {video.hasLLM.description ? "yes" : "no"}</p>
                         <p>trans: {video.hasLLM.transcript ? "yes" : "no"}</p>
                         <p>thumb: {video.hasLLM.thumbnail ? "yes" : "no"}</p>
@@ -1287,33 +1398,53 @@ export default function ProjectDetail() {
         ) : null}
       </section>
 
-      {thumbnailRerunState.open ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" role="dialog" aria-modal="true" aria-label="Recompute thumbnails">
+      {featureBatchRerunState.open ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" role="dialog" aria-modal="true" aria-label="Batch rerun feature">
           <section className="w-full max-w-2xl rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl">
             <div className="mb-3 flex items-center justify-between gap-2">
               <div>
-                <h3 className="text-base font-semibold text-slate-900">Recompute thumbnails</h3>
+                <h3 className="text-base font-semibold text-slate-900">Batch rerun by feature</h3>
                 <p className="text-xs text-slate-500">
-                  Recalcula deterministic + OCR + LLM y refresca los artifacts derivados del proyecto.
+                  Recalcula el feature seleccionado para varios videos del proyecto y refresca el dashboard al terminar.
                 </p>
               </div>
-              <button type="button" className="btn-ghost !rounded-lg !px-3 !py-1.5 !text-xs" onClick={closeThumbnailRerunModal} disabled={thumbnailRerunState.running}>
+              <button type="button" className="btn-ghost !rounded-lg !px-3 !py-1.5 !text-xs" onClick={closeFeatureBatchRerunModal} disabled={featureBatchRerunState.running}>
                 Cerrar
               </button>
             </div>
 
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="text-xs font-medium text-slate-700">
+                Feature
+                <select
+                  value={featureBatchRerunState.feature}
+                  onChange={(event) =>
+                    setFeatureBatchRerunState((prev) => ({
+                      ...prev,
+                      feature: event.target.value as ProjectBatchFeatureKind
+                    }))
+                  }
+                  disabled={featureBatchRerunState.running}
+                  className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-2 text-xs text-slate-900 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+                >
+                  <option value="thumbnail">thumbnail</option>
+                  <option value="title">title</option>
+                  <option value="description">description</option>
+                  <option value="transcript">transcript</option>
+                </select>
+              </label>
+
+              <label className="text-xs font-medium text-slate-700">
                 Scope
                 <select
-                  value={thumbnailRerunState.scope}
+                  value={featureBatchRerunState.scope}
                   onChange={(event) =>
-                    setThumbnailRerunState((prev) => ({
+                    setFeatureBatchRerunState((prev) => ({
                       ...prev,
                       scope: event.target.value as ThumbnailRerunScope
                     }))
                   }
-                  disabled={thumbnailRerunState.running}
+                  disabled={featureBatchRerunState.running}
                   className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-2 text-xs text-slate-900 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
                 >
                   <option value="all">All videos</option>
@@ -1321,38 +1452,20 @@ export default function ProjectDetail() {
                   <option value="selected">Selected videoIds</option>
                 </select>
               </label>
-
-              <label className="text-xs font-medium text-slate-700">
-                OCR Engine
-                <select
-                  value={thumbnailRerunState.engine}
-                  onChange={(event) =>
-                    setThumbnailRerunState((prev) => ({
-                      ...prev,
-                      engine: event.target.value as ThumbnailRerunEngine
-                    }))
-                  }
-                  disabled={thumbnailRerunState.running}
-                  className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-2 text-xs text-slate-900 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
-                >
-                  <option value="python">python</option>
-                  <option value="auto">auto</option>
-                </select>
-              </label>
             </div>
 
-            {thumbnailRerunState.scope === "selected" ? (
+            {featureBatchRerunState.scope === "selected" ? (
               <label className="mt-3 block text-xs font-medium text-slate-700">
                 videoIds (coma o salto de línea)
                 <textarea
-                  value={thumbnailRerunState.selectedVideoIdsInput}
+                  value={featureBatchRerunState.selectedVideoIdsInput}
                   onChange={(event) =>
-                    setThumbnailRerunState((prev) => ({
+                    setFeatureBatchRerunState((prev) => ({
                       ...prev,
                       selectedVideoIdsInput: event.target.value
                     }))
                   }
-                  disabled={thumbnailRerunState.running}
+                  disabled={featureBatchRerunState.running}
                   rows={4}
                   placeholder="videoA1, videoA2"
                   className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-2 text-xs text-slate-900 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
@@ -1360,72 +1473,36 @@ export default function ProjectDetail() {
               </label>
             ) : null}
 
-            <label className="mt-3 inline-flex items-center gap-2 text-xs text-slate-700">
-              <input
-                type="checkbox"
-                checked={thumbnailRerunState.force}
-                onChange={(event) =>
-                  setThumbnailRerunState((prev) => ({
-                    ...prev,
-                    force: event.target.checked
-                  }))
-                }
-                disabled={thumbnailRerunState.running}
-                className="h-4 w-4 rounded border-slate-300 text-teal-600 focus:ring-teal-500"
-              />
-              Force recompute (ignorar cache)
-            </label>
-
-            <label className="mt-2 inline-flex items-center gap-2 text-xs text-slate-700">
-              <input
-                type="checkbox"
-                checked={thumbnailRerunState.redownloadMissingThumbnails}
-                onChange={(event) =>
-                  setThumbnailRerunState((prev) => ({
-                    ...prev,
-                    redownloadMissingThumbnails: event.target.checked
-                  }))
-                }
-                disabled={thumbnailRerunState.running}
-                className="h-4 w-4 rounded border-slate-300 text-teal-600 focus:ring-teal-500"
-              />
-              Re-descargar thumbnails faltantes antes de correr OCR
-            </label>
-            <p className="mt-1 text-xs text-slate-500">
-              Solo intenta bajar miniaturas cuando el archivo local no existe.
-            </p>
-
             <div className="mt-4 flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                onClick={() => void handleRecomputeThumbnails()}
-                disabled={thumbnailRerunState.running}
+                onClick={() => void handleBatchFeatureRerun()}
+                disabled={featureBatchRerunState.running}
                 className="btn-primary !rounded-lg !px-3 !py-2 !text-xs"
               >
-                {thumbnailRerunState.running ? "Procesando..." : "Start rerun"}
+                {featureBatchRerunState.running ? "Procesando..." : "Start rerun"}
               </button>
-              {thumbnailRerunState.auditArtifactPath ? (
-                <p className="text-xs text-slate-500">Audit: {thumbnailRerunState.auditArtifactPath}</p>
+              {featureBatchRerunState.auditArtifactPath ? (
+                <p className="text-xs text-slate-500">Audit: {featureBatchRerunState.auditArtifactPath}</p>
               ) : null}
             </div>
 
             <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
               <p>
-                Progreso: <strong>{thumbnailRerunState.completed}</strong>/{thumbnailRerunState.total} · processed{" "}
-                <strong>{thumbnailRerunState.processed}</strong> · skipped <strong>{thumbnailRerunState.skipped}</strong> · failed{" "}
-                <strong>{thumbnailRerunState.failed}</strong>
+                Progreso: <strong>{featureBatchRerunState.completed}</strong>/{featureBatchRerunState.total} · processed{" "}
+                <strong>{featureBatchRerunState.processed}</strong> · failed <strong>{featureBatchRerunState.failed}</strong>
               </p>
             </div>
 
-            {thumbnailRerunState.error ? (
-              <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{thumbnailRerunState.error}</p>
+            {featureBatchRerunState.error ? (
+              <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{featureBatchRerunState.error}</p>
             ) : null}
 
-            {thumbnailRerunState.videoErrors.length > 0 ? (
+            {featureBatchRerunState.videoErrors.length > 0 ? (
               <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 p-3">
                 <p className="text-xs font-semibold text-rose-800">Errores por video</p>
                 <ul className="mt-2 max-h-32 list-disc space-y-1 overflow-y-auto pl-5 text-xs text-rose-700">
-                  {thumbnailRerunState.videoErrors.map((item, index) => (
+                  {featureBatchRerunState.videoErrors.map((item, index) => (
                     <li key={`${item.videoId}-${index}`}>
                       {item.videoId}: {item.message}
                     </li>
@@ -1434,11 +1511,11 @@ export default function ProjectDetail() {
               </div>
             ) : null}
 
-            {thumbnailRerunState.warnings.length > 0 ? (
+            {featureBatchRerunState.warnings.length > 0 ? (
               <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
                 <p className="text-xs font-semibold text-amber-800">Warnings</p>
                 <ul className="mt-2 max-h-32 list-disc space-y-1 overflow-y-auto pl-5 text-xs text-amber-700">
-                  {thumbnailRerunState.warnings.map((warning, index) => (
+                  {featureBatchRerunState.warnings.map((warning, index) => (
                     <li key={`${warning}-${index}`}>{warning}</li>
                   ))}
                 </ul>
@@ -1505,7 +1582,12 @@ export default function ProjectDetail() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4" role="dialog" aria-modal="true" aria-label="Video details">
           <section className="max-h-[90vh] w-full max-w-6xl overflow-auto rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl">
             <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-lg font-semibold text-slate-900">Video Details: {selectedVideoId}</h3>
+              <div>
+                <h3 className="text-lg font-semibold text-slate-900">
+                  Video Details: {selectedVideoSummary?.title ?? selectedVideoId}
+                </h3>
+                <p className="font-mono text-xs text-slate-500">{selectedVideoId}</p>
+              </div>
               <button onClick={closeVideoDetail} className="btn-ghost !rounded-lg !px-3 !py-1.5 !text-xs">
                 Cerrar
               </button>
@@ -1515,30 +1597,25 @@ export default function ProjectDetail() {
             {videoDetailError ? <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{videoDetailError}</p> : null}
 
             {!videoDetailLoading && selectedVideoDetail ? (
-              <div className="grid gap-4 lg:grid-cols-2">
-                <div>
-                  <h4 className="mb-2 text-sm font-semibold text-slate-900">Derived JSON</h4>
-                  <JsonBlock value={selectedVideoDetail.derived} />
-                  <h4 className="mb-2 mt-4 text-sm font-semibold text-slate-900">Raw Video</h4>
-                  <JsonBlock value={selectedVideoDetail.rawVideo} />
-                </div>
-                <div>
-                  <div className="mb-2 flex items-center justify-between gap-2">
-                    <h4 className="text-sm font-semibold text-slate-900">Transcript segments</h4>
-                    <input
-                      type="text"
-                      value={transcriptSearch}
-                      onChange={(event) => setTranscriptSearch(event.target.value)}
-                      placeholder="Buscar en transcript"
-                      className="w-56 rounded-lg border border-slate-300 px-2 py-1 text-xs outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
-                    />
-                  </div>
-                  {selectedVideoDetail.transcriptJsonl == null ? <p className="text-sm text-slate-500">No transcript disponible.</p> : null}
-                  {selectedVideoDetail.transcriptJsonl != null ? (
-                    <pre className="max-h-[58vh] overflow-auto rounded-xl border border-slate-200 bg-slate-950/95 p-3 text-xs text-slate-100">
-                      {JSON.stringify(transcriptRows, null, 2)}
-                    </pre>
-                  ) : null}
+              <div className="space-y-4">
+                <VideoFeaturePanels
+                  projectId={projectId}
+                  videoId={selectedVideoId}
+                  detail={selectedVideoDetail}
+                  transcriptRows={transcriptRows}
+                  transcriptSearch={transcriptSearch}
+                  onTranscriptSearchChange={setTranscriptSearch}
+                  onRerunFeature={handleRerunVideoFeature}
+                  actionStateByFeature={featureActionState}
+                  rerunDisabled={anyFeatureRerunRunning}
+                />
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <Collapsible title="Derived JSON" defaultOpen={false}>
+                    <JsonBlock value={selectedVideoDetail.derived} />
+                  </Collapsible>
+                  <Collapsible title="Raw Video JSON" defaultOpen={false}>
+                    <JsonBlock value={selectedVideoDetail.rawVideo} />
+                  </Collapsible>
                 </div>
               </div>
             ) : null}

@@ -24,6 +24,11 @@ import {
   toRerunLockHttpError,
   type RerunThumbnailsEvent
 } from "./services/rerunThumbnailsService.js";
+import {
+  rerunProjectFeaturesJobService,
+  type ProjectFeatureRerunEvent
+} from "./services/rerunProjectFeaturesService.js";
+import { rerunVideoFeature } from "./services/videoFeatureRerunService.js";
 
 const timeframeSchema = z.enum(["1m", "6m", "1y"]);
 
@@ -57,6 +62,12 @@ const projectVideoParamsSchema = z.object({
   videoId: z.string().min(1)
 });
 
+const projectVideoFeatureParamsSchema = z.object({
+  projectId: z.string().min(1),
+  videoId: z.string().min(1),
+  feature: z.enum(["thumbnail", "title", "description", "transcript"])
+});
+
 const projectRerunJobParamsSchema = z.object({
   projectId: z.string().min(1),
   jobId: z.string().uuid("Invalid jobId")
@@ -69,6 +80,22 @@ const rerunThumbnailsBodySchema = z
     engine: z.enum(["python", "auto"]).default("python"),
     force: z.boolean().default(false),
     redownloadMissingThumbnails: z.boolean().default(false)
+  })
+  .superRefine((value, ctx) => {
+    if (value.scope === "selected" && (!Array.isArray(value.videoIds) || value.videoIds.length === 0)) {
+      ctx.addIssue({
+        path: ["videoIds"],
+        code: z.ZodIssueCode.custom,
+        message: "videoIds is required when scope=selected"
+      });
+    }
+  });
+
+const rerunProjectFeaturesBodySchema = z
+  .object({
+    feature: z.enum(["thumbnail", "title", "description", "transcript"]),
+    scope: z.enum(["all", "exemplars", "selected"]),
+    videoIds: z.array(z.string().min(1)).optional()
   })
   .superRefine((value, ctx) => {
     if (value.scope === "selected" && (!Array.isArray(value.videoIds) || value.videoIds.length === 0)) {
@@ -271,6 +298,24 @@ export async function buildServer() {
     return reply.send(detail);
   });
 
+  app.post("/projects/:projectId/videos/:videoId/rerun/:feature", async (request, reply) => {
+    const params = projectVideoFeatureParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: params.error.issues[0]?.message ?? "Invalid params" });
+    }
+
+    try {
+      const result = await rerunVideoFeature(params.data);
+      return reply.send(result);
+    } catch (error) {
+      const lockError = toRerunLockHttpError(error);
+      if (lockError) {
+        return reply.status(lockError.statusCode).send({ error: lockError.message });
+      }
+      throw error;
+    }
+  });
+
   app.post("/projects/:projectId/rerun/thumbnails", async (request, reply) => {
     const params = projectParamsSchema.safeParse(request.params);
     if (!params.success) {
@@ -301,6 +346,32 @@ export async function buildServer() {
     }
   });
 
+  app.post("/projects/:projectId/rerun/features", async (request, reply) => {
+    const params = projectParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: params.error.issues[0]?.message ?? "Invalid params" });
+    }
+
+    const payload = rerunProjectFeaturesBodySchema.safeParse(request.body);
+    if (!payload.success) {
+      return reply.status(400).send({ error: payload.error.issues[0]?.message ?? "Invalid request body" });
+    }
+
+    try {
+      const result = rerunProjectFeaturesJobService.createJob({
+        projectId: params.data.projectId,
+        ...payload.data
+      });
+      return reply.send(result);
+    } catch (error) {
+      const lockError = toRerunLockHttpError(error);
+      if (lockError) {
+        return reply.status(lockError.statusCode).send({ error: lockError.message });
+      }
+      throw error;
+    }
+  });
+
   app.get("/projects/:projectId/rerun/thumbnails/jobs/:jobId", async (request, reply) => {
     const params = projectRerunJobParamsSchema.safeParse(request.params);
     if (!params.success) {
@@ -308,6 +379,20 @@ export async function buildServer() {
     }
 
     const job = rerunThumbnailsJobService.getJob(params.data.jobId);
+    if (!job || job.projectId !== params.data.projectId) {
+      return reply.status(404).send({ error: "Job not found" });
+    }
+
+    return reply.send(job);
+  });
+
+  app.get("/projects/:projectId/rerun/features/jobs/:jobId", async (request, reply) => {
+    const params = projectRerunJobParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: params.error.issues[0]?.message ?? "Invalid params" });
+    }
+
+    const job = rerunProjectFeaturesJobService.getJob(params.data.jobId);
     if (!job || job.projectId !== params.data.projectId) {
       return reply.status(404).send({ error: "Job not found" });
     }
@@ -367,6 +452,63 @@ export async function buildServer() {
     });
 
     const latestJob = rerunThumbnailsJobService.getJob(jobId);
+    if (latestJob?.status === "done" || latestJob?.status === "failed") {
+      closeStream();
+    }
+  });
+
+  app.get("/projects/:projectId/rerun/features/jobs/:jobId/events", async (request, reply) => {
+    const params = projectRerunJobParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: params.error.issues[0]?.message ?? "Invalid params" });
+    }
+
+    const jobId = params.data.jobId;
+    const job = rerunProjectFeaturesJobService.getJob(jobId);
+    if (!job || job.projectId !== params.data.projectId) {
+      return reply.status(404).send({ error: "Job not found" });
+    }
+
+    reply.hijack();
+    reply.raw.statusCode = 200;
+    reply.raw.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    reply.raw.setHeader("Cache-Control", "no-cache, no-transform");
+    reply.raw.setHeader("Connection", "keep-alive");
+    reply.raw.flushHeaders?.();
+
+    const sendEvent = (event: ProjectFeatureRerunEvent) => {
+      reply.raw.write(`event: ${event.event}\n`);
+      reply.raw.write(`data: ${JSON.stringify(event.data)}\n\n`);
+    };
+
+    const unsubscribe = rerunProjectFeaturesJobService.subscribe(jobId, (event) => {
+      sendEvent(event);
+      if (event.event === "job_done" || event.event === "job_failed") {
+        closeStream();
+      }
+    });
+
+    const history = rerunProjectFeaturesJobService.getJobEvents(jobId);
+    for (const event of history) {
+      sendEvent(event);
+    }
+    const postSubscribeEvents = rerunProjectFeaturesJobService.getJobEvents(jobId).slice(history.length);
+    for (const event of postSubscribeEvents) {
+      sendEvent(event);
+    }
+
+    const closeStream = () => {
+      unsubscribe();
+      if (!reply.raw.writableEnded) {
+        reply.raw.end();
+      }
+    };
+
+    request.raw.on("close", () => {
+      unsubscribe();
+    });
+
+    const latestJob = rerunProjectFeaturesJobService.getJob(jobId);
     if (latestJob?.status === "done" || latestJob?.status === "failed") {
       closeStream();
     }

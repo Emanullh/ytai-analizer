@@ -135,6 +135,7 @@ export interface ProjectVideoSummary {
     percentile: number | null;
   } | null;
   hasLLM: {
+    title: boolean;
     description: boolean;
     transcript: boolean;
     thumbnail: boolean;

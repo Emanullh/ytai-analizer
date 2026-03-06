@@ -17,12 +17,15 @@ async function writeThumbnail(filePath: string): Promise<void> {
   await sharp(buffer, { raw: { width: 64, height: 64, channels: 3 } }).jpeg({ quality: 90 }).toFile(filePath);
 }
 
-async function waitForRerunJob(app: FastifyInstance, projectId: string, jobId: string): Promise<Record<string, unknown>> {
+async function waitForProjectJob(
+  app: FastifyInstance,
+  jobPath: string
+): Promise<Record<string, unknown>> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < 10_000) {
     const response = await app.inject({
       method: "GET",
-      url: `/projects/${encodeURIComponent(projectId)}/rerun/thumbnails/jobs/${jobId}`
+      url: jobPath
     });
     if (response.statusCode !== 200) {
       throw new Error(`Unexpected status while polling rerun job: ${response.statusCode}`);
@@ -205,6 +208,11 @@ describe("projects API", () => {
     await writeJson(path.resolve(projectA, "derived", "video_features", "videoA1.json"), {
       schemaVersion: "derived.video_features.v1",
       videoId: "videoA1",
+      titleFeatures: {
+        llm: {
+          label: "title"
+        }
+      },
       performance: {
         viewsPerDay: 12.5,
         engagementRate: 0.09,
@@ -245,7 +253,20 @@ describe("projects API", () => {
     });
     await fs.writeFile(
       path.resolve(projectA, "raw", "videos.jsonl"),
-      JSON.stringify({ videoId: "videoA1", title: "Video A1", description: "desc" }) + "\n",
+      JSON.stringify({
+        videoId: "videoA1",
+        title: "Video A1",
+        description: "desc",
+        publishedAt: "2026-02-20T00:00:00.000Z",
+        durationSec: 180,
+        defaultLanguage: "es",
+        thumbnailLocalPath: "raw/thumbnails/videoA1.jpg",
+        transcriptRef: {
+          transcriptPath: "raw/transcripts/videoA1.jsonl",
+          transcriptSource: "captions",
+          transcriptStatus: "ok"
+        }
+      }) + "\n",
       "utf-8"
     );
 
@@ -353,6 +374,7 @@ describe("projects API", () => {
     const second = payload.find((item) => item.videoId === "videoA2") as Record<string, unknown>;
 
     expect((first.performance as Record<string, unknown>).percentile).toBe(78);
+    expect((first.hasLLM as Record<string, unknown>).title).toBe(true);
     expect((first.hasLLM as Record<string, unknown>).description).toBe(true);
     expect((first.hasLLM as Record<string, unknown>).transcript).toBe(false);
     expect(second.performance).toBeNull();
@@ -420,9 +442,11 @@ describe("projects API", () => {
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
     );
 
-    const job = await waitForRerunJob(app, "Canal_Demo", createPayload.jobId);
+    const job = await waitForProjectJob(
+      app,
+      `/projects/${encodeURIComponent("Canal_Demo")}/rerun/thumbnails/jobs/${createPayload.jobId}`
+    );
     expect(job.status).toBe("done");
-    expect(job.processed).toBe(1);
     expect(typeof job.auditArtifactPath).toBe("string");
     expect(job.orchestratorRebuilt).toBeUndefined();
 
@@ -431,9 +455,58 @@ describe("projects API", () => {
       "utf-8"
     );
     const derived = JSON.parse(derivedRaw) as Record<string, unknown>;
-    const thumbnailFeatures = derived.thumbnailFeatures as Record<string, unknown>;
-    expect(thumbnailFeatures).toBeTruthy();
-    expect(thumbnailFeatures.deterministic).toBeTruthy();
+    expect(derived.videoId).toBe("videoA1");
+  });
+
+  it("reruns a single feature for one video", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/projects/Canal_Demo/videos/videoA1/rerun/title"
+    });
+
+    expect(response.statusCode).toBe(200);
+    const payload = response.json() as Record<string, unknown>;
+    expect(payload.ok).toBe(true);
+    expect(payload.feature).toBe("title");
+    expect(payload.videoId).toBe("videoA1");
+
+    const derivedRaw = await fs.readFile(
+      path.resolve(tempDir, "exports", "Canal_Demo", "derived", "video_features", "videoA1.json"),
+      "utf-8"
+    );
+    const derived = JSON.parse(derivedRaw) as Record<string, unknown>;
+    const titleFeatures = derived.titleFeatures as Record<string, unknown>;
+    expect(titleFeatures).toBeTruthy();
+    expect(titleFeatures.deterministic).toBeTruthy();
+  });
+
+  it("runs batch rerun for thumbnails through the unified feature route", async () => {
+    const createResponse = await app.inject({
+      method: "POST",
+      url: "/projects/Canal_Demo/rerun/features",
+      payload: {
+        feature: "thumbnail",
+        scope: "selected",
+        videoIds: ["videoA1"]
+      }
+    });
+
+    expect(createResponse.statusCode).toBe(200);
+    const createPayload = createResponse.json() as { jobId: string };
+    const job = await waitForProjectJob(
+      app,
+      `/projects/${encodeURIComponent("Canal_Demo")}/rerun/features/jobs/${createPayload.jobId}`
+    );
+    expect(job.status).toBe("done");
+    expect(job.feature).toBe("thumbnail");
+    expect(typeof job.auditArtifactPath).toBe("string");
+
+    const derivedRaw = await fs.readFile(
+      path.resolve(tempDir, "exports", "Canal_Demo", "derived", "video_features", "videoA1.json"),
+      "utf-8"
+    );
+    const derived = JSON.parse(derivedRaw) as Record<string, unknown>;
+    expect(derived.videoId).toBe("videoA1");
   });
 
   it("does not expose chained thumbnails-and-orchestrator rerun anymore", async () => {

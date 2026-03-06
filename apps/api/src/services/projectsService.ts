@@ -71,6 +71,9 @@ interface ManifestRecord {
 }
 
 interface VideoDerivedRecord {
+  titleFeatures?: {
+    llm?: unknown;
+  };
   performance?: unknown;
   descriptionFeatures?: {
     llm?: unknown;
@@ -154,6 +157,7 @@ export interface ProjectVideoSummaryItem {
     percentile: number | null;
   } | null;
   hasLLM: {
+    title: boolean;
     description: boolean;
     transcript: boolean;
     thumbnail: boolean;
@@ -674,6 +678,7 @@ export async function listProjectVideos(projectId: string): Promise<ProjectVideo
       transcriptSource: normalizeTranscriptSource(video.transcriptSource),
       performance,
       hasLLM: {
+        title: isRecord(derived?.titleFeatures) && derived?.titleFeatures?.llm != null,
         description: isRecord(derived?.descriptionFeatures) && derived?.descriptionFeatures?.llm != null,
         transcript: isRecord(derived?.transcriptFeatures) && derived?.transcriptFeatures?.llm != null,
         thumbnail: isRecord(derived?.thumbnailFeatures) && derived?.thumbnailFeatures?.llm != null
