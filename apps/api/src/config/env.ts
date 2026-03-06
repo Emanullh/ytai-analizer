@@ -58,15 +58,8 @@ function parseReasoningEffort(
   return defaultValue;
 }
 
-function parseThumbOcrEngine(value: string | undefined, defaultValue: "python" | "tesseractjs"): "python" | "tesseractjs" {
-  const normalized = value?.trim().toLowerCase();
-  if (normalized === "python") {
-    return "python";
-  }
-  if (normalized === "tesseractjs") {
-    return "tesseractjs";
-  }
-  return defaultValue;
+function parseThumbOcrEngine(_value: string | undefined, _defaultValue: "python"): "python" {
+  return "python";
 }
 
 export const env = {

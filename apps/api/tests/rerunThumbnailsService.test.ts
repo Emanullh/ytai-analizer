@@ -4,6 +4,12 @@ import { promises as fs } from "node:fs";
 import sharp from "sharp";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const downloadToBufferMock = vi.fn();
+
+vi.mock("../src/utils/http.js", () => ({
+  downloadToBuffer: downloadToBufferMock
+}));
+
 async function writeJson(filePath: string, value: unknown): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
@@ -13,6 +19,11 @@ async function writeThumbnail(filePath: string): Promise<void> {
   const buffer = Buffer.alloc(64 * 64 * 3, 180);
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await sharp(buffer, { raw: { width: 64, height: 64, channels: 3 } }).jpeg({ quality: 90 }).toFile(filePath);
+}
+
+async function createThumbnailBuffer(): Promise<Buffer> {
+  const buffer = Buffer.alloc(64 * 64 * 3, 190);
+  return sharp(buffer, { raw: { width: 64, height: 64, channels: 3 } }).jpeg({ quality: 90 }).toBuffer();
 }
 
 async function waitForJobDone(service: {
@@ -49,6 +60,7 @@ describe("rerunThumbnailsService", () => {
     process.env.THUMB_OCR_ENGINE = "python";
     process.env.THUMB_OCR_LANGS = "eng";
     process.env.THUMB_VISION_DOWNSCALE_WIDTH = "256";
+    downloadToBufferMock.mockReset();
   });
 
   afterEach(async () => {
@@ -251,5 +263,56 @@ describe("rerunThumbnailsService", () => {
     const secondState = rerunThumbnailsJobService.getJob(second.jobId);
     expect(secondState?.processed).toBe(1);
     expect(secondState?.skipped).toBe(0);
+  });
+
+  it("re-downloads a missing thumbnail when requested", async () => {
+    const projectRoot = path.resolve(tempDir, "exports", "Canal_Demo");
+    await writeJson(path.resolve(projectRoot, "channel.json"), {
+      channelId: "UC1234567890123456789012",
+      channelName: "Canal Demo",
+      timeframe: "6m"
+    });
+    await writeJson(path.resolve(projectRoot, "raw", "channel.json"), {
+      channelId: "UC1234567890123456789012",
+      channelName: "Canal Demo",
+      timeframe: "6m"
+    });
+
+    await fs.mkdir(path.resolve(projectRoot, "derived", "video_features"), { recursive: true });
+    await fs.mkdir(path.resolve(projectRoot, "raw"), { recursive: true });
+    await fs.writeFile(
+      path.resolve(projectRoot, "raw", "videos.jsonl"),
+      JSON.stringify({
+        videoId: "videoA1",
+        title: "A1",
+        thumbnailLocalPath: "raw/thumbnails/videoA1.jpg",
+        thumbnailOriginalUrl: "https://img.example/videoA1.jpg"
+      }) + "\n",
+      "utf-8"
+    );
+
+    downloadToBufferMock.mockResolvedValue(await createThumbnailBuffer());
+
+    const { rerunThumbnailsJobService } = await import("../src/services/rerunThumbnailsService.js");
+    const { jobId } = rerunThumbnailsJobService.createJob({
+      projectId: "Canal_Demo",
+      scope: "selected",
+      videoIds: ["videoA1"],
+      engine: "python",
+      force: true,
+      redownloadMissingThumbnails: true
+    });
+
+    const completed = await waitForJobDone(rerunThumbnailsJobService, jobId);
+    expect(completed?.status).toBe("done");
+
+    const state = rerunThumbnailsJobService.getJob(jobId);
+    expect(state?.processed).toBe(1);
+    expect(state?.failed).toBe(0);
+    expect(downloadToBufferMock).toHaveBeenCalledTimes(1);
+    expect(downloadToBufferMock).toHaveBeenCalledWith("https://img.example/videoA1.jpg", 8_000);
+
+    const downloaded = await fs.stat(path.resolve(projectRoot, "raw", "thumbnails", "videoA1.jpg"));
+    expect(downloaded.isFile()).toBe(true);
   });
 });

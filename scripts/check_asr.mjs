@@ -27,14 +27,18 @@ function resolvePythonPath() {
 }
 
 const pythonPath = resolvePythonPath();
-const dependencySummary = "faster_whisper, autogen_agentchat, autogen_ext, cv2, paddleocr|easyocr";
+const dependencySummary = "faster_whisper, autogen_agentchat, autogen_ext, cv2, paddleocr(+paddle)|easyocr";
 const checkScript = [
   "import importlib.util as u",
   "import faster_whisper",
   "import autogen_agentchat",
   "import autogen_ext",
   'assert u.find_spec("cv2") is not None, "missing module: cv2"',
-  'assert (u.find_spec("paddleocr") is not None) or (u.find_spec("easyocr") is not None), "missing module: paddleocr or easyocr"'
+  'has_paddleocr = u.find_spec("paddleocr") is not None',
+  'has_paddle = u.find_spec("paddle") is not None',
+  'has_easy = u.find_spec("easyocr") is not None',
+  'assert (has_paddleocr or has_easy), "missing module: paddleocr or easyocr"',
+  'assert (has_easy or has_paddle), "missing module: paddle (required by paddleocr)"'
 ].join("; ");
 const check = spawnSync(pythonPath, ["-c", checkScript], {
   cwd: repoRoot,

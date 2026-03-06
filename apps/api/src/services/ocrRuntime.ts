@@ -75,10 +75,12 @@ export async function runOcrImportHealthCheck(
   const checkScript = [
     "import importlib.util as u",
     'has_cv2 = u.find_spec("cv2") is not None',
-    'has_paddle = u.find_spec("paddleocr") is not None',
+    'has_paddleocr = u.find_spec("paddleocr") is not None',
+    'has_paddle = u.find_spec("paddle") is not None',
     'has_easy = u.find_spec("easyocr") is not None',
     'assert has_cv2, "missing module: cv2"',
-    'assert (has_paddle or has_easy), "missing module: paddleocr or easyocr"'
+    'assert (has_paddleocr or has_easy), "missing module: paddleocr or easyocr"',
+    'assert (has_easy or has_paddle), "missing module: paddle (required by paddleocr)"'
   ].join("; ");
 
   return new Promise<OcrImportHealthCheckResult>((resolve) => {

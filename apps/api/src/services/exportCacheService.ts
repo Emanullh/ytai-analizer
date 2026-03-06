@@ -81,7 +81,8 @@ export interface ComputeHashesArgs {
   thumbnailFilePath?: string;
 }
 
-export type OcrEngine = "python" | "tesseractjs";
+export type OcrEngine = "python";
+const PYTHON_OCR_IMPLEMENTATION_VERSION = "python-ocr-v2";
 
 export interface DerivedFeaturePresence {
   titleDeterministic: boolean;
@@ -538,14 +539,15 @@ export function computeOcrConfigHash(args?: {
   langs?: string;
   downscaleWidth?: number;
 }): string {
-  const engine = args?.engine ?? env.thumbOcrEngine;
+  const engine = "python";
   const langs = args?.langs ?? env.thumbOcrLangs;
   const downscaleWidth = args?.downscaleWidth ?? env.thumbVisionDownscaleWidth;
   return hashStringSha1(
     JSON.stringify({
       engine,
       langs,
-      downscaleWidth
+      downscaleWidth,
+      implementationVersion: PYTHON_OCR_IMPLEMENTATION_VERSION
     })
   );
 }

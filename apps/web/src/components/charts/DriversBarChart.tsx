@@ -42,7 +42,7 @@ export default function DriversBarChart({ drivers }: DriversBarChartProps) {
             tickFormatter={(v: string) => (v.length > 30 ? `${v.slice(0, 28)}...` : v)}
           />
           <Tooltip
-            formatter={(value: number) => [value.toFixed(4), "Effect"]}
+            formatter={(value) => [typeof value === "number" ? value.toFixed(4) : String(value ?? "-"), "Effect"]}
             contentStyle={{ fontSize: 12, borderRadius: 8 }}
           />
           <Bar dataKey="effect" radius={[0, 4, 4, 0]}>

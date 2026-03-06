@@ -409,7 +409,8 @@ describe("projects API", () => {
         scope: "selected",
         videoIds: ["videoA1"],
         engine: "python",
-        force: true
+        force: true,
+        redownloadMissingThumbnails: false
       }
     });
 
@@ -423,6 +424,7 @@ describe("projects API", () => {
     expect(job.status).toBe("done");
     expect(job.processed).toBe(1);
     expect(typeof job.auditArtifactPath).toBe("string");
+    expect(job.orchestratorRebuilt).toBeUndefined();
 
     const derivedRaw = await fs.readFile(
       path.resolve(tempDir, "exports", "Canal_Demo", "derived", "video_features", "videoA1.json"),
@@ -434,31 +436,18 @@ describe("projects API", () => {
     expect(thumbnailFeatures.deterministic).toBeTruthy();
   });
 
-  it("supports thumbnails-and-orchestrator chained rerun", async () => {
-    const createResponse = await app.inject({
+  it("does not expose chained thumbnails-and-orchestrator rerun anymore", async () => {
+    const response = await app.inject({
       method: "POST",
       url: "/projects/Canal_Demo/rerun/thumbnails-and-orchestrator",
       payload: {
         scope: "all",
         engine: "python",
-        force: true
+        force: true,
+        redownloadMissingThumbnails: false
       }
     });
 
-    expect(createResponse.statusCode).toBe(200);
-    const createPayload = createResponse.json() as { jobId: string };
-
-    const job = await waitForRerunJob(app, "Canal_Demo", createPayload.jobId);
-    expect(job.status).toBe("done");
-    expect(job.orchestratorRebuilt).toBe(true);
-
-    const orchestratorRaw = await fs.readFile(
-      path.resolve(tempDir, "exports", "Canal_Demo", "analysis", "orchestrator_input.json"),
-      "utf-8"
-    );
-    const orchestratorInput = JSON.parse(orchestratorRaw) as Record<string, unknown>;
-    expect(orchestratorInput.schemaVersion).toBe("analysis.orchestrator_input.v1");
-    expect(Array.isArray(orchestratorInput.cohorts)).toBe(true);
-    expect(Array.isArray(orchestratorInput.drivers)).toBe(true);
+    expect(response.statusCode).toBe(404);
   });
 });

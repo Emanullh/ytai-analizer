@@ -2,7 +2,6 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { env } from "../config/env.js";
-import { runOrchestrator } from "../analysis/orchestratorService.js";
 import { collectExemplarVideoIds } from "./exportBundleService.js";
 import { createScheduler } from "./taskScheduler.js";
 import {
@@ -19,11 +18,21 @@ import {
   type ThumbnailDeterministicFeatures,
   type ThumbnailOcrEngine
 } from "../derived/thumbnailFeaturesAgent.js";
+import { resetLocalOcrRuntime } from "./localOcrService.js";
 import { hashFileSha1 } from "../utils/hash.js";
 import { projectOperationLockService, ProjectLockError } from "./projectOperationLockService.js";
+import { downloadToBuffer } from "../utils/http.js";
 
 const RERUN_AUDIT_SCHEMA = "operations.rerun_thumbnails.v1";
 const VALID_TIMEFRAMES = new Set(["1m", "6m", "1y"] as const);
+const THUMBNAIL_RESOLUTION_PRIORITY = ["maxres", "standard", "high", "medium", "default"] as const;
+const THUMBNAIL_FILENAME_FALLBACKS = [
+  "maxresdefault.jpg",
+  "sddefault.jpg",
+  "hqdefault.jpg",
+  "mqdefault.jpg",
+  "default.jpg"
+] as const;
 
 export type RerunThumbnailsScope = "all" | "exemplars" | "selected";
 export type RerunThumbnailsEngine = ThumbnailOcrEngine;
@@ -35,7 +44,7 @@ export interface RerunThumbnailsRequest {
   videoIds?: string[];
   engine: RerunThumbnailsEngine;
   force: boolean;
-  rebuildAnalysis?: boolean;
+  redownloadMissingThumbnails?: boolean;
 }
 
 export type RerunThumbnailsEvent =
@@ -79,9 +88,6 @@ export type RerunThumbnailsEvent =
         skipped: number;
         failed: number;
         auditArtifactPath: string;
-        rebuildAnalysisRecommended: boolean;
-        orchestratorRebuilt: boolean;
-        orchestratorWarnings: string[];
       };
     }
   | { event: "job_failed"; data: { message: string } };
@@ -98,8 +104,6 @@ export interface RerunThumbnailsJobState {
   warnings: string[];
   error?: string;
   auditArtifactPath?: string;
-  orchestratorRebuilt: boolean;
-  orchestratorWarnings: string[];
 }
 
 interface RerunVideoInventoryItem {
@@ -107,6 +111,8 @@ interface RerunVideoInventoryItem {
   title: string;
   description: string;
   thumbnailLocalPath: string;
+  thumbnailOriginalUrl?: string;
+  thumbnails?: Partial<Record<(typeof THUMBNAIL_RESOLUTION_PRIORITY)[number], { url: string; width?: number; height?: number }>>;
 }
 
 interface RerunProjectContext {
@@ -147,6 +153,40 @@ function toString(value: unknown): string | null {
   return normalized ? normalized : null;
 }
 
+function toFinitePositiveNumber(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return undefined;
+  }
+  return value;
+}
+
+function normalizeThumbnailMap(
+  value: unknown
+): Partial<Record<(typeof THUMBNAIL_RESOLUTION_PRIORITY)[number], { url: string; width?: number; height?: number }>> | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const normalized: Partial<Record<(typeof THUMBNAIL_RESOLUTION_PRIORITY)[number], { url: string; width?: number; height?: number }>> = {};
+  for (const key of THUMBNAIL_RESOLUTION_PRIORITY) {
+    const rawThumbnail = value[key];
+    if (!isRecord(rawThumbnail)) {
+      continue;
+    }
+    const url = toString(rawThumbnail.url);
+    if (!url) {
+      continue;
+    }
+    normalized[key] = {
+      url,
+      width: toFinitePositiveNumber(rawThumbnail.width),
+      height: toFinitePositiveNumber(rawThumbnail.height)
+    };
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
 function normalizeRelativePath(value: string | null, fallback: string): string {
   const candidate = (value ?? "").replace(/\\/g, "/").trim();
   if (!candidate) {
@@ -175,6 +215,46 @@ function getExportsRoot(): string {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function pushUniqueThumbnailUrl(target: string[], seen: Set<string>, value: string | undefined): void {
+  if (!value || !value.trim()) {
+    return;
+  }
+
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return;
+    }
+    const normalized = parsed.toString();
+    if (seen.has(normalized)) {
+      return;
+    }
+    seen.add(normalized);
+    target.push(normalized);
+  } catch {
+    // Ignore malformed URLs and continue with remaining candidates.
+  }
+}
+
+function buildThumbnailCandidateUrls(args: {
+  videoId: string;
+  primaryUrl?: string;
+  thumbnails?: Partial<Record<(typeof THUMBNAIL_RESOLUTION_PRIORITY)[number], { url: string }>>;
+}): string[] {
+  const candidates: string[] = [];
+  const seen = new Set<string>();
+
+  pushUniqueThumbnailUrl(candidates, seen, args.primaryUrl);
+  for (const key of THUMBNAIL_RESOLUTION_PRIORITY) {
+    pushUniqueThumbnailUrl(candidates, seen, args.thumbnails?.[key]?.url);
+  }
+  for (const filename of THUMBNAIL_FILENAME_FALLBACKS) {
+    pushUniqueThumbnailUrl(candidates, seen, `https://i.ytimg.com/vi/${args.videoId}/${filename}`);
+  }
+
+  return candidates;
 }
 
 function toTimestampToken(iso: string): string {
@@ -276,6 +356,17 @@ function extractDeterministicFeatures(source: Record<string, unknown> | null): T
   return deterministic as unknown as ThumbnailDeterministicFeatures;
 }
 
+function hasThumbnailLlmFeatures(source: Record<string, unknown> | null): boolean {
+  if (!source) {
+    return false;
+  }
+  const thumbnailFeatures = source.thumbnailFeatures;
+  if (!isRecord(thumbnailFeatures)) {
+    return false;
+  }
+  return isRecord(thumbnailFeatures.llm);
+}
+
 function listChangedDeterministicFields(
   previous: ThumbnailDeterministicFeatures | null,
   next: ThumbnailDeterministicFeatures | null
@@ -358,7 +449,7 @@ async function readProjectContext(projectId: string): Promise<RerunProjectContex
   }
 
   const fromRaw = rawVideoRows
-    .map((row) => {
+    .map((row): RerunVideoInventoryItem | null => {
       const videoId = toString(row.videoId);
       if (!videoId) {
         return null;
@@ -370,14 +461,16 @@ async function readProjectContext(projectId: string): Promise<RerunProjectContex
         thumbnailLocalPath: normalizeRelativePath(
           toString(row.thumbnailLocalPath),
           path.posix.join("thumbnails", `${videoId}.jpg`)
-        )
-      } satisfies RerunVideoInventoryItem;
+        ),
+        thumbnailOriginalUrl: toString(row.thumbnailOriginalUrl) ?? undefined,
+        thumbnails: normalizeThumbnailMap(row.thumbnails)
+      };
     })
     .filter((item): item is RerunVideoInventoryItem => item !== null);
 
   const channelVideos = Array.isArray(channelJson?.videos) ? channelJson.videos : [];
   const fromChannel = channelVideos
-    .map((row) => {
+    .map((row): RerunVideoInventoryItem | null => {
       if (!isRecord(row)) {
         return null;
       }
@@ -390,7 +483,7 @@ async function readProjectContext(projectId: string): Promise<RerunProjectContex
         title: toString(row.title) ?? videoId,
         description: "",
         thumbnailLocalPath: normalizeRelativePath(toString(row.thumbnailPath), path.posix.join("thumbnails", `${videoId}.jpg`))
-      } satisfies RerunVideoInventoryItem;
+      };
     })
     .filter((item): item is RerunVideoInventoryItem => item !== null);
 
@@ -453,9 +546,7 @@ function cloneJobState(record: RerunThumbnailsJobRecord): RerunThumbnailsJobStat
     failed: record.failed,
     warnings: [...record.warnings],
     error: record.error,
-    auditArtifactPath: record.auditArtifactPath,
-    orchestratorRebuilt: record.orchestratorRebuilt,
-    orchestratorWarnings: [...record.orchestratorWarnings]
+    auditArtifactPath: record.auditArtifactPath
   };
 }
 
@@ -488,8 +579,6 @@ class RerunThumbnailsJobService {
       skipped: 0,
       failed: 0,
       warnings: [],
-      orchestratorRebuilt: false,
-      orchestratorWarnings: [],
       videoErrors: [],
       events: [],
       listeners: new Set()
@@ -578,13 +667,16 @@ class RerunThumbnailsJobService {
         throw new Error("No videos selected for this rerun scope");
       }
 
-      const resolvedEngine: "python" | "tesseractjs" =
-        record.request.engine === "auto" ? (env.thumbOcrEngine === "tesseractjs" ? "tesseractjs" : "python") : record.request.engine;
+      const resolvedEngine: "python" = "python";
+      const shouldRequireThumbnailLlm = env.autoGenEnabled && Boolean(env.openAiApiKey);
       const ocrConfigHash = computeOcrConfigHash({
         engine: resolvedEngine,
         langs: env.thumbOcrLangs,
         downscaleWidth: env.thumbVisionDownscaleWidth
       });
+      if (record.request.force) {
+        resetLocalOcrRuntime();
+      }
 
       const scheduler = createScheduler({
         video: Math.max(1, env.exportVideoConcurrency),
@@ -691,8 +783,44 @@ class RerunThumbnailsJobService {
             );
             ensureInsideRoot(project.projectRoot, derivedArtifactAbsPath);
 
-            if (!(await fileExists(thumbnailAbsPath))) {
-              const message = `Thumbnail not found at ${thumbnailRelativePath}`;
+            let thumbnailExists = await fileExists(thumbnailAbsPath);
+            if (!thumbnailExists && record.request.redownloadMissingThumbnails) {
+              const thumbnailCandidates = buildThumbnailCandidateUrls({
+                videoId: video.videoId,
+                primaryUrl: video.thumbnailOriginalUrl,
+                thumbnails: video.thumbnails
+              });
+
+              let recovered = false;
+              let lastDownloadError: unknown = null;
+              for (const candidateUrl of thumbnailCandidates) {
+                try {
+                  const image = await scheduler.run("http", () => downloadToBuffer(candidateUrl, 8_000));
+                  await scheduler.run("fs", async () => {
+                    await fs.mkdir(path.dirname(thumbnailAbsPath), { recursive: true });
+                    await fs.writeFile(thumbnailAbsPath, image);
+                  });
+                  recovered = true;
+                  thumbnailExists = true;
+                  break;
+                } catch (error) {
+                  lastDownloadError = error;
+                }
+              }
+
+              if (!recovered && lastDownloadError) {
+                const warning = `Thumbnail re-download failed for ${video.videoId}: ${
+                  lastDownloadError instanceof Error ? lastDownloadError.message : "unknown error"
+                }`;
+                this.pushWarning(record, warning, video.videoId);
+              }
+            }
+
+            if (!thumbnailExists) {
+              const suffix = record.request.redownloadMissingThumbnails
+                ? " (re-download unavailable or failed)"
+                : "";
+              const message = `Thumbnail not found at ${thumbnailRelativePath}${suffix}`;
               record.failed += 1;
               record.completed += 1;
               record.videoErrors.push({ videoId, message });
@@ -716,12 +844,17 @@ class RerunThumbnailsJobService {
               hashFileSha1(thumbnailAbsPath)
             ]);
             const existingDeterministic = extractDeterministicFeatures(existingArtifact);
+            const hasExistingThumbnailLlm = hasThumbnailLlmFeatures(existingArtifact);
             const existingEntry = cacheIndex.timeframes[project.timeframe]?.videos?.[video.videoId];
 
             const hasDerivedThumbnail = Boolean(existingDeterministic);
+            const hasRequiredThumbnailLlm =
+              !shouldRequireThumbnailLlm ||
+              (hasExistingThumbnailLlm && existingEntry?.inputs.llmModels.thumbnail === env.autoGenModelThumbnail);
             const unchangedByCache =
               !record.request.force &&
               hasDerivedThumbnail &&
+              hasRequiredThumbnailLlm &&
               Boolean(existingEntry) &&
               existingEntry?.inputs.thumbnailHash === thumbnailHash &&
               existingEntry?.inputs.ocrConfigHash === ocrConfigHash;
@@ -767,7 +900,8 @@ class RerunThumbnailsJobService {
                   thumbnailLocalPath: thumbnailRelativePath,
                   engine: record.request.engine,
                   deterministicMode: "full",
-                  recomputeLlm: false
+                  recomputeLlm: true,
+                  disableOcrCache: record.request.force
                 })
               );
 
@@ -781,7 +915,11 @@ class RerunThumbnailsJobService {
                   inputs: {
                     ...existingEntry.inputs,
                     thumbnailHash,
-                    ocrConfigHash
+                    ocrConfigHash,
+                    llmModels: {
+                      ...existingEntry.inputs.llmModels,
+                      thumbnail: shouldRequireThumbnailLlm ? env.autoGenModelThumbnail : existingEntry.inputs.llmModels.thumbnail
+                    }
                   },
                   artifacts: {
                     ...existingEntry.artifacts,
@@ -793,7 +931,7 @@ class RerunThumbnailsJobService {
                   status: {
                     ...existingEntry.status,
                     thumbnail: "ok",
-                    derived: record.request.force ? "partial" : existingEntry.status.derived,
+                    derived: derived.warnings.length > 0 ? "partial" : "ok",
                     warnings: Array.from(new Set([...(existingEntry.status.warnings ?? []), ...derived.warnings]))
                   }
                 };
@@ -818,7 +956,7 @@ class RerunThumbnailsJobService {
                       title: "",
                       description: "",
                       transcript: "",
-                      thumbnail: ""
+                      thumbnail: shouldRequireThumbnailLlm ? env.autoGenModelThumbnail : ""
                     }
                   },
                   artifacts: {
@@ -832,7 +970,7 @@ class RerunThumbnailsJobService {
                   status: {
                     rawTranscript: transcriptRows.length > 0 ? "ok" : "missing",
                     thumbnail: "ok",
-                    derived: "partial",
+                    derived: derived.warnings.length > 0 ? "partial" : "ok",
                     warnings: [...derived.warnings]
                   }
                 });
@@ -885,29 +1023,6 @@ class RerunThumbnailsJobService {
         )
       );
 
-      const orchestratorWarnings: string[] = [];
-      let orchestratorRebuilt = false;
-      if (record.request.rebuildAnalysis) {
-        try {
-          const orchestratorResult = await runOrchestrator({
-            exportRoot: getExportsRoot(),
-            channelId: project.channelId,
-            channelName: project.channelName,
-            timeframe: project.timeframe,
-            jobId: randomUUID()
-          });
-          orchestratorRebuilt = true;
-          orchestratorWarnings.push(...orchestratorResult.warnings);
-        } catch (error) {
-          const warning = `Rebuild analysis failed: ${error instanceof Error ? error.message : "unknown error"}`;
-          orchestratorWarnings.push(warning);
-          this.pushWarning(record, warning);
-        }
-      }
-
-      record.orchestratorRebuilt = orchestratorRebuilt;
-      record.orchestratorWarnings = orchestratorWarnings;
-
       const finishedAt = nowIso();
       record.finishedAt = finishedAt;
       const auditRelativePath = path.posix.join("operations", "reruns", `thumbnails_${toTimestampToken(finishedAt)}.json`);
@@ -927,8 +1042,15 @@ class RerunThumbnailsJobService {
           requested: record.request.engine,
           resolved: resolvedEngine
         },
+        llm: {
+          requested: true,
+          enabled: env.autoGenEnabled,
+          configured: shouldRequireThumbnailLlm,
+          model: shouldRequireThumbnailLlm ? env.autoGenModelThumbnail : null
+        },
         ocrConfigHash,
         force: record.request.force,
+        redownloadMissingThumbnails: record.request.redownloadMissingThumbnails === true,
         videoIds: requestedVideoIds,
         counts: {
           total: record.total,
@@ -937,11 +1059,6 @@ class RerunThumbnailsJobService {
           skipped: record.skipped,
           failed: record.failed,
           success: Math.max(0, record.processed + record.skipped)
-        },
-        orchestrator: {
-          requested: Boolean(record.request.rebuildAnalysis),
-          rebuilt: orchestratorRebuilt,
-          warnings: orchestratorWarnings
         },
         errors: [...record.videoErrors],
         warnings: [...record.warnings],
@@ -961,10 +1078,7 @@ class RerunThumbnailsJobService {
           processed: record.processed,
           skipped: record.skipped,
           failed: record.failed,
-          auditArtifactPath: auditRelativePath,
-          rebuildAnalysisRecommended: !orchestratorRebuilt,
-          orchestratorRebuilt,
-          orchestratorWarnings
+          auditArtifactPath: auditRelativePath
         }
       });
     } catch (error) {

@@ -376,77 +376,16 @@ describe("exportCacheService", () => {
     expect(result.plan.needDerivedParts.titleDeterministic).toBe(false);
   });
 
-  it("invalidates thumbnail deterministic when OCR engine changes", async () => {
-    process.env.AUTO_GEN_ENABLED = "true";
-    process.env.OPENAI_API_KEY = "test-key";
+  it("normalizes legacy OCR engine env values to the python OCR hash", async () => {
     process.env.THUMB_OCR_ENGINE = "tesseractjs";
-    const service = await import("../src/services/exportCacheService.js");
+    const legacyService = await import("../src/services/exportCacheService.js");
+    const legacyHash = legacyService.computeOcrConfigHash({ langs: "eng", downscaleWidth: 256 });
 
-    const exportsRoot = path.join(tempDir, "exports");
-    const channelFolderPath = path.join(exportsRoot, "Canal_Demo");
-    await fs.mkdir(path.join(channelFolderPath, "thumbnails"), { recursive: true });
-    await fs.mkdir(path.join(channelFolderPath, "raw", "transcripts"), { recursive: true });
-    await fs.mkdir(path.join(channelFolderPath, "derived", "video_features"), { recursive: true });
-    const thumbnailPath = path.join(channelFolderPath, "thumbnails", "video123.jpg");
-    const transcriptPath = path.join(channelFolderPath, "raw", "transcripts", "video123.jsonl");
-    const derivedPath = path.join(channelFolderPath, "derived", "video_features", "video123.json");
-    await fs.writeFile(thumbnailPath, Buffer.from("thumbnail-123"));
-    await writeTranscriptArtifact(transcriptPath, { videoId: "video123", text: "cache transcript" });
-    await writeDerivedArtifact(derivedPath, { videoId: "video123", llmPresent: true });
-
-    const oldHashes = await service.computeHashes({
-      title: "Video cache title",
-      description: "Description cache",
-      transcriptText: "cache transcript",
-      transcriptSource: "captions",
-      thumbnailFilePath: thumbnailPath
-    });
-
-    const index = await service.loadCacheIndex({
-      exportsRoot,
-      channelFolderPath,
-      channelId: "UC_CACHE",
-      exportVersion: "1.1"
-    });
-    service.updateVideoCacheEntry({
-      index,
-      timeframe: "6m",
-      videoId: "video123",
-      entry: service.buildCacheEntry({
-        videoId: "video123",
-        hashes: oldHashes,
-        status: {
-          rawTranscript: "ok",
-          thumbnail: "ok",
-          derived: "ok",
-          warnings: []
-        }
-      })
-    });
-
-    process.env.THUMB_OCR_ENGINE = "python";
     vi.resetModules();
-    const serviceWithNewEngine = await import("../src/services/exportCacheService.js");
-    const newHashes = await serviceWithNewEngine.computeHashes({
-      title: "Video cache title",
-      description: "Description cache",
-      transcriptText: "cache transcript",
-      transcriptSource: "captions",
-      thumbnailFilePath: thumbnailPath
-    });
+    process.env.THUMB_OCR_ENGINE = "python";
+    const pythonService = await import("../src/services/exportCacheService.js");
+    const pythonHash = pythonService.computeOcrConfigHash({ langs: "eng", downscaleWidth: 256 });
 
-    const result = await serviceWithNewEngine.checkVideoCache({
-      exportsRoot,
-      channelFolderPath,
-      index,
-      timeframe: "6m",
-      videoId: "video123",
-      currentHashes: newHashes
-    });
-
-    expect(result.hit).toBe("partial");
-    expect(result.plan.needDerivedParts.thumbnailDeterministic).toBe(true);
-    expect(result.plan.needDerivedParts.thumbnailDeterministicMode).toBe("ocr_only");
-    expect(result.plan.needDerivedParts.thumbnailLlm).toBe(false);
+    expect(legacyHash).toBe(pythonHash);
   });
 });

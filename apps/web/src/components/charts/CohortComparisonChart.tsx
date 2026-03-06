@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell, Legend } from "recharts";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell } from "recharts";
 import { asNumber, asString } from "../../lib/artifactUtils";
 
 interface CohortComparisonChartProps {
@@ -47,18 +47,11 @@ export default function CohortComparisonChart({ cohorts }: CohortComparisonChart
             tickFormatter={(v: string) => (v.length > 25 ? `${v.slice(0, 23)}...` : v)}
           />
           <Tooltip
-            formatter={(value: number, _name: string, props: { payload?: { n?: number } }) => [
-              `${value.toFixed(4)} (n=${props.payload?.n ?? "?"})`,
+            formatter={(value, _name, props) => [
+              `${typeof value === "number" ? value.toFixed(4) : String(value ?? "-")} (n=${props?.payload?.n ?? "?"})`,
               "Median Residual",
             ]}
             contentStyle={{ fontSize: 12, borderRadius: 8 }}
-          />
-          <Legend
-            payload={dimensions.map((dim) => ({
-              value: dim,
-              type: "square" as const,
-              color: DIMENSION_COLORS[dim] ?? "#94a3b8",
-            }))}
           />
           <Bar dataKey="medianResidual" radius={[0, 4, 4, 0]}>
             {data.map((entry, idx) => (
@@ -67,6 +60,18 @@ export default function CohortComparisonChart({ cohorts }: CohortComparisonChart
           </Bar>
         </BarChart>
       </ResponsiveContainer>
+      <div className="mt-3 flex flex-wrap gap-3 text-xs text-slate-600">
+        {dimensions.map((dim) => (
+          <span key={dim} className="inline-flex items-center gap-2">
+            <span
+              className="inline-block h-2.5 w-2.5 rounded-sm"
+              style={{ backgroundColor: DIMENSION_COLORS[dim] ?? "#94a3b8" }}
+              aria-hidden="true"
+            />
+            {dim}
+          </span>
+        ))}
+      </div>
     </div>
   );
 }

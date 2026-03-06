@@ -10,7 +10,7 @@ const getChannelDetailsMock = vi.fn();
 const analyzeChannelMock = vi.fn();
 const downloadToBufferMock = vi.fn();
 const getTranscriptWithFallbackMock = vi.fn();
-const runOcrMock = vi.fn();
+const recognizeWithLocalOcrMock = vi.fn();
 const requestAutoGenTaskMock = vi.fn();
 
 vi.mock("../src/services/youtubeService.js", () => ({
@@ -29,10 +29,9 @@ vi.mock("../src/services/transcriptPipeline.js", () => ({
   getTranscriptWithFallback: getTranscriptWithFallbackMock
 }));
 
-vi.mock("../src/derived/ocr/tesseractOcr.js", () => ({
-  runOcr: runOcrMock,
-  clearOcrCache: vi.fn(),
-  terminateOcrWorkers: vi.fn()
+vi.mock("../src/services/localOcrService.js", () => ({
+  recognizeWithLocalOcr: recognizeWithLocalOcrMock,
+  resetLocalOcrRuntime: vi.fn()
 }));
 
 vi.mock("../src/services/autogenRuntime.js", () => ({
@@ -118,7 +117,7 @@ describe("export jobs + SSE progress", () => {
     analyzeChannelMock.mockReset();
     downloadToBufferMock.mockReset();
     getTranscriptWithFallbackMock.mockReset();
-    runOcrMock.mockReset();
+    recognizeWithLocalOcrMock.mockReset();
     requestAutoGenTaskMock.mockReset();
 
     const { buildServer } = await import("../src/server.js");
@@ -755,10 +754,12 @@ describe("export jobs + SSE progress", () => {
   it("reuses cached per-video artifacts on second export and only recomputes cross-video outputs", async () => {
     process.env.THUMB_OCR_ENABLED = "true";
     process.env.AUTO_GEN_ENABLED = "false";
-    runOcrMock.mockResolvedValue({
-      text: "Big cache text",
-      confidenceMean: 0.9,
-      boxes: [{ x: 2, y: 2, w: 80, h: 24, confidence: 0.9, text: "Big" }]
+    recognizeWithLocalOcrMock.mockResolvedValue({
+      status: "ok",
+      engine: "paddleocr",
+      imageWidth: 120,
+      imageHeight: 90,
+      boxes: [{ x: 2, y: 2, w: 80, h: 24, conf: 0.9, text: "Big cache text" }]
     });
 
     const selectedVideos = [
@@ -884,7 +885,7 @@ describe("export jobs + SSE progress", () => {
 
     getTranscriptWithFallbackMock.mockClear();
     downloadToBufferMock.mockClear();
-    runOcrMock.mockClear();
+    recognizeWithLocalOcrMock.mockClear();
     requestAutoGenTaskMock.mockClear();
 
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -927,7 +928,7 @@ describe("export jobs + SSE progress", () => {
 
     expect(getTranscriptWithFallbackMock).toHaveBeenCalledTimes(0);
     expect(downloadToBufferMock).toHaveBeenCalledTimes(0);
-    expect(runOcrMock).toHaveBeenCalledTimes(0);
+    expect(recognizeWithLocalOcrMock).toHaveBeenCalledTimes(0);
     expect(requestAutoGenTaskMock).toHaveBeenCalledTimes(0);
 
     const secondChannelModelsRaw = await fs.readFile(path.join(exportPath, "derived", "channel_models.json"), "utf-8");

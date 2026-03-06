@@ -16,7 +16,7 @@ import { ProjectDetailResponse, ProjectVideoDetail, ProjectVideoSummary } from "
 
 type ArtifactTab = "overview" | "playbook" | "templates" | "model" | "jobs";
 type ThumbnailRerunScope = "all" | "exemplars" | "selected";
-type ThumbnailRerunEngine = "python" | "tesseractjs" | "auto";
+type ThumbnailRerunEngine = "python" | "auto";
 
 type ArtifactState = {
   data: Record<string, unknown> | null;
@@ -37,6 +37,7 @@ interface ThumbnailRerunModalState {
   selectedVideoIdsInput: string;
   engine: ThumbnailRerunEngine;
   force: boolean;
+  redownloadMissingThumbnails: boolean;
   running: boolean;
   jobId: string | null;
   total: number;
@@ -49,8 +50,6 @@ interface ThumbnailRerunModalState {
   error: string | null;
   done: boolean;
   auditArtifactPath: string | null;
-  orchestratorRebuilt: boolean;
-  rebuildAnalysisRecommended: boolean;
 }
 
 const INITIAL_ARTIFACT_STATE: ArtifactState = {
@@ -67,6 +66,7 @@ function createInitialThumbnailRerunState(): ThumbnailRerunModalState {
     selectedVideoIdsInput: "",
     engine: "python",
     force: false,
+    redownloadMissingThumbnails: false,
     running: false,
     jobId: null,
     total: 0,
@@ -78,9 +78,7 @@ function createInitialThumbnailRerunState(): ThumbnailRerunModalState {
     videoErrors: [],
     error: null,
     done: false,
-    auditArtifactPath: null,
-    orchestratorRebuilt: false,
-    rebuildAnalysisRecommended: false
+    auditArtifactPath: null
   };
 }
 
@@ -546,15 +544,25 @@ export default function ProjectDetail() {
     }
     try {
       const encodedId = encodeURIComponent(projectId);
-      const response = await fetch(`/api/projects/${encodedId}/videos`);
-      if (!response.ok) {
+      const [detailResponse, videosResponse] = await Promise.all([
+        fetch(`/api/projects/${encodedId}`),
+        fetch(`/api/projects/${encodedId}/videos`)
+      ]);
+      if (!detailResponse.ok || !videosResponse.ok) {
         return;
       }
-      const payload = (await response.json()) as ProjectVideoSummary[];
-      setVideos(payload);
+      const [detailPayload, videosPayload] = (await Promise.all([
+        detailResponse.json(),
+        videosResponse.json()
+      ])) as [ProjectDetailResponse, ProjectVideoSummary[]];
+      setDetail(detailPayload);
+      setVideos(videosPayload);
       setVideoDetailCache({});
       setSelectedVideoDetail(null);
       setSelectedVideoId(null);
+      setPlaybookState(INITIAL_ARTIFACT_STATE);
+      setTemplatesState(INITIAL_ARTIFACT_STATE);
+      setChannelModelState(INITIAL_ARTIFACT_STATE);
     } catch {
       // silent refresh failure
     }
@@ -595,9 +603,7 @@ export default function ProjectDetail() {
       skipped: 0,
       failed: 0,
       jobId: null,
-      auditArtifactPath: null,
-      orchestratorRebuilt: false,
-      rebuildAnalysisRecommended: false
+      auditArtifactPath: null
     }));
 
     try {
@@ -609,7 +615,8 @@ export default function ProjectDetail() {
           scope: thumbnailRerunState.scope,
           videoIds: selectedVideoIds,
           engine: thumbnailRerunState.engine,
-          force: thumbnailRerunState.force
+          force: thumbnailRerunState.force,
+          redownloadMissingThumbnails: thumbnailRerunState.redownloadMissingThumbnails
         })
       });
 
@@ -704,9 +711,7 @@ export default function ProjectDetail() {
           processed: typeof data.processed === "number" ? data.processed : prev.processed,
           skipped: typeof data.skipped === "number" ? data.skipped : prev.skipped,
           failed: typeof data.failed === "number" ? data.failed : prev.failed,
-          auditArtifactPath: typeof data.auditArtifactPath === "string" ? data.auditArtifactPath : null,
-          orchestratorRebuilt: data.orchestratorRebuilt === true,
-          rebuildAnalysisRecommended: data.rebuildAnalysisRecommended === true
+          auditArtifactPath: typeof data.auditArtifactPath === "string" ? data.auditArtifactPath : null
         }));
         void refreshVideosAfterThumbnailRerun();
       });
@@ -1288,7 +1293,9 @@ export default function ProjectDetail() {
             <div className="mb-3 flex items-center justify-between gap-2">
               <div>
                 <h3 className="text-base font-semibold text-slate-900">Recompute thumbnails</h3>
-                <p className="text-xs text-slate-500">Recalcula deterministic + OCR y actualiza `derived/video_features`.</p>
+                <p className="text-xs text-slate-500">
+                  Recalcula deterministic + OCR + LLM y refresca los artifacts derivados del proyecto.
+                </p>
               </div>
               <button type="button" className="btn-ghost !rounded-lg !px-3 !py-1.5 !text-xs" onClick={closeThumbnailRerunModal} disabled={thumbnailRerunState.running}>
                 Cerrar
@@ -1329,7 +1336,6 @@ export default function ProjectDetail() {
                   className="mt-1 w-full rounded-lg border border-slate-300 px-2 py-2 text-xs text-slate-900 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
                 >
                   <option value="python">python</option>
-                  <option value="tesseractjs">tesseractjs</option>
                   <option value="auto">auto</option>
                 </select>
               </label>
@@ -1370,6 +1376,25 @@ export default function ProjectDetail() {
               Force recompute (ignorar cache)
             </label>
 
+            <label className="mt-2 inline-flex items-center gap-2 text-xs text-slate-700">
+              <input
+                type="checkbox"
+                checked={thumbnailRerunState.redownloadMissingThumbnails}
+                onChange={(event) =>
+                  setThumbnailRerunState((prev) => ({
+                    ...prev,
+                    redownloadMissingThumbnails: event.target.checked
+                  }))
+                }
+                disabled={thumbnailRerunState.running}
+                className="h-4 w-4 rounded border-slate-300 text-teal-600 focus:ring-teal-500"
+              />
+              Re-descargar thumbnails faltantes antes de correr OCR
+            </label>
+            <p className="mt-1 text-xs text-slate-500">
+              Solo intenta bajar miniaturas cuando el archivo local no existe.
+            </p>
+
             <div className="mt-4 flex flex-wrap items-center gap-2">
               <button
                 type="button"
@@ -1379,15 +1404,6 @@ export default function ProjectDetail() {
               >
                 {thumbnailRerunState.running ? "Procesando..." : "Start rerun"}
               </button>
-              {thumbnailRerunState.done && thumbnailRerunState.rebuildAnalysisRecommended ? (
-                <button
-                  type="button"
-                  onClick={() => void handleRerunOrchestrator()}
-                  className="inline-flex items-center rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-700"
-                >
-                  Rebuild analysis now
-                </button>
-              ) : null}
               {thumbnailRerunState.auditArtifactPath ? (
                 <p className="text-xs text-slate-500">Audit: {thumbnailRerunState.auditArtifactPath}</p>
               ) : null}
@@ -1399,11 +1415,6 @@ export default function ProjectDetail() {
                 <strong>{thumbnailRerunState.processed}</strong> · skipped <strong>{thumbnailRerunState.skipped}</strong> · failed{" "}
                 <strong>{thumbnailRerunState.failed}</strong>
               </p>
-              {thumbnailRerunState.done && thumbnailRerunState.rebuildAnalysisRecommended ? (
-                <p className="mt-1 text-amber-700">
-                  Thumbnails actualizados; cohorts/drivers/templates pueden seguir viejos hasta ejecutar Rebuild analysis.
-                </p>
-              ) : null}
             </div>
 
             {thumbnailRerunState.error ? (

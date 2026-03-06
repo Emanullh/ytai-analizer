@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import inspect
 import sys
 import time
 from pathlib import Path
@@ -147,7 +148,39 @@ def get_paddle_model(lang: str) -> Any:
         raise RuntimeError("paddleocr is not installed")
 
     log(f"Loading PaddleOCR model lang={lang}")
-    model = PaddleOCR(use_angle_cls=False, lang=lang, use_gpu=False, show_log=False)
+    kwargs: Dict[str, Any] = {"lang": lang}
+    try:
+        signature = inspect.signature(PaddleOCR.__init__)
+        params = signature.parameters
+        if "use_textline_orientation" in params:
+            kwargs["use_textline_orientation"] = False
+        elif "use_angle_cls" in params:
+            kwargs["use_angle_cls"] = False
+    except Exception:
+        # Older releases expose the legacy angle classifier toggle.
+        kwargs["use_angle_cls"] = False
+
+    candidates = [kwargs]
+    if len(kwargs) > 1:
+        candidates.append({"lang": lang})
+
+    last_error: Optional[Exception] = None
+    model = None
+    for candidate in candidates:
+        try:
+            model = PaddleOCR(**candidate)
+            break
+        except TypeError as error:
+            last_error = error
+        except Exception as error:
+            message = str(error)
+            if "Unknown argument" not in message and "unexpected keyword argument" not in message:
+                raise
+            last_error = error
+
+    if model is None:
+        raise last_error if last_error is not None else RuntimeError("Unable to initialize PaddleOCR")
+
     PADDLE_MODELS[lang] = model
     return model
 
@@ -176,13 +209,24 @@ def scale_box(x_min: float, y_min: float, x_max: float, y_max: float, inv_scale:
 
 
 def bbox_from_quad(quad: Any) -> Optional[Dict[str, float]]:
-    if not isinstance(quad, list) or len(quad) < 4:
+    if not isinstance(quad, (list, tuple)):
+        try:
+            quad = quad.tolist()
+        except Exception:
+            return None
+
+    if len(quad) < 4:
         return None
 
     xs: List[float] = []
     ys: List[float] = []
     for point in quad:
-        if not isinstance(point, (list, tuple)) or len(point) < 2:
+        if not isinstance(point, (list, tuple)):
+            try:
+                point = point.tolist()
+            except Exception:
+                continue
+        if len(point) < 2:
             continue
         try:
             xs.append(float(point[0]))
@@ -205,12 +249,59 @@ def detect_with_paddle(image_bgr: np.ndarray, langs: List[str], inv_scale: float
     lang = paddle_lang(langs)
     model = get_paddle_model(lang)
 
-    raw = model.ocr(image_bgr, cls=False)
+    predict = getattr(model, "predict", None)
+    if callable(predict):
+        raw = predict(image_bgr)
+    else:
+        raw = model.ocr(image_bgr)
     if not isinstance(raw, list):
         return []
 
-    lines = raw[0] if len(raw) == 1 and isinstance(raw[0], list) else raw
     boxes: List[Dict[str, Any]] = []
+
+    # PaddleOCR v3 returns [OCRResult], where OCRResult exposes dt_polys/rec_texts/rec_scores.
+    if len(raw) == 1 and not isinstance(raw[0], list):
+        result_obj = raw[0]
+        try:
+            dt_polys = result_obj["dt_polys"]  # type: ignore[index]
+            rec_texts = result_obj["rec_texts"]  # type: ignore[index]
+            rec_scores = result_obj["rec_scores"]  # type: ignore[index]
+        except Exception:
+            dt_polys = []
+            rec_texts = []
+            rec_scores = []
+
+        if isinstance(dt_polys, list) and isinstance(rec_texts, list) and isinstance(rec_scores, list):
+            count = min(len(dt_polys), len(rec_texts), len(rec_scores))
+            for index in range(count):
+                bounds = bbox_from_quad(dt_polys[index])
+                if not bounds:
+                    continue
+
+                text = normalize_text(rec_texts[index])
+                conf = clamp_conf(rec_scores[index])
+                if not text:
+                    continue
+
+                scaled = scale_box(bounds["x_min"], bounds["y_min"], bounds["x_max"], bounds["y_max"], inv_scale)
+                if scaled["w"] <= 0 or scaled["h"] <= 0:
+                    continue
+
+                boxes.append(
+                    {
+                        "x": scaled["x"],
+                        "y": scaled["y"],
+                        "w": scaled["w"],
+                        "h": scaled["h"],
+                        "conf": conf,
+                        "text": text,
+                    }
+                )
+
+            if boxes:
+                return boxes
+
+    lines = raw[0] if len(raw) == 1 and isinstance(raw[0], list) else raw
 
     for item in lines:
         if not isinstance(item, list) or len(item) < 2:

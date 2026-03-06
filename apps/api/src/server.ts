@@ -66,8 +66,9 @@ const rerunThumbnailsBodySchema = z
   .object({
     scope: z.enum(["all", "exemplars", "selected"]),
     videoIds: z.array(z.string().min(1)).optional(),
-    engine: z.enum(["python", "tesseractjs", "auto"]).default("python"),
-    force: z.boolean().default(false)
+    engine: z.enum(["python", "auto"]).default("python"),
+    force: z.boolean().default(false),
+    redownloadMissingThumbnails: z.boolean().default(false)
   })
   .superRefine((value, ctx) => {
     if (value.scope === "selected" && (!Array.isArray(value.videoIds) || value.videoIds.length === 0)) {
@@ -288,37 +289,7 @@ export async function buildServer() {
         videoIds: payload.data.videoIds,
         engine: payload.data.engine,
         force: payload.data.force,
-        rebuildAnalysis: false
-      });
-      return reply.send(result);
-    } catch (error) {
-      const lockError = toRerunLockHttpError(error);
-      if (lockError) {
-        return reply.status(lockError.statusCode).send({ error: lockError.message });
-      }
-      throw error;
-    }
-  });
-
-  app.post("/projects/:projectId/rerun/thumbnails-and-orchestrator", async (request, reply) => {
-    const params = projectParamsSchema.safeParse(request.params);
-    if (!params.success) {
-      return reply.status(400).send({ error: params.error.issues[0]?.message ?? "Invalid params" });
-    }
-
-    const payload = rerunThumbnailsBodySchema.safeParse(request.body);
-    if (!payload.success) {
-      return reply.status(400).send({ error: payload.error.issues[0]?.message ?? "Invalid request body" });
-    }
-
-    try {
-      const result = rerunThumbnailsJobService.createJob({
-        projectId: params.data.projectId,
-        scope: payload.data.scope,
-        videoIds: payload.data.videoIds,
-        engine: payload.data.engine,
-        force: payload.data.force,
-        rebuildAnalysis: true
+        redownloadMissingThumbnails: payload.data.redownloadMissingThumbnails
       });
       return reply.send(result);
     } catch (error) {

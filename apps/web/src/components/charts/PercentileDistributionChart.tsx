@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell } from "recharts";
 
 interface PercentileDistributionChartProps {
-  videos: Array<{ performance?: { percentile?: number | null } }>;
+  videos: Array<{ performance?: { percentile?: number | null } | null }>;
 }
 
 const BUCKET_COLORS = ["#f43f5e", "#f59e0b", "#6366f1", "#10b981"];
@@ -36,7 +36,7 @@ export default function PercentileDistributionChart({ videos }: PercentileDistri
           <XAxis dataKey="label" tick={{ fontSize: 12 }} />
           <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
           <Tooltip
-            formatter={(value: number) => [`${value} videos`, "Count"]}
+            formatter={(value) => [`${typeof value === "number" ? value : String(value ?? "-")} videos`, "Count"]}
             contentStyle={{ fontSize: 12, borderRadius: 8 }}
           />
           <Bar dataKey="count" radius={[4, 4, 0, 0]}>

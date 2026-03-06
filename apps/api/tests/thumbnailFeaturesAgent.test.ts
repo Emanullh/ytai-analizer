@@ -5,7 +5,6 @@ import sharp from "sharp";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const requestAutoGenTaskMock = vi.fn();
-const runOcrMock = vi.fn();
 const recognizeWithLocalOcrMock = vi.fn();
 
 vi.mock("../src/services/autogenRuntime.js", () => ({
@@ -14,14 +13,9 @@ vi.mock("../src/services/autogenRuntime.js", () => ({
   stopAutoGenWorker: vi.fn()
 }));
 
-vi.mock("../src/derived/ocr/tesseractOcr.js", () => ({
-  runOcr: runOcrMock,
-  clearOcrCache: vi.fn(),
-  terminateOcrWorkers: vi.fn()
-}));
-
 vi.mock("../src/services/localOcrService.js", () => ({
-  recognizeWithLocalOcr: recognizeWithLocalOcrMock
+  recognizeWithLocalOcr: recognizeWithLocalOcrMock,
+  resetLocalOcrRuntime: vi.fn()
 }));
 
 describe("thumbnailFeaturesAgent", () => {
@@ -31,11 +25,10 @@ describe("thumbnailFeaturesAgent", () => {
   beforeEach(async () => {
     vi.resetModules();
     requestAutoGenTaskMock.mockReset();
-    runOcrMock.mockReset();
     recognizeWithLocalOcrMock.mockReset();
     process.env = { ...originalEnv };
     process.env.THUMB_OCR_ENABLED = "true";
-    process.env.THUMB_OCR_ENGINE = "tesseractjs";
+    process.env.THUMB_OCR_ENGINE = "python";
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ytai-thumbnail-features-"));
   });
 
@@ -59,10 +52,12 @@ describe("thumbnailFeaturesAgent", () => {
     process.env.AUTO_GEN_ENABLED = "false";
     delete process.env.OPENAI_API_KEY;
 
-    runOcrMock.mockResolvedValue({
-      text: "Huge Text",
-      confidenceMean: 0.8,
-      boxes: [{ x: 2, y: 3, w: 80, h: 20, confidence: 0.9, text: "Huge" }]
+    recognizeWithLocalOcrMock.mockResolvedValue({
+      status: "ok",
+      engine: "paddleocr",
+      imageWidth: 120,
+      imageHeight: 80,
+      boxes: [{ x: 2, y: 3, w: 80, h: 20, conf: 0.9, text: "Huge" }]
     });
 
     const thumbnailPath = path.join(tempDir, "thumb-disabled.jpg");
@@ -87,15 +82,15 @@ describe("thumbnailFeaturesAgent", () => {
   it("uses hi-confidence OCR boxes for overlap/textAreaRatio/hasBigText metrics", async () => {
     process.env.AUTO_GEN_ENABLED = "false";
     delete process.env.OPENAI_API_KEY;
-    process.env.THUMB_OCR_ENGINE = "tesseractjs";
-
-    runOcrMock.mockResolvedValue({
-      text: "alpha beta noise",
-      confidenceMean: 0.5,
+    recognizeWithLocalOcrMock.mockResolvedValue({
+      status: "ok",
+      engine: "paddleocr",
+      imageWidth: 120,
+      imageHeight: 80,
       boxes: [
-        { x: 0, y: 0, w: 80, h: 20, confidence: 0.95, text: "Alpha" },
-        { x: 50, y: 0, w: 40, h: 10, confidence: 0.7, text: "Beta" },
-        { x: 0, y: 20, w: 80, h: 20, confidence: 0.2, text: "garbage" }
+        { x: 0, y: 0, w: 80, h: 20, conf: 0.95, text: "Alpha" },
+        { x: 50, y: 0, w: 40, h: 10, conf: 0.7, text: "Beta" },
+        { x: 0, y: 20, w: 80, h: 20, conf: 0.2, text: "garbage" }
       ]
     });
 
@@ -117,7 +112,7 @@ describe("thumbnailFeaturesAgent", () => {
     expect(result.value.hasBigText).toBe(true);
   });
 
-  it("falls back to tesseract when python OCR is unavailable", async () => {
+  it("fails when python OCR is unavailable", async () => {
     process.env.AUTO_GEN_ENABLED = "false";
     delete process.env.OPENAI_API_KEY;
     process.env.THUMB_OCR_ENGINE = "python";
@@ -126,12 +121,6 @@ describe("thumbnailFeaturesAgent", () => {
       status: "error",
       warning: "Local OCR unavailable"
     });
-    runOcrMock.mockResolvedValue({
-      text: "Fallback OCR",
-      confidenceMean: 0.8,
-      boxes: [{ x: 2, y: 2, w: 80, h: 20, confidence: 0.9, text: "Fallback OCR" }]
-    });
-
     const thumbnailPath = path.join(tempDir, "thumb-fallback.jpg");
     await writeThumbnail(thumbnailPath);
     const { computeDeterministic } = await import("../src/derived/thumbnailFeaturesAgent.js");
@@ -143,18 +132,20 @@ describe("thumbnailFeaturesAgent", () => {
     });
 
     expect(recognizeWithLocalOcrMock).toHaveBeenCalledTimes(1);
-    expect(runOcrMock).toHaveBeenCalledTimes(1);
-    expect(result.value.ocrText).toContain("Fallback OCR");
+    expect(result.warnings.some((warning) => warning.includes("Local OCR unavailable"))).toBe(true);
+    expect(result.value.ocrText).toBe("");
   });
 
   it("merges thumbnail features and normalizes LLM output", async () => {
     process.env.AUTO_GEN_ENABLED = "true";
     process.env.OPENAI_API_KEY = "test-key";
 
-    runOcrMock.mockResolvedValue({
-      text: "Text on thumb",
-      confidenceMean: 0.9,
-      boxes: [{ x: 5, y: 4, w: 50, h: 18, confidence: 0.95, text: "Text" }]
+    recognizeWithLocalOcrMock.mockResolvedValue({
+      status: "ok",
+      engine: "paddleocr",
+      imageWidth: 120,
+      imageHeight: 80,
+      boxes: [{ x: 5, y: 4, w: 50, h: 18, conf: 0.95, text: "Text" }]
     });
 
     requestAutoGenTaskMock.mockResolvedValue({
@@ -273,5 +264,61 @@ describe("thumbnailFeaturesAgent", () => {
     expect(
       written.thumbnailFeatures?.warnings.some((warning) => warning.includes("Discarded evidence signal"))
     ).toBe(false);
+  });
+
+  it("drops stale thumbnail warnings when deterministic OCR is recomputed", async () => {
+    process.env.AUTO_GEN_ENABLED = "false";
+    delete process.env.OPENAI_API_KEY;
+
+    recognizeWithLocalOcrMock.mockResolvedValue({
+      status: "ok",
+      engine: "paddleocr",
+      imageWidth: 120,
+      imageHeight: 80,
+      boxes: [{ x: 5, y: 4, w: 50, h: 18, conf: 0.95, text: "Fresh OCR" }]
+    });
+
+    const { persistThumbnailFeaturesArtifact } = await import("../src/derived/thumbnailFeaturesAgent.js");
+    const channelFolderPath = path.join(tempDir, "WarningsChannel");
+    const derivedFolderPath = path.join(channelFolderPath, "derived", "video_features");
+    await fs.mkdir(derivedFolderPath, { recursive: true });
+
+    const thumbnailPath = path.join(channelFolderPath, "thumbnails", "video-stale.jpg");
+    await fs.mkdir(path.dirname(thumbnailPath), { recursive: true });
+    await writeThumbnail(thumbnailPath);
+
+    await fs.writeFile(
+      path.join(derivedFolderPath, "video-stale.json"),
+      JSON.stringify(
+        {
+          schemaVersion: "derived.video_features.v1",
+          videoId: "video-stale",
+          computedAt: "2026-01-01T00:00:00.000Z",
+          thumbnailFeatures: {
+            deterministic: { ocrWordCount: 1 },
+            llm: null,
+            warnings: ["Local OCR failed for image /tmp/thumb.jpg: Unknown argument: show_log"]
+          }
+        },
+        null,
+        2
+      ),
+      "utf-8"
+    );
+
+    const result = await persistThumbnailFeaturesArtifact({
+      exportsRoot: tempDir,
+      channelFolderPath,
+      videoId: "video-stale",
+      title: "Fresh OCR title",
+      thumbnailAbsPath: thumbnailPath,
+      thumbnailLocalPath: "thumbnails/video-stale.jpg",
+      compute: {
+        deterministic: true,
+        llm: false
+      }
+    });
+
+    expect(result.warnings).not.toContain(expect.stringContaining("show_log"));
   });
 });

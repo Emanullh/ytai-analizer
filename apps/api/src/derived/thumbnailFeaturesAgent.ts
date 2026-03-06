@@ -6,7 +6,7 @@ import { env } from "../config/env.js";
 import { requestAutoGenTask } from "../services/autogenRuntime.js";
 import { recognizeWithLocalOcr } from "../services/localOcrService.js";
 import { hashFileSha1, hashStringSha1 } from "../utils/hash.js";
-import { runOcr as runTesseractOcr, type OcrBox, type OcrResult } from "./ocr/tesseractOcr.js";
+import type { OcrBox, OcrResult } from "./ocr/types.js";
 import {
   computeBrightnessContrast,
   computeColorfulness,
@@ -64,6 +64,7 @@ const SOFT_IGNORED_SIGNAL_FIELDS = new Set(["layout"]);
 const OCR_MAX_BOXES = 50;
 const OCR_HI_CONF_THRESHOLD = 0.6;
 const OCR_BIG_TEXT_AREA_THRESHOLD = 0.08;
+const PYTHON_OCR_IMPLEMENTATION_VERSION = "python-ocr-v2";
 
 const ocrCache = new Map<string, OcrResult>();
 const ocrInFlight = new Map<string, Promise<{ result: OcrResult; warnings: string[] }>>();
@@ -75,12 +76,13 @@ type FacePositionY = (typeof FACE_POSITION_Y)[number];
 type FaceEmotionTone = (typeof FACE_EMOTION_TONES)[number];
 type ClutterLevel = (typeof CLUTTER_LEVELS)[number];
 type StyleTag = (typeof STYLE_TAGS)[number];
-export type ThumbnailOcrEngine = "python" | "tesseractjs" | "auto";
+export type ThumbnailOcrEngine = "python" | "auto";
 
 export interface ThumbnailOcrOptions {
   engine?: ThumbnailOcrEngine;
   langs?: string[];
   downscaleWidth?: number;
+  disableCache?: boolean;
 }
 
 export interface ThumbnailDeterministicFeatures {
@@ -280,9 +282,8 @@ function normalizeOcrText(input: string): string {
   return input.replace(/\s+/g, " ").trim();
 }
 
-function resolveThumbOcrEngine(override?: ThumbnailOcrEngine): "python" | "tesseractjs" {
-  const resolved = override === "auto" || !override ? env.thumbOcrEngine : override;
-  return resolved === "tesseractjs" ? "tesseractjs" : "python";
+function resolveThumbOcrEngine(_override?: ThumbnailOcrEngine): "python" {
+  return "python";
 }
 
 function resolveThumbOcrLangs(override?: string[]): string[] {
@@ -374,12 +375,13 @@ function computeBiggestBoxAreaRatio(boxes: OcrBox[], imageWidth: number, imageHe
   return clamp01(biggestArea / imageArea);
 }
 
-function buildOcrConfigHash(args: { engine: "python" | "tesseractjs"; langs: string[]; downscaleWidth: number }): string {
+function buildOcrConfigHash(args: { engine: "python"; langs: string[]; downscaleWidth: number }): string {
   return hashStringSha1(
     JSON.stringify({
       engine: args.engine,
       langs: args.langs.join("+"),
-      downscaleWidth: args.downscaleWidth
+      downscaleWidth: args.downscaleWidth,
+      implementationVersion: PYTHON_OCR_IMPLEMENTATION_VERSION
     })
   );
 }
@@ -400,19 +402,22 @@ async function runThumbnailOcr(
   const engine = resolveThumbOcrEngine(ocrOptions?.engine);
   const langs = resolveThumbOcrLangs(ocrOptions?.langs);
   const downscaleWidth = ocrOptions?.downscaleWidth ?? env.thumbVisionDownscaleWidth;
+  const disableCache = ocrOptions?.disableCache === true;
   const cacheKey = `${imageHash}:${buildOcrConfigHash({ engine, langs, downscaleWidth })}`;
 
-  const cached = ocrCache.get(cacheKey);
-  if (cached) {
-    return {
-      result: cloneOcrResult(cached),
-      warnings: []
-    };
-  }
+  if (!disableCache) {
+    const cached = ocrCache.get(cacheKey);
+    if (cached) {
+      return {
+        result: cloneOcrResult(cached),
+        warnings: []
+      };
+    }
 
-  const inFlight = ocrInFlight.get(cacheKey);
-  if (inFlight) {
-    return inFlight;
+    const inFlight = ocrInFlight.get(cacheKey);
+    if (inFlight) {
+      return inFlight;
+    }
   }
 
   const task = (async (): Promise<{ result: OcrResult; warnings: string[] }> => {
@@ -464,10 +469,7 @@ async function runThumbnailOcr(
     }
 
     if (!result) {
-      if (engine === "python") {
-        warnings.push("Thumbnail OCR fallback: switching from python to tesseractjs");
-      }
-      result = await runTesseractOcr(inputPath);
+      throw new Error(warnings[warnings.length - 1] ?? `Python OCR failed for image ${inputPath}`);
     }
 
     const normalizedResult: OcrResult = {
@@ -478,16 +480,22 @@ async function runThumbnailOcr(
         .filter((box): box is OcrBox => box !== null)
     };
 
-    ocrCache.set(cacheKey, cloneOcrResult(normalizedResult));
+    if (!disableCache) {
+      ocrCache.set(cacheKey, cloneOcrResult(normalizedResult));
+    }
     return { result: normalizedResult, warnings };
   })();
 
-  ocrInFlight.set(cacheKey, task);
-  try {
-    return await task;
-  } finally {
-    ocrInFlight.delete(cacheKey);
+  if (!disableCache) {
+    ocrInFlight.set(cacheKey, task);
+    try {
+      return await task;
+    } finally {
+      ocrInFlight.delete(cacheKey);
+    }
   }
+
+  return task;
 }
 
 function applyOcrDeterministicSignals(args: {
@@ -1237,7 +1245,7 @@ export async function persistThumbnailFeaturesArtifact(
   const requestedLlm = args.compute?.llm ?? true;
 
   let deterministic = existingSection?.deterministic ?? null;
-  const warnings: string[] = [...(existingSection?.warnings ?? [])];
+  const warnings: string[] = requestedDeterministic ? [] : [...(existingSection?.warnings ?? [])];
   if (requestedDeterministic || !deterministic) {
     const deterministicResult =
       deterministicMode === "ocr_only" && deterministic
@@ -1315,6 +1323,7 @@ export async function recomputeThumbnailFeaturesForVideo(args: {
   engine?: ThumbnailOcrEngine;
   recomputeLlm?: boolean;
   deterministicMode?: "full" | "ocr_only";
+  disableOcrCache?: boolean;
 }): Promise<PersistThumbnailFeaturesResult> {
   return persistThumbnailFeaturesArtifact({
     exportsRoot: args.exportsRoot,
@@ -1324,7 +1333,8 @@ export async function recomputeThumbnailFeaturesForVideo(args: {
     thumbnailAbsPath: args.thumbnailAbsPath,
     thumbnailLocalPath: args.thumbnailLocalPath,
     ocr: {
-      engine: args.engine
+      engine: args.engine,
+      disableCache: args.disableOcrCache === true
     },
     compute: {
       deterministic: true,

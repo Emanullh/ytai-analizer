@@ -334,6 +334,7 @@ class LocalOcrWorkerClient {
         stdio: ["pipe", "pipe", "pipe"],
         env: {
           ...process.env,
+          PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK: process.env.PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK ?? "True",
           PYTHONUTF8: process.env.PYTHONUTF8 ?? "1",
           PYTHONIOENCODING: process.env.PYTHONIOENCODING ?? "utf-8"
         }
@@ -461,10 +462,24 @@ class LocalOcrWorkerClient {
     this.terminateWorker();
     await this.ensureWorker();
   }
+
+  dispose(): void {
+    this.terminateWorker();
+    this.healthCheckPassed = false;
+    this.healthCheckPromise = null;
+    this.booting = null;
+  }
 }
 
-const localOcrWorkerClient = new LocalOcrWorkerClient();
+let localOcrWorkerClient = new LocalOcrWorkerClient();
 
 export async function recognizeWithLocalOcr(request: LocalOcrRequest): Promise<LocalOcrResult> {
   return localOcrWorkerClient.runTaskWithRetry(request);
+}
+
+export function resetLocalOcrRuntime(): void {
+  localOcrWorkerClient.dispose();
+  runtimeLocalOcrEnabled = true;
+  runtimeLocalOcrDisabledReason = undefined;
+  localOcrWorkerClient = new LocalOcrWorkerClient();
 }
