@@ -22,8 +22,8 @@ const stageLabelByKey: Record<ExportVideoStage, string> = {
 
 const stageHintByKey: Record<ExportVideoStage, string> = {
   queue: "Video en cola antes de iniciar procesamiento.",
-  downloading_audio: "Descarga de audio para captions/ASR.",
-  transcribing: "Extracción de transcript (captions o ASR).",
+  downloading_audio: "Descarga o reutilización del MP3 para Local ASR.",
+  transcribing: "Extracción del transcript usando Local ASR.",
   downloading_thumbnail: "Descarga/procesamiento de miniatura.",
   writing_json: "Escritura de artifacts raw/derived.",
   done: "Video exportado sin incidencias.",
@@ -419,9 +419,14 @@ export default function AnalyzePage() {
               ) : null}
 
               {exportModalState.status === "done" && exportModalState.exportPath ? (
-                <p className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
-                  Export finalizado en: <code>{exportModalState.exportPath}</code>
-                </p>
+                <div className="space-y-2">
+                  <p className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+                    Export finalizado en: <code>{exportModalState.exportPath}</code>
+                  </p>
+                  <p className="rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-800">
+                    El export principal deja listos raw/features/model. Si luego necesitas Playbook o Templates, ejecútalos manualmente desde Projects con <strong>Re-run Orchestrator</strong>.
+                  </p>
+                </div>
               ) : null}
 
               {exportModalState.status === "failed" && exportModalState.error ? (

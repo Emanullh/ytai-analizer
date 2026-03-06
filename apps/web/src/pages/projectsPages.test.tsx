@@ -138,6 +138,8 @@ describe("Projects pages", () => {
       expect(screen.getAllByText("Video Uno").length).toBeGreaterThan(0);
     });
     expect(screen.getByText("Videos (1)")).toBeInTheDocument();
+    expect(screen.getAllByText("Pendiente orchestrator").length).toBeGreaterThan(0);
+    expect(screen.getByText("Captions (legacy)")).toBeInTheDocument();
   });
 
   it("starts thumbnail batch rerun from the unified feature dropdown", async () => {

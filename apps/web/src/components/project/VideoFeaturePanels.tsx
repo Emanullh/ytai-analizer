@@ -67,6 +67,19 @@ function joinOrDash(values: string[], limit = 4): string {
   return values.slice(0, limit).join(", ");
 }
 
+function formatTranscriptSourceLabel(source: string | null | undefined): string {
+  if (source === "asr") {
+    return "ASR local";
+  }
+  if (source === "captions") {
+    return "Captions (legacy)";
+  }
+  if (source === "none") {
+    return "Sin transcript";
+  }
+  return "-";
+}
+
 function rerunModeLabel(mode: VideoFeatureRerunMode): string {
   if (mode === "collect_assets") {
     return "Assets";
@@ -203,6 +216,7 @@ export default function VideoFeaturePanels(props: VideoFeaturePanelsProps) {
         .filter(Boolean)
     : [];
   const transcriptRef = asRecord(rawVideo?.transcriptRef);
+  const transcriptSource = asString(transcriptRef?.transcriptSource);
   const audioLocalPath = asString(rawVideo?.audioLocalPath) ?? "-";
 
   return (
@@ -317,6 +331,7 @@ export default function VideoFeaturePanels(props: VideoFeaturePanelsProps) {
           >
             <FeatureRow label="Audio asset" value={audioLocalPath} />
             <FeatureRow label="Transcript ref" value={asString(transcriptRef?.transcriptPath) ?? "-"} />
+            <FeatureRow label="Source" value={formatTranscriptSourceLabel(transcriptSource)} />
             <FeatureRow
               label="Title coverage"
               value={formatRatio(toNumber(transcriptDeterministic?.title_keyword_coverage))}
@@ -338,7 +353,7 @@ export default function VideoFeaturePanels(props: VideoFeaturePanelsProps) {
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <div>
             <h4 className="text-sm font-semibold text-slate-900">Transcript segments</h4>
-            <p className="text-xs text-slate-500">Inspección rápida del input que usan `title` y `transcript`.</p>
+            <p className="text-xs text-slate-500">Inspección rápida del transcript persistido que usan `title` y `transcript`.</p>
           </div>
           <input
             type="text"

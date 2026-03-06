@@ -150,6 +150,19 @@ function transcriptVariant(status: "ok" | "missing" | "error"): "success" | "war
   return "danger";
 }
 
+function formatTranscriptSourceLabel(source: ProjectVideoSummary["transcriptSource"] | string | null | undefined): string {
+  if (source === "asr") {
+    return "ASR local";
+  }
+  if (source === "captions") {
+    return "Captions (legacy)";
+  }
+  if (source === "none") {
+    return "Sin transcript";
+  }
+  return "-";
+}
+
 function cacheVariant(cacheHit: ProjectVideoSummary["cacheHit"]): "success" | "info" | "neutral" {
   if (cacheHit === "full") {
     return "success";
@@ -204,7 +217,17 @@ function JsonBlock({ value }: { value: unknown }) {
   );
 }
 
-function ArtifactEmptyState({ label }: { label: string }) {
+function ArtifactEmptyState({
+  label,
+  description,
+  ctaTo = "/",
+  ctaLabel = "Ir a Analyze para re-export"
+}: {
+  label: string;
+  description?: string;
+  ctaTo?: string | null;
+  ctaLabel?: string;
+}) {
   return (
     <section className="panel p-5">
       <div className="flex items-start gap-3">
@@ -213,10 +236,12 @@ function ArtifactEmptyState({ label }: { label: string }) {
         </span>
         <div>
           <p className="text-sm font-semibold text-slate-900">{label} no disponible</p>
-          <p className="mt-1 text-sm text-slate-600">No se encontró artifact exportado para este proyecto.</p>
-          <Link to="/" className="btn-ghost mt-3 !rounded-lg !px-3 !py-1.5 !text-xs">
-            Ir a Analyze para re-export
-          </Link>
+          <p className="mt-1 text-sm text-slate-600">{description ?? "No se encontró artifact exportado para este proyecto."}</p>
+          {ctaTo ? (
+            <Link to={ctaTo} className="btn-ghost mt-3 !rounded-lg !px-3 !py-1.5 !text-xs">
+              {ctaLabel}
+            </Link>
+          ) : null}
         </div>
       </div>
     </section>
@@ -1040,17 +1065,22 @@ export default function ProjectDetail() {
                 <SectionExplainer>
                   Este proyecto analizó <strong>{detail.manifest?.counts?.totalVideosSelected ?? 0} videos</strong> de{" "}
                   <strong>{detail.channel.channelName}</strong> en un timeframe de{" "}
-                  <strong>{detail.channel.timeframe ?? "-"}</strong>. Los artifacts Playbook, Templates y Model
-                  contienen los patrones, fórmulas y modelos derivados del análisis.
+                  <strong>{detail.channel.timeframe ?? "-"}</strong>. El export principal deja listos los assets raw,
+                  los features por video y el <strong>channel model</strong>. Los artifacts <strong>Playbook</strong> y{" "}
+                  <strong>Templates</strong> quedan pendientes hasta ejecutar manualmente <strong>Re-run Orchestrator</strong>.
                 </SectionExplainer>
                 <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                   <article className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                     <p className="text-xs text-slate-500">Playbook</p>
-                    <Badge variant={detail.artifacts.playbook ? "success" : "warning"}>{detail.artifacts.playbook ? "Disponible" : "No exportado"}</Badge>
+                    <Badge variant={detail.artifacts.playbook ? "success" : "warning"}>
+                      {detail.artifacts.playbook ? "Disponible" : "Pendiente orchestrator"}
+                    </Badge>
                   </article>
                   <article className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                     <p className="text-xs text-slate-500">Templates</p>
-                    <Badge variant={detail.artifacts.templates ? "success" : "warning"}>{detail.artifacts.templates ? "Disponible" : "No exportado"}</Badge>
+                    <Badge variant={detail.artifacts.templates ? "success" : "warning"}>
+                      {detail.artifacts.templates ? "Disponible" : "Pendiente orchestrator"}
+                    </Badge>
                   </article>
                   <article className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                     <p className="text-xs text-slate-500">Channel model</p>
@@ -1123,8 +1153,9 @@ export default function ProjectDetail() {
                   <div>
                     <p className="text-sm font-semibold text-slate-900">Re-run Orchestrator</p>
                     <p className="mt-0.5 text-xs text-slate-500">
-                      Vuelve a ejecutar solo el paso del agente orchestrator (LLM) usando los datos ya exportados.
-                      Valida que los prerequisitos (channel.json, videos.jsonl, video_features) existan antes de lanzar.
+                      El export principal ya no genera Playbook/Templates automáticamente. Vuelve a ejecutar aquí solo
+                      el paso del orchestrator (LLM) usando los datos ya exportados. Valida que los prerequisitos
+                      (channel.json, videos.jsonl, video_features) existan antes de lanzar.
                     </p>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
@@ -1204,7 +1235,13 @@ export default function ProjectDetail() {
 
               {playbookState.loading ? <p className="text-sm text-slate-600">Cargando playbook...</p> : null}
               {playbookState.error ? <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{playbookState.error}</p> : null}
-              {!playbookState.loading && !playbookState.error && !detail.artifacts.playbook ? <ArtifactEmptyState label="Playbook" /> : null}
+              {!playbookState.loading && !playbookState.error && !detail.artifacts.playbook ? (
+                <ArtifactEmptyState
+                  label="Playbook"
+                  description="El export principal no genera este artifact. Usa `Re-run Orchestrator` en esta pestaña cuando ya tengas raw/videos y video_features listos."
+                  ctaTo={null}
+                />
+              ) : null}
               {!playbookState.loading && !playbookState.error && detail.artifacts.playbook ? (
                 <PlaybookView playbook={playbookState.data} onEvidenceFieldClick={openEvidenceField} debugRawJson={debugRawJson} />
               ) : null}
@@ -1215,7 +1252,13 @@ export default function ProjectDetail() {
             <div>
               {templatesState.loading ? <p className="text-sm text-slate-600">Cargando templates...</p> : null}
               {templatesState.error ? <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{templatesState.error}</p> : null}
-              {!templatesState.loading && !templatesState.error && !detail.artifacts.templates ? <ArtifactEmptyState label="Templates" /> : null}
+              {!templatesState.loading && !templatesState.error && !detail.artifacts.templates ? (
+                <ArtifactEmptyState
+                  label="Templates"
+                  description="Este artifact también depende del orchestrator manual. Si falta, ejecútalo desde la pestaña Playbook y vuelve aquí para inspeccionarlo."
+                  ctaTo={null}
+                />
+              ) : null}
               {!templatesState.loading && !templatesState.error && detail.artifacts.templates ? (
                 <TemplatesView templates={templatesState.data} onEvidenceFieldClick={openEvidenceField} debugRawJson={debugRawJson} />
               ) : null}
@@ -1303,7 +1346,7 @@ export default function ProjectDetail() {
                   </th>
                   <th className="px-3 py-2">Views/day • Engagement</th>
                   <th className="px-3 py-2">
-                    <Tooltip content="captions, asr o none según origen disponible">
+                    <Tooltip content="Origen del transcript. Los exports nuevos usan Local ASR; `captions` solo aparece en proyectos legacy.">
                       <span tabIndex={0} className="cursor-help rounded-sm border-b border-dotted border-slate-400 focus:outline-none">
                         Transcript
                       </span>
@@ -1386,7 +1429,7 @@ export default function ProjectDetail() {
                       </td>
                       <td className="px-3 py-2 text-xs">
                         <Badge variant={transcriptVariant(video.transcriptStatus)}>{video.transcriptStatus}</Badge>
-                        <p className="mt-1 text-slate-500">{video.transcriptSource}</p>
+                        <p className="mt-1 text-slate-500">{formatTranscriptSourceLabel(video.transcriptSource)}</p>
                       </td>
                       <td className="px-3 py-2 text-xs">
                         <Badge variant={cacheVariant(video.cacheHit)}>{video.cacheHit ?? "-"}</Badge>
