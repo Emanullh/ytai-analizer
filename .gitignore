@@ -3,8 +3,7 @@
 .codex/
 
 # Claude Flow runtime data
-.claude-flow/data/
-.claude-flow/logs/
+.claude-flow/
 
 # Environment variables
 .env
@@ -27,6 +26,7 @@ apps/*/node_modules/
 apps/*/dist/
 apps/*/coverage/
 apps/api/exports/
+apps/api/exports.zip
 
 # .gitignore additions
 apps/api/eng.traineddata
