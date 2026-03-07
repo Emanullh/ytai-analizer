@@ -139,6 +139,54 @@ def easy_langs(langs: List[str]) -> List[str]:
     return deduped
 
 
+def append_paddle_candidate(candidates: List[Dict[str, Any]], candidate: Dict[str, Any]) -> None:
+    normalized = dict(candidate)
+    if normalized in candidates:
+        return
+    candidates.append(normalized)
+
+
+def build_paddle_init_candidates(lang: str) -> List[Dict[str, Any]]:
+    base_candidate: Dict[str, Any] = {"lang": lang}
+    params: Dict[str, Any] = {}
+
+    try:
+        signature = inspect.signature(PaddleOCR.__init__)
+        params = dict(signature.parameters)
+    except Exception:
+        params = {}
+
+    safe_candidate = dict(base_candidate)
+    if "use_doc_orientation_classify" in params:
+        safe_candidate["use_doc_orientation_classify"] = False
+    if "use_doc_unwarping" in params:
+        safe_candidate["use_doc_unwarping"] = False
+    if "use_textline_orientation" in params:
+        safe_candidate["use_textline_orientation"] = False
+    elif "use_angle_cls" in params:
+        safe_candidate["use_angle_cls"] = False
+
+    # PaddleOCR 3.x enables MKLDNN by default; on Windows this can fail on OCR
+    # thumbnails with oneDNN/PIR conversion errors inside Paddle runtime.
+    if sys.platform == "win32":
+        safe_candidate["enable_mkldnn"] = False
+
+    candidates: List[Dict[str, Any]] = []
+    append_paddle_candidate(candidates, safe_candidate)
+
+    if "enable_mkldnn" in safe_candidate:
+        without_mkldnn = dict(safe_candidate)
+        without_mkldnn.pop("enable_mkldnn", None)
+        append_paddle_candidate(candidates, without_mkldnn)
+
+    legacy_candidate = dict(base_candidate)
+    if "use_angle_cls" in params:
+        legacy_candidate["use_angle_cls"] = False
+    append_paddle_candidate(candidates, legacy_candidate)
+    append_paddle_candidate(candidates, base_candidate)
+    return candidates
+
+
 def get_paddle_model(lang: str) -> Any:
     model = PADDLE_MODELS.get(lang)
     if model is not None:
@@ -148,21 +196,7 @@ def get_paddle_model(lang: str) -> Any:
         raise RuntimeError("paddleocr is not installed")
 
     log(f"Loading PaddleOCR model lang={lang}")
-    kwargs: Dict[str, Any] = {"lang": lang}
-    try:
-        signature = inspect.signature(PaddleOCR.__init__)
-        params = signature.parameters
-        if "use_textline_orientation" in params:
-            kwargs["use_textline_orientation"] = False
-        elif "use_angle_cls" in params:
-            kwargs["use_angle_cls"] = False
-    except Exception:
-        # Older releases expose the legacy angle classifier toggle.
-        kwargs["use_angle_cls"] = False
-
-    candidates = [kwargs]
-    if len(kwargs) > 1:
-        candidates.append({"lang": lang})
+    candidates = build_paddle_init_candidates(lang)
 
     last_error: Optional[Exception] = None
     model = None
@@ -382,12 +416,24 @@ def detect_with_easyocr(image_bgr: np.ndarray, langs: List[str], inv_scale: floa
 
 
 def detect_text(image_bgr: np.ndarray, langs: List[str], inv_scale: float) -> tuple[str, List[Dict[str, Any]]]:
+    paddle_error: Optional[Exception] = None
     if PaddleOCR is not None:
-        return "paddleocr", detect_with_paddle(image_bgr, langs, inv_scale)
+        try:
+            return "paddleocr", detect_with_paddle(image_bgr, langs, inv_scale)
+        except Exception as error:
+            paddle_error = error
+            log(f"PaddleOCR runtime failed, attempting fallback: {error}")
 
     if easyocr is not None:
-        return "easyocr", detect_with_easyocr(image_bgr, langs, inv_scale)
+        try:
+            return "easyocr", detect_with_easyocr(image_bgr, langs, inv_scale)
+        except Exception as error:
+            if paddle_error is not None:
+                raise RuntimeError(f"PaddleOCR failed: {paddle_error}; EasyOCR fallback failed: {error}")
+            raise
 
+    if paddle_error is not None:
+        raise paddle_error
     raise RuntimeError("Neither paddleocr nor easyocr is installed")
 
 

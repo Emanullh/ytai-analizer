@@ -5,6 +5,8 @@ Este proyecto soporta OCR moderno para thumbnails con worker Python (`apps/api/s
 - `paddleocr` + `opencv-python-headless` (preferido)
 - fallback a `easyocr` solo si está instalado
 
+Para thumbnails, el worker desactiva el preprocesado documental de Paddle (`doc orientation`, `unwarping`, `textline orientation`) porque no aporta valor en miniaturas y agrega rutas de inferencia más frágiles.
+
 ## Instalación
 
 Con el venv del repo (`.venv-asr`):
@@ -39,4 +41,14 @@ python -c "import cv2; import importlib.util as u; assert (u.find_spec('paddleoc
 
 ## Comportamiento de fallback
 
-Si el engine Python no está disponible o falla, el pipeline usa fallback a `tesseract.js` para no romper el export.
+Si `PaddleOCR` falla en runtime y `easyocr` está instalado, el worker intenta `easyocr` antes de devolver error.
+
+Si el engine Python no está disponible o ambos backends fallan, el pipeline usa fallback a `tesseract.js` para no romper el export.
+
+## Nota de Windows
+
+En Windows, `PaddleOCR 3.x` habilita `MKLDNN/oneDNN` por defecto. Eso puede romper OCR de thumbnails con errores como:
+
+`ConvertPirAttribute2RuntimeAttribute not support [pir::ArrayAttribute<pir::DoubleAttribute>]`
+
+Por eso el worker desactiva `enable_mkldnn` en Windows al crear `PaddleOCR`.

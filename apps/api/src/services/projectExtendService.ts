@@ -11,6 +11,7 @@ import { loadCacheIndex, saveCacheIndex, type CacheEntry } from "./exportCacheSe
 import { exportSelectedVideos } from "./exportService.js";
 import { syncManifestThumbnailCounts } from "./projectManifestSyncService.js";
 import { rerunVideoFeature } from "./videoFeatureRerunService.js";
+import { sanitizeProjectWarnings, sanitizeVideoWarnings } from "./exportWarningSanitizer.js";
 import {
   getChannelDetails,
   getVideoDetails,
@@ -768,6 +769,73 @@ async function buildFinalChannelVideos(
   );
 }
 
+async function syncCurrentTimeframeCacheState(args: {
+  descriptor: ProjectDescriptor;
+  rawRows: NormalizedRawVideoRecord[];
+}): Promise<void> {
+  const cacheIndex = await loadCacheIndex({
+    exportsRoot: args.descriptor.exportsRoot,
+    channelFolderPath: args.descriptor.projectRoot,
+    channelId: args.descriptor.channelId,
+    exportVersion: args.descriptor.exportVersion
+  });
+
+  const timeframeBucket = cacheIndex.timeframes[args.descriptor.projectTimeframe];
+  if (!timeframeBucket) {
+    return;
+  }
+
+  for (const row of args.rawRows) {
+    const entry = timeframeBucket.videos[row.videoId];
+    if (!entry) {
+      continue;
+    }
+
+    const rawTranscriptPath = normalizeRelativePath(
+      row.transcriptRef.transcriptPath,
+      path.posix.join("raw", "transcripts", `${row.videoId}.jsonl`)
+    );
+    const thumbnailPath = normalizeRelativePath(entry.artifacts.thumbnailPath, path.posix.join("thumbnails", `${row.videoId}.jpg`));
+    const derivedPath = normalizeRelativePath(
+      entry.artifacts.derivedVideoFeaturesPath,
+      path.posix.join("derived", "video_features", `${row.videoId}.json`)
+    );
+
+    const rawTranscriptAbsolutePath = path.resolve(args.descriptor.projectRoot, rawTranscriptPath);
+    const thumbnailAbsolutePath = path.resolve(args.descriptor.projectRoot, thumbnailPath);
+    const derivedAbsolutePath = path.resolve(args.descriptor.projectRoot, derivedPath);
+    ensureInsideRoot(args.descriptor.projectRoot, rawTranscriptAbsolutePath);
+    ensureInsideRoot(args.descriptor.projectRoot, thumbnailAbsolutePath);
+    ensureInsideRoot(args.descriptor.projectRoot, derivedAbsolutePath);
+
+    const [rawTranscriptExists, thumbnailExists, derivedExists] = await Promise.all([
+      fileExists(rawTranscriptAbsolutePath),
+      fileExists(thumbnailAbsolutePath),
+      fileExists(derivedAbsolutePath)
+    ]);
+
+    entry.artifacts = {
+      ...entry.artifacts,
+      rawTranscriptPath,
+      thumbnailPath,
+      derivedVideoFeaturesPath: derivedPath
+    };
+    entry.status = {
+      ...entry.status,
+      rawTranscript: rawTranscriptExists ? row.transcriptRef.transcriptStatus : "missing",
+      thumbnail: thumbnailExists ? "ok" : "failed",
+      derived: derivedExists ? (row.warnings.length > 0 ? "partial" : "ok") : "error",
+      warnings: [...row.warnings]
+    };
+  }
+
+  await saveCacheIndex({
+    exportsRoot: args.descriptor.exportsRoot,
+    channelFolderPath: args.descriptor.projectRoot,
+    index: cacheIndex
+  });
+}
+
 async function buildRawChannelPayload(args: {
   descriptor: ProjectDescriptor;
   channelStats?: YoutubeChannelStats;
@@ -1006,6 +1074,28 @@ export async function extendProject(
         commentRate: performance.commentRate ?? 0
       };
     });
+    rawRows = await Promise.all(
+      rawRows.map(async (row) => ({
+        ...row,
+        warnings: await sanitizeVideoWarnings({
+          projectRoot: descriptor.projectRoot,
+          videoId: row.videoId,
+          transcriptPath: row.transcriptRef.transcriptPath,
+          warnings: row.warnings
+        })
+      }))
+    );
+
+    const persistedProjectWarnings = await sanitizeProjectWarnings({
+      projectRoot: descriptor.projectRoot,
+      rows: rawRows.map((row) => ({
+        videoId: row.videoId,
+        transcriptPath: row.transcriptRef.transcriptPath,
+        warnings: row.warnings
+      })),
+      warnings,
+      performanceWarnings: performanceResult.warnings
+    });
 
     const channelVideoMap = toChannelVideoMap(channelVideos);
     channelVideos = await buildFinalChannelVideos(descriptor.projectRoot, rawRows, channelVideoMap);
@@ -1024,7 +1114,7 @@ export async function extendProject(
         channelStats: channelDetailsResult.channelStats,
         exportedAt,
         jobId: extendJobId,
-        warnings
+        warnings: persistedProjectWarnings
       })
     );
 
@@ -1064,10 +1154,14 @@ export async function extendProject(
         exportedAt,
         jobId: extendJobId,
         artifacts: manifestArtifacts,
-        warnings
+        warnings: persistedProjectWarnings
       })
     );
     await syncManifestThumbnailCounts(descriptor.projectRoot);
+    await syncCurrentTimeframeCacheState({
+      descriptor,
+      rawRows
+    });
 
     if (newVideoIds.length === 0 && reprocessVideoIds.length === 0) {
       counters.completed = counters.total;

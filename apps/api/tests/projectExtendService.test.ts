@@ -427,4 +427,264 @@ describe("projectExtendService", () => {
       timeframe: "6m"
     });
   });
+
+  it("cleans stale transcript and performance warnings across project artifacts after extend", async () => {
+    const projectRoot = path.resolve(tempDir, "exports", "Canal_Demo");
+    const videoIds = ["video1", "video2", "video3", "video4", "video5"];
+
+    const staleTranscriptWarning = (videoId: string) =>
+      `Transcript artifact missing at C:\\temp\\extend\\${videoId}.jsonl; used in-memory fallback segment`;
+
+    await writeJson(path.resolve(projectRoot, "channel.json"), {
+      exportVersion: "1.1",
+      exportedAt: "2026-03-01T12:00:00.000Z",
+      channelId: "UC1234567890123456789012",
+      channelName: "Canal Demo",
+      sourceInput: "https://www.youtube.com/@demo",
+      timeframe: "6m",
+      timeframeResolved: {
+        publishedAfter: "2025-09-01T00:00:00.000Z",
+        publishedBefore: "2026-03-01T00:00:00.000Z"
+      },
+      videos: videoIds.map((videoId, index) => ({
+        videoId,
+        title: `Video ${index + 1}`,
+        viewCount: 100 + index,
+        publishedAt: `2026-02-${String(10 + index).padStart(2, "0")}T00:00:00.000Z`,
+        thumbnailPath: `thumbnails/${videoId}.jpg`,
+        transcript: `texto ${index + 1}`,
+        transcriptStatus: "ok",
+        transcriptSource: "captions",
+        transcriptPath: `raw/transcripts/${videoId}.jsonl`
+      }))
+    });
+
+    await writeJson(path.resolve(projectRoot, "raw", "channel.json"), {
+      exportVersion: "1.1",
+      exportedAt: "2026-03-01T12:00:00.000Z",
+      jobId: "job-a1",
+      channelId: "UC1234567890123456789012",
+      channelName: "Canal Demo",
+      sourceInput: "https://www.youtube.com/@demo",
+      timeframe: "6m",
+      timeframeResolved: {
+        publishedAfter: "2025-09-01T00:00:00.000Z",
+        publishedBefore: "2026-03-01T00:00:00.000Z"
+      },
+      provenance: {
+        dataSources: ["youtube-data-api-v3"],
+        warnings: [
+          staleTranscriptWarning("video1"),
+          "Performance model skipped: requires at least 5 videos, received 3"
+        ],
+        env: {
+          LOCAL_ASR_ENABLED: true,
+          TRANSCRIPT_LANG: null
+        }
+      }
+    });
+
+    await writeJson(path.resolve(projectRoot, "manifest.json"), {
+      jobId: "job-a1",
+      channelId: "UC1234567890123456789012",
+      channelFolder: "Canal_Demo",
+      exportVersion: "1.1",
+      exportedAt: "2026-03-01T12:00:00.000Z",
+      counts: {
+        totalVideosSelected: 5,
+        transcriptsOk: 5,
+        transcriptsMissing: 0,
+        transcriptsError: 0,
+        thumbnailsOk: 5,
+        thumbnailsFailed: 0
+      },
+      warnings: [
+        staleTranscriptWarning("video1"),
+        "Performance model skipped: requires at least 5 videos, received 3"
+      ],
+      artifacts: [
+        ".cache/index.json",
+        "channel.json",
+        "raw/channel.json",
+        "raw/videos.jsonl",
+        "derived/channel_models.json",
+        "manifest.json"
+      ]
+    });
+
+    await writeJsonl(
+      path.resolve(projectRoot, "raw", "videos.jsonl"),
+      videoIds.map((videoId, index) => ({
+        videoId,
+        title: `Video ${index + 1}`,
+        description: `descripcion ${index + 1}`,
+        publishedAt: `2026-02-${String(10 + index).padStart(2, "0")}T00:00:00.000Z`,
+        durationSec: 120 + index * 10,
+        categoryId: "27",
+        tags: [`tag-${index + 1}`],
+        madeForKids: false,
+        liveBroadcastContent: "none",
+        statistics: {
+          viewCount: 100 + index * 25,
+          likeCount: 10 + index,
+          commentCount: 3 + index
+        },
+        thumbnailLocalPath: `raw/thumbnails/${videoId}.jpg`,
+        thumbnailOriginalUrl: `https://img.example/${videoId}.jpg`,
+        transcriptRef: {
+          transcriptPath: `raw/transcripts/${videoId}.jsonl`,
+          transcriptSource: "captions",
+          transcriptStatus: "ok"
+        },
+        daysSincePublish: 10 + index,
+        viewsPerDay: 10 + index,
+        likeRate: 0.1,
+        commentRate: 0.03,
+        warnings: [staleTranscriptWarning(videoId)]
+      }))
+    );
+
+    for (const [index, videoId] of videoIds.entries()) {
+      await writeText(
+        path.resolve(projectRoot, "raw", "transcripts", `${videoId}.jsonl`),
+        [
+          JSON.stringify({ type: "meta", videoId, status: "ok", source: "captions", language: "es" }),
+          JSON.stringify({ type: "segment", i: 0, startSec: 0, endSec: 2, text: `texto ${index + 1}`, confidence: null })
+        ].join("\n") + "\n"
+      );
+      await writeText(path.resolve(projectRoot, "thumbnails", `${videoId}.jpg`), `thumb-${videoId}`);
+      await writeText(path.resolve(projectRoot, "raw", "thumbnails", `${videoId}.jpg`), `thumb-${videoId}`);
+      await writeJson(path.resolve(projectRoot, "derived", "video_features", `${videoId}.json`), {
+        schemaVersion: "derived.video_features.v1",
+        videoId,
+        titleFeatures: {
+          deterministic: {
+            title_len_words: 2
+          }
+        }
+      });
+    }
+
+    await writeJson(path.resolve(projectRoot, ".cache", "index.json"), {
+      schemaVersion: "cache.index.v1",
+      channelId: "UC1234567890123456789012",
+      channelFolder: "Canal_Demo",
+      updatedAt: "2026-03-01T12:00:00.000Z",
+      exportVersion: "1.1",
+      timeframes: {
+        "1m": { videos: {} },
+        "6m": {
+          videos: Object.fromEntries(
+            videoIds.map((videoId) => [
+              videoId,
+              {
+                videoId,
+                lastUpdatedAt: "2026-03-01T12:00:00.000Z",
+                inputs: {
+                  titleHash: `title-${videoId}`,
+                  descriptionHash: `description-${videoId}`,
+                  thumbnailHash: `thumbnail-${videoId}`,
+                  transcriptHash: `transcript-${videoId}`,
+                  transcriptSource: "captions",
+                  asrConfigHash: "asr-config",
+                  ocrConfigHash: "ocr-config",
+                  embeddingModel: "text-embedding-3-small",
+                  llmModels: {
+                    title: "gpt-5.2",
+                    description: "gpt-5.2",
+                    transcript: "gpt-5.2",
+                    thumbnail: "gpt-5.2"
+                  }
+                },
+                artifacts: {
+                  rawTranscriptPath: `raw/transcripts/${videoId}.jsonl`,
+                  thumbnailPath: `thumbnails/${videoId}.jpg`,
+                  derivedVideoFeaturesPath: `derived/video_features/${videoId}.json`
+                },
+                status: {
+                  rawTranscript: "ok",
+                  thumbnail: "ok",
+                  derived: "partial",
+                  warnings: [staleTranscriptWarning(videoId)]
+                }
+              }
+            ])
+          )
+        },
+        "1y": { videos: {} },
+        "2y": { videos: {} },
+        "5y": { videos: {} }
+      }
+    });
+
+    getVideoDetailsMock.mockResolvedValue({
+      warnings: [],
+      videos: videoIds.map((videoId, index) => ({
+        videoId,
+        title: `Video ${index + 1}`,
+        description: `descripcion ${index + 1}`,
+        publishedAt: `2026-02-${String(10 + index).padStart(2, "0")}T00:00:00.000Z`,
+        durationSec: 120 + index * 10,
+        categoryId: "27",
+        tags: [`tag-${index + 1}`],
+        defaultLanguage: "es",
+        defaultAudioLanguage: "es",
+        madeForKids: false,
+        liveBroadcastContent: "none",
+        statistics: {
+          viewCount: 100 + index * 25,
+          likeCount: 10 + index,
+          commentCount: 3 + index
+        },
+        thumbnails: {},
+        thumbnailOriginalUrl: `https://img.example/${videoId}.jpg`
+      }))
+    });
+    getChannelDetailsMock.mockResolvedValue({
+      channelId: "UC1234567890123456789012",
+      channelName: "Canal Demo",
+      channelStats: {
+        subscriberCount: 999,
+        viewCount: 123456,
+        videoCount: 42
+      },
+      warnings: []
+    });
+
+    const { extendProject } = await import("../src/services/projectExtendService.js");
+    await extendProject({
+      projectId: "Canal_Demo",
+      timeframe: "1y",
+      selectedVideoIds: videoIds,
+      jobId: "extend-job-clean"
+    });
+
+    const manifestJson = JSON.parse(await fs.readFile(path.resolve(projectRoot, "manifest.json"), "utf-8")) as {
+      warnings: string[];
+    };
+    expect(manifestJson.warnings).toEqual([]);
+
+    const rawChannelJson = JSON.parse(await fs.readFile(path.resolve(projectRoot, "raw", "channel.json"), "utf-8")) as {
+      provenance?: { warnings?: string[] };
+    };
+    expect(rawChannelJson.provenance?.warnings ?? []).toEqual([]);
+
+    const rawRows = (await fs.readFile(path.resolve(projectRoot, "raw", "videos.jsonl"), "utf-8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { videoId: string; warnings: string[] });
+    expect(rawRows.every((row) => row.warnings.length === 0)).toBe(true);
+
+    const cacheIndex = JSON.parse(await fs.readFile(path.resolve(projectRoot, ".cache", "index.json"), "utf-8")) as {
+      timeframes: {
+        "6m": {
+          videos: Record<string, { status: { warnings: string[]; derived: string } }>;
+        };
+      };
+    };
+    for (const videoId of videoIds) {
+      expect(cacheIndex.timeframes["6m"].videos[videoId]?.status.warnings ?? []).toEqual([]);
+      expect(cacheIndex.timeframes["6m"].videos[videoId]?.status.derived).toBe("ok");
+    }
+  });
 });

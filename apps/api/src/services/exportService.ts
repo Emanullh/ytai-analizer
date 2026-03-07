@@ -38,6 +38,7 @@ import {
   saveCacheIndex,
   updateVideoCacheEntry
 } from "./exportCacheService.js";
+import { sanitizeProjectWarnings, sanitizeVideoWarnings } from "./exportWarningSanitizer.js";
 import { buildVideoPlan, validatePlan } from "./exportPlan.js";
 import { createScheduler } from "./taskScheduler.js";
 import { projectOperationLockService, ProjectLockError } from "./projectOperationLockService.js";
@@ -2010,13 +2011,19 @@ export async function exportSelectedVideos(
             transcriptSource: preparedTranscript.transcriptSource,
             transcriptStatus
           };
+          const sanitizedVideoWarnings = await sanitizeVideoWarnings({
+            projectRoot: channelFolderPath,
+            videoId: video.videoId,
+            transcriptPath: transcriptRelativePath,
+            warnings: videoWarnings
+          });
           const rawVideoRecord = buildRawVideoRecord(
             video,
             enrichedVideo,
             transcriptRef,
             preparedTranscript.audioLocalPath ?? undefined,
             exportedAtDate,
-            videoWarnings
+            sanitizedVideoWarnings
           );
           const rawVideoWriteStartedAt = Date.now();
           logEvent(callbacks, {
@@ -2069,8 +2076,8 @@ export async function exportSelectedVideos(
             status: {
               rawTranscript: transcriptStatus,
               thumbnail: thumbnailExists ? "ok" : "failed",
-              derived: derivedExists ? (videoWarnings.length > 0 ? "partial" : "ok") : "error",
-              warnings: [...videoWarnings]
+              derived: derivedExists ? (sanitizedVideoWarnings.length > 0 ? "partial" : "ok") : "error",
+              warnings: [...sanitizedVideoWarnings]
             }
           });
 
@@ -2079,10 +2086,10 @@ export async function exportSelectedVideos(
             scope: "exportService",
             action: "video_done",
             videoId: video.videoId,
-            stage: videoWarnings.length > 0 ? "warning" : "done",
+            stage: sanitizedVideoWarnings.length > 0 ? "warning" : "done",
             msg: "Video processing finished",
             data: {
-              status: videoWarnings.length > 0 ? "warning" : "done",
+              status: sanitizedVideoWarnings.length > 0 ? "warning" : "done",
               cacheHit: cacheCheck.hit,
               transcriptStatus,
               transcriptSource: preparedTranscript.transcriptSource,
@@ -2108,7 +2115,7 @@ export async function exportSelectedVideos(
             transcriptStatus: transcriptStatus,
             transcriptSource: preparedTranscript.transcriptSource,
             transcriptPath: preparedTranscript.transcriptPath,
-            warnings: videoWarnings,
+            warnings: sanitizedVideoWarnings,
             rawTranscriptArtifactPath: transcriptAbsolutePath,
             rawAudioArtifactPath: preparedTranscript.audioLocalPath
               ? path.resolve(channelFolderPath, preparedTranscript.audioLocalPath)
@@ -2306,6 +2313,17 @@ export async function exportSelectedVideos(
       });
     }
 
+    const persistedProjectWarnings = await sanitizeProjectWarnings({
+      projectRoot: channelFolderPath,
+      rows: processedVideos.map((video) => ({
+        videoId: video.videoId,
+        transcriptPath: video.transcriptPath,
+        warnings: video.warnings
+      })),
+      warnings,
+      performanceWarnings: performanceResult.warnings
+    });
+
     const rawPackStartedAt = Date.now();
     logEvent(callbacks, {
       scope: "fs",
@@ -2325,7 +2343,7 @@ export async function exportSelectedVideos(
         exportVersion: EXPORT_VERSION,
         exportedAt,
         timeframeResolved,
-        warnings,
+        warnings: persistedProjectWarnings,
         channelStats: channelDetailsResult.channelStats,
         transcriptArtifactPaths: processedVideos.map((video) => video.rawTranscriptArtifactPath),
         audioArtifactPaths: processedVideos
@@ -2397,7 +2415,7 @@ export async function exportSelectedVideos(
         thumbnailsOk: thumbnailAvailability.okCount,
         thumbnailsFailed: thumbnailAvailability.failedCount
       },
-      warnings: [...warnings],
+      warnings: [...persistedProjectWarnings],
       artifacts: Array.from(artifactSet).sort()
     };
 
@@ -2450,7 +2468,7 @@ export async function exportSelectedVideos(
 
     return {
       folderPath: channelFolderPath,
-      warnings,
+      warnings: persistedProjectWarnings,
       exportedCount: exportVideos.length
     };
   } catch (error) {
