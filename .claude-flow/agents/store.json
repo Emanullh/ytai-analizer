@@ -7,18 +7,20 @@
       "health": 1,
       "taskCount": 0,
       "config": {},
-      "createdAt": "2026-03-05T20:12:25.019Z",
+      "createdAt": "2026-03-06T21:42:27.145Z",
+      "domain": "repo-mapping",
       "model": "haiku",
       "modelRoutedBy": "router"
     },
     "api-analyst": {
       "agentId": "api-analyst",
-      "agentType": "architect",
+      "agentType": "researcher",
       "status": "idle",
       "health": 1,
       "taskCount": 0,
       "config": {},
-      "createdAt": "2026-03-05T20:12:25.068Z",
+      "createdAt": "2026-03-06T21:42:27.249Z",
+      "domain": "api",
       "model": "sonnet",
       "modelRoutedBy": "router"
     },
@@ -29,8 +31,9 @@
       "health": 1,
       "taskCount": 0,
       "config": {},
-      "createdAt": "2026-03-05T20:12:25.069Z",
-      "model": "sonnet",
+      "createdAt": "2026-03-06T21:42:27.250Z",
+      "domain": "web",
+      "model": "haiku",
       "modelRoutedBy": "router"
     },
     "doc-writer": {
@@ -40,7 +43,8 @@
       "health": 1,
       "taskCount": 0,
       "config": {},
-      "createdAt": "2026-03-05T20:12:25.068Z",
+      "createdAt": "2026-03-06T21:42:27.251Z",
+      "domain": "documentation",
       "model": "haiku",
       "modelRoutedBy": "router"
     }

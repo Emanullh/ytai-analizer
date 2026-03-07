@@ -6,7 +6,9 @@ import Tooltip from "../components/Tooltip";
 const timeframeOptions: Array<{ label: string; value: Timeframe }> = [
   { label: "Último mes", value: "1m" },
   { label: "Últimos 6 meses", value: "6m" },
-  { label: "Último año", value: "1y" }
+  { label: "Último año", value: "1y" },
+  { label: "Últimos 2 años", value: "2y" },
+  { label: "Últimos 5 años", value: "5y" }
 ];
 
 const stageLabelByKey: Record<ExportVideoStage, string> = {

@@ -1,4 +1,4 @@
-export type Timeframe = "1m" | "6m" | "1y";
+export type Timeframe = "1m" | "6m" | "1y" | "2y" | "5y";
 
 export interface VideoSummary {
   videoId: string;

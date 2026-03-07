@@ -25,7 +25,7 @@ import { downloadToBuffer } from "../utils/http.js";
 import { syncManifestThumbnailCounts } from "./projectManifestSyncService.js";
 
 const RERUN_AUDIT_SCHEMA = "operations.rerun_thumbnails.v1";
-const VALID_TIMEFRAMES = new Set(["1m", "6m", "1y"] as const);
+const VALID_TIMEFRAMES = new Set(["1m", "6m", "1y", "2y", "5y"] as const);
 const THUMBNAIL_RESOLUTION_PRIORITY = ["maxres", "standard", "high", "medium", "default"] as const;
 const THUMBNAIL_FILENAME_FALLBACKS = [
   "maxresdefault.jpg",
@@ -120,7 +120,7 @@ interface RerunProjectContext {
   projectRoot: string;
   channelId: string;
   channelName: string;
-  timeframe: "1m" | "6m" | "1y";
+  timeframe: "1m" | "6m" | "1y" | "2y" | "5y";
   videos: RerunVideoInventoryItem[];
 }
 
@@ -445,7 +445,7 @@ async function readProjectContext(projectId: string): Promise<RerunProjectContex
   if (!channelName) {
     throw new Error("Missing channelName in channel metadata");
   }
-  if (!timeframeRaw || !VALID_TIMEFRAMES.has(timeframeRaw as "1m" | "6m" | "1y")) {
+  if (!timeframeRaw || !VALID_TIMEFRAMES.has(timeframeRaw as "1m" | "6m" | "1y" | "2y" | "5y")) {
     throw new Error(`Invalid timeframe in channel metadata: ${String(timeframeRaw)}`);
   }
 
@@ -503,7 +503,7 @@ async function readProjectContext(projectId: string): Promise<RerunProjectContex
     projectRoot,
     channelId,
     channelName,
-    timeframe: timeframeRaw as "1m" | "6m" | "1y",
+    timeframe: timeframeRaw as "1m" | "6m" | "1y" | "2y" | "5y",
     videos: Array.from(unique.values())
   };
 }

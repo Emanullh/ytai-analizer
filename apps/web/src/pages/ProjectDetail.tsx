@@ -17,9 +17,17 @@ import VideoFeaturePanels, {
 import SectionExplainer from "../components/SectionExplainer";
 import { asRecord, asString, valueToText } from "../lib/artifactUtils";
 import { getByPath } from "../lib/getByPath";
-import { ProjectDetailResponse, ProjectVideoDetail, ProjectVideoSummary } from "../types";
+import {
+  ProjectDetailResponse,
+  ProjectExtendCandidate,
+  ProjectExtendCandidatesResponse,
+  ProjectExtendJobCreateResponse,
+  ProjectVideoDetail,
+  ProjectVideoSummary,
+  Timeframe
+} from "../types";
 
-type ArtifactTab = "overview" | "playbook" | "templates" | "model" | "jobs";
+type ArtifactTab = "overview" | "playbook" | "templates" | "model" | "extend" | "jobs";
 type ThumbnailRerunScope = "all" | "exemplars" | "selected";
 type ProjectBatchFeatureKind = "thumbnail" | "title" | "description" | "transcript";
 type ProjectBatchFeatureMode = VideoFeatureRerunMode;
@@ -56,6 +64,31 @@ interface FeatureBatchRerunModalState {
   auditArtifactPath: string | null;
 }
 
+interface ExtendCandidatesState {
+  timeframe: Timeframe;
+  videos: ProjectExtendCandidate[];
+  loading: boolean;
+  error: string | null;
+  loaded: boolean;
+}
+
+interface ExtendJobModalState {
+  open: boolean;
+  running: boolean;
+  done: boolean;
+  jobId: string | null;
+  total: number;
+  completed: number;
+  processed: number;
+  failed: number;
+  addedCount: number;
+  refreshedCount: number;
+  reprocessedCount: number;
+  warnings: string[];
+  videoErrors: Array<{ videoId: string; message: string }>;
+  error: string | null;
+}
+
 const INITIAL_ARTIFACT_STATE: ArtifactState = {
   data: null,
   loading: false,
@@ -90,6 +123,35 @@ function createInitialFeatureBatchRerunState(): FeatureBatchRerunModalState {
     error: null,
     done: false,
     auditArtifactPath: null
+  };
+}
+
+function createInitialExtendCandidatesState(timeframe: Timeframe = "6m"): ExtendCandidatesState {
+  return {
+    timeframe,
+    videos: [],
+    loading: false,
+    error: null,
+    loaded: false
+  };
+}
+
+function createInitialExtendJobState(): ExtendJobModalState {
+  return {
+    open: false,
+    running: false,
+    done: false,
+    jobId: null,
+    total: 0,
+    completed: 0,
+    processed: 0,
+    failed: 0,
+    addedCount: 0,
+    refreshedCount: 0,
+    reprocessedCount: 0,
+    warnings: [],
+    videoErrors: [],
+    error: null
   };
 }
 
@@ -130,6 +192,13 @@ function formatMetric(value: number | null | undefined, digits = 2): string {
     return "-";
   }
   return value.toFixed(digits);
+}
+
+function formatCount(value: number | null | undefined): string {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return "-";
+  }
+  return value.toLocaleString("es-ES");
 }
 
 function formatPercentile(value: number | null | undefined): string {
@@ -294,6 +363,12 @@ export default function ProjectDetail() {
   const [featureBatchRerunState, setFeatureBatchRerunState] = useState<FeatureBatchRerunModalState>(
     createInitialFeatureBatchRerunState()
   );
+  const extendJobEventSourceRef = useRef<EventSource | null>(null);
+  const [extendCandidatesState, setExtendCandidatesState] = useState<ExtendCandidatesState>(
+    createInitialExtendCandidatesState()
+  );
+  const [extendSelectedVideoIds, setExtendSelectedVideoIds] = useState<string[]>([]);
+  const [extendJobState, setExtendJobState] = useState<ExtendJobModalState>(createInitialExtendJobState());
 
   useEffect(() => {
     if (!projectId) {
@@ -310,6 +385,9 @@ export default function ProjectDetail() {
       setVideoDetailCache({});
       setFeatureActionState(createInitialFeatureActionState());
       setFeatureBatchRerunState(createInitialFeatureBatchRerunState());
+      setExtendCandidatesState(createInitialExtendCandidatesState());
+      setExtendSelectedVideoIds([]);
+      setExtendJobState(createInitialExtendJobState());
       setEvidencePanel({ open: false, fieldPath: "", supportedBy: [] });
       setPlaybookState(INITIAL_ARTIFACT_STATE);
       setTemplatesState(INITIAL_ARTIFACT_STATE);
@@ -463,6 +541,73 @@ export default function ProjectDetail() {
       void loadArtifact("channelModels");
     }
   }, [activeTab, loadArtifact]);
+
+  const loadExtendCandidates = useCallback(
+    async (timeframe: Timeframe, options?: { force?: boolean }) => {
+      if (!projectId || !detail) {
+        return;
+      }
+
+      if (
+        !options?.force &&
+        extendCandidatesState.timeframe === timeframe &&
+        (extendCandidatesState.loading || extendCandidatesState.loaded)
+      ) {
+        return;
+      }
+
+      setExtendCandidatesState((prev) => ({
+        ...prev,
+        timeframe,
+        loading: true,
+        error: null
+      }));
+
+      try {
+        const encodedId = encodeURIComponent(projectId);
+        const response = await fetch(`/api/projects/${encodedId}/extend/candidates?timeframe=${timeframe}`);
+        const payload = (await response.json().catch(() => null)) as ProjectExtendCandidatesResponse | { error?: string } | null;
+
+        if (!response.ok) {
+          throw new Error(("error" in (payload ?? {}) ? payload?.error : null) ?? "No fue posible listar candidatos.");
+        }
+
+        setExtendCandidatesState({
+          timeframe,
+          videos: Array.isArray((payload as ProjectExtendCandidatesResponse).videos)
+            ? (payload as ProjectExtendCandidatesResponse).videos
+            : [],
+          loading: false,
+          error: null,
+          loaded: true
+        });
+        setExtendSelectedVideoIds((prev) => {
+          const allowed = new Set(
+            Array.isArray((payload as ProjectExtendCandidatesResponse).videos)
+              ? (payload as ProjectExtendCandidatesResponse).videos.map((video) => video.videoId)
+              : []
+          );
+          return prev.filter((videoId) => allowed.has(videoId));
+        });
+      } catch (requestError) {
+        setExtendCandidatesState((prev) => ({
+          ...prev,
+          timeframe,
+          loading: false,
+          error: requestError instanceof Error ? requestError.message : "Error inesperado.",
+          loaded: true
+        }));
+      }
+    },
+    [detail, extendCandidatesState.loaded, extendCandidatesState.loading, extendCandidatesState.timeframe, projectId]
+  );
+
+  useEffect(() => {
+    if (activeTab !== "extend") {
+      return;
+    }
+    void loadExtendCandidates(extendCandidatesState.timeframe);
+  }, [activeTab, extendCandidatesState.timeframe, loadExtendCandidates]);
 
   const loadVideoDetail = useCallback(
     async (videoId: string, options?: { maxSegments?: number }): Promise<ProjectVideoDetail> => {
@@ -893,6 +1038,211 @@ export default function ProjectDetail() {
     }
   }, [featureBatchRerunState, projectId, refreshProjectData]);
 
+  const closeExtendJobModal = useCallback(() => {
+    if (extendJobState.running) {
+      return;
+    }
+    setExtendJobState((prev) => ({ ...prev, open: false }));
+  }, [extendJobState.running]);
+
+  const handleToggleExtendVideo = useCallback((videoId: string) => {
+    setExtendSelectedVideoIds((prev) => (prev.includes(videoId) ? prev.filter((item) => item !== videoId) : [...prev, videoId]));
+  }, []);
+
+  const handleToggleExtendAll = useCallback(() => {
+    setExtendSelectedVideoIds((prev) => {
+      if (prev.length === extendCandidatesState.videos.length) {
+        return [];
+      }
+      return extendCandidatesState.videos.map((video) => video.videoId);
+    });
+  }, [extendCandidatesState.videos]);
+
+  const handleExtendProject = useCallback(async () => {
+    if (!projectId) {
+      return;
+    }
+
+    if (extendSelectedVideoIds.length === 0) {
+      setExtendJobState((prev) => ({
+        ...createInitialExtendJobState(),
+        open: true,
+        error: "Selecciona al menos un video para extender el proyecto."
+      }));
+      return;
+    }
+
+    const selectedSet = new Set(extendSelectedVideoIds);
+    const existingSelectedIds = extendCandidatesState.videos
+      .filter((video) => selectedSet.has(video.videoId) && video.alreadyInProject)
+      .map((video) => video.videoId);
+
+    const shouldReprocess =
+      existingSelectedIds.length > 0
+        ? window.confirm(
+            `Detectamos ${existingSelectedIds.length} video(s) ya procesados. Presiona Aceptar para reprocesar features o Cancelar para reutilizar los assets y features actuales.`
+          )
+        : false;
+
+    const reprocessVideoIds = shouldReprocess ? existingSelectedIds : [];
+
+    setExtendJobState({
+      ...createInitialExtendJobState(),
+      open: true,
+      running: true
+    });
+
+    try {
+      const encodedId = encodeURIComponent(projectId);
+      const response = await fetch(`/api/projects/${encodedId}/extend/jobs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          timeframe: extendCandidatesState.timeframe,
+          selectedVideoIds: extendSelectedVideoIds,
+          reprocessVideoIds
+        })
+      });
+      const payload = (await response.json().catch(() => null)) as ProjectExtendJobCreateResponse | { error?: string } | null;
+
+      if (!response.ok || !payload || !("jobId" in payload) || typeof payload.jobId !== "string") {
+        setExtendJobState((prev) => ({
+          ...prev,
+          running: false,
+          error: ("error" in (payload ?? {}) ? payload?.error : null) ?? `No fue posible iniciar extend (${response.status}).`
+        }));
+        return;
+      }
+
+      const { jobId } = payload;
+      setExtendJobState((prev) => ({
+        ...prev,
+        jobId
+      }));
+
+      extendJobEventSourceRef.current?.close();
+      const eventSource = new EventSource(`/api/projects/${encodedId}/extend/jobs/${jobId}/events`);
+      extendJobEventSourceRef.current = eventSource;
+      let closedByTerminalEvent = false;
+
+      const registerEvent = (name: string, handler: (data: Record<string, unknown>) => void) => {
+        eventSource.addEventListener(name, (event) => {
+          try {
+            const data = JSON.parse((event as MessageEvent<string>).data) as Record<string, unknown>;
+            handler(data);
+          } catch {
+            setExtendJobState((prev) => ({
+              ...prev,
+              running: false,
+              error: "No se pudo parsear un evento de progreso del extend."
+            }));
+          }
+        });
+      };
+
+      registerEvent("job_started", (data) => {
+        setExtendJobState((prev) => ({
+          ...prev,
+          total: typeof data.total === "number" ? data.total : prev.total
+        }));
+      });
+
+      registerEvent("warning", (data) => {
+        const message = typeof data.message === "string" ? data.message : "Warning desconocido";
+        const videoId = typeof data.videoId === "string" ? data.videoId : null;
+        setExtendJobState((prev) => ({
+          ...prev,
+          warnings: [...prev.warnings, videoId ? `${videoId}: ${message}` : message]
+        }));
+      });
+
+      registerEvent("video_progress", (data) => {
+        const status = typeof data.status === "string" ? data.status : "";
+        if (status === "failed") {
+          const videoId = typeof data.videoId === "string" ? data.videoId : "unknown";
+          const message = typeof data.message === "string" ? data.message : "Error desconocido";
+          setExtendJobState((prev) => ({
+            ...prev,
+            videoErrors: [...prev.videoErrors, { videoId, message }]
+          }));
+        }
+      });
+
+      registerEvent("job_progress", (data) => {
+        setExtendJobState((prev) => ({
+          ...prev,
+          completed: typeof data.completed === "number" ? data.completed : prev.completed,
+          total: typeof data.total === "number" ? data.total : prev.total,
+          processed: typeof data.processed === "number" ? data.processed : prev.processed,
+          failed: typeof data.failed === "number" ? data.failed : prev.failed
+        }));
+      });
+
+      registerEvent("job_done", (data) => {
+        closedByTerminalEvent = true;
+        eventSource.close();
+        if (extendJobEventSourceRef.current === eventSource) {
+          extendJobEventSourceRef.current = null;
+        }
+
+        setExtendJobState((prev) => ({
+          ...prev,
+          running: false,
+          done: true,
+          completed: prev.total,
+          addedCount: typeof data.addedCount === "number" ? data.addedCount : 0,
+          refreshedCount: typeof data.refreshedCount === "number" ? data.refreshedCount : 0,
+          reprocessedCount: typeof data.reprocessedCount === "number" ? data.reprocessedCount : 0
+        }));
+
+        setExtendSelectedVideoIds([]);
+        void refreshProjectData();
+        void loadExtendCandidates(extendCandidatesState.timeframe, { force: true });
+      });
+
+      registerEvent("job_failed", (data) => {
+        closedByTerminalEvent = true;
+        eventSource.close();
+        if (extendJobEventSourceRef.current === eventSource) {
+          extendJobEventSourceRef.current = null;
+        }
+        setExtendJobState((prev) => ({
+          ...prev,
+          running: false,
+          error: typeof data.message === "string" ? data.message : "Extend falló."
+        }));
+      });
+
+      eventSource.onerror = () => {
+        if (closedByTerminalEvent) {
+          return;
+        }
+        eventSource.close();
+        if (extendJobEventSourceRef.current === eventSource) {
+          extendJobEventSourceRef.current = null;
+        }
+        setExtendJobState((prev) => ({
+          ...prev,
+          running: false,
+          error: "Se perdió la conexión de progreso del extend."
+        }));
+      };
+    } catch (requestError) {
+      setExtendJobState((prev) => ({
+        ...prev,
+        running: false,
+        error: requestError instanceof Error ? requestError.message : "Error inesperado."
+      }));
+    }
+  }, [
+    extendCandidatesState.timeframe,
+    extendCandidatesState.videos,
+    extendSelectedVideoIds,
+    loadExtendCandidates,
+    projectId,
+    refreshProjectData
+  ]);
+
   useEffect(() => {
     if (!evidencePanel.open || evidencePanel.supportedBy.length === 0) {
       return;
@@ -925,6 +1275,8 @@ export default function ProjectDetail() {
     return () => {
       featureBatchEventSourceRef.current?.close();
       featureBatchEventSourceRef.current = null;
+      extendJobEventSourceRef.current?.close();
+      extendJobEventSourceRef.current = null;
     };
   }, []);
 
@@ -984,6 +1336,23 @@ export default function ProjectDetail() {
     () => Object.values(featureActionState).some((state) => state.running),
     [featureActionState]
   );
+  const extendSelectedSet = useMemo(() => new Set(extendSelectedVideoIds), [extendSelectedVideoIds]);
+  const extendSelectedExistingCount = useMemo(
+    () =>
+      extendCandidatesState.videos.filter(
+        (video) => extendSelectedSet.has(video.videoId) && video.alreadyInProject
+      ).length,
+    [extendCandidatesState.videos, extendSelectedSet]
+  );
+  const extendSelectedNewCount = useMemo(
+    () =>
+      extendCandidatesState.videos.filter(
+        (video) => extendSelectedSet.has(video.videoId) && !video.alreadyInProject
+      ).length,
+    [extendCandidatesState.videos, extendSelectedSet]
+  );
+  const allExtendSelected =
+    extendCandidatesState.videos.length > 0 && extendSelectedVideoIds.length === extendCandidatesState.videos.length;
 
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-4 px-4 py-6 sm:px-6">
@@ -1051,6 +1420,9 @@ export default function ProjectDetail() {
               </button>
               <button type="button" className={tabClass(activeTab === "model")} onClick={() => setActiveTab("model")}>
                 Model
+              </button>
+              <button type="button" className={tabClass(activeTab === "extend")} onClick={() => setActiveTab("extend")}>
+                Extend
               </button>
               <button type="button" className={tabClass(activeTab === "jobs")} onClick={() => setActiveTab("jobs")}>
                 Jobs
@@ -1276,6 +1648,151 @@ export default function ProjectDetail() {
               ) : null}
               {!channelModelState.loading && !channelModelState.error && detail.artifacts.channelModels ? (
                 <ChannelModelView channelModelArtifact={channelModelState.data} debugRawJson={debugRawJson} />
+              ) : null}
+            </div>
+          ) : null}
+
+          {activeTab === "extend" ? (
+            <div className="space-y-4">
+              <section className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <div className="flex flex-wrap items-end justify-between gap-3">
+                  <div className="max-w-2xl">
+                    <p className="text-sm font-semibold text-slate-900">Extend project inventory</p>
+                    <p className="mt-1 text-xs text-slate-600">
+                      Lista videos candidatos por timeframe de discovery, agrega solo los seleccionados y mantiene el timeframe base del proyecto en{" "}
+                      <strong>{detail.channel.timeframe ?? "-"}</strong> para cache y recalculo global.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-end gap-2">
+                    <label className="text-xs font-medium text-slate-700">
+                      Discovery timeframe
+                      <select
+                        value={extendCandidatesState.timeframe}
+                        onChange={(event) => {
+                          const timeframe = event.target.value as Timeframe;
+                          setExtendCandidatesState((prev) => ({
+                            ...prev,
+                            timeframe,
+                            loaded: false,
+                            error: null
+                          }));
+                          setExtendSelectedVideoIds([]);
+                        }}
+                        disabled={extendCandidatesState.loading || extendJobState.running}
+                        className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-2 py-2 text-xs text-slate-900 outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+                      >
+                        <option value="1m">1m</option>
+                        <option value="6m">6m</option>
+                        <option value="1y">1y</option>
+                        <option value="2y">2y</option>
+                        <option value="5y">5y</option>
+                      </select>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => void loadExtendCandidates(extendCandidatesState.timeframe, { force: true })}
+                      disabled={extendCandidatesState.loading || extendJobState.running}
+                      className="btn-ghost !rounded-lg !px-3 !py-2 !text-xs"
+                    >
+                      {extendCandidatesState.loading ? "Cargando..." : "Refresh list"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleExtendProject()}
+                      disabled={extendCandidatesState.loading || extendJobState.running || extendSelectedVideoIds.length === 0}
+                      className="btn-primary !rounded-lg !px-3 !py-2 !text-xs"
+                    >
+                      {extendJobState.running ? "Running extend..." : "Run Extend"}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                  <article className="rounded-lg border border-slate-200 bg-white p-3">
+                    <p className="text-xs text-slate-500">Seleccionados</p>
+                    <p className="mt-1 text-lg font-semibold text-slate-900">{extendSelectedVideoIds.length}</p>
+                  </article>
+                  <article className="rounded-lg border border-slate-200 bg-white p-3">
+                    <p className="text-xs text-slate-500">Nuevos</p>
+                    <p className="mt-1 text-lg font-semibold text-emerald-700">{extendSelectedNewCount}</p>
+                  </article>
+                  <article className="rounded-lg border border-slate-200 bg-white p-3">
+                    <p className="text-xs text-slate-500">Ya en proyecto</p>
+                    <p className="mt-1 text-lg font-semibold text-amber-700">{extendSelectedExistingCount}</p>
+                  </article>
+                </div>
+              </section>
+
+              {extendCandidatesState.error ? (
+                <p className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{extendCandidatesState.error}</p>
+              ) : null}
+
+              {extendCandidatesState.loading ? <p className="text-sm text-slate-600">Cargando candidatos para extend...</p> : null}
+
+              {!extendCandidatesState.loading && extendCandidatesState.videos.length === 0 ? (
+                <p className="rounded-xl border border-dashed border-slate-300 px-3 py-6 text-center text-sm text-slate-600">
+                  No hay videos candidatos para el timeframe seleccionado.
+                </p>
+              ) : null}
+
+              {!extendCandidatesState.loading && extendCandidatesState.videos.length > 0 ? (
+                <div className="overflow-x-auto rounded-xl border border-slate-200">
+                  <table className="min-w-full divide-y divide-slate-200 text-sm">
+                    <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+                      <tr>
+                        <th className="px-3 py-2">
+                          <label className="inline-flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={allExtendSelected}
+                              onChange={() => handleToggleExtendAll()}
+                              disabled={extendJobState.running}
+                            />
+                            <span>All</span>
+                          </label>
+                        </th>
+                        <th className="px-3 py-2">Video</th>
+                        <th className="px-3 py-2">Published</th>
+                        <th className="px-3 py-2">Views</th>
+                        <th className="px-3 py-2">Estado</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 bg-white">
+                      {extendCandidatesState.videos.map((video) => {
+                        const checked = extendSelectedSet.has(video.videoId);
+                        return (
+                          <tr key={`extend-${video.videoId}`}>
+                            <td className="px-3 py-2">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => handleToggleExtendVideo(video.videoId)}
+                                disabled={extendJobState.running}
+                                aria-label={`Seleccionar ${video.title}`}
+                              />
+                            </td>
+                            <td className="px-3 py-2">
+                              <div className="flex min-w-[320px] items-center gap-3">
+                                <img src={video.thumbnailUrl} alt={video.title} loading="lazy" className="h-14 w-24 rounded-lg object-cover" />
+                                <div>
+                                  <p className="font-semibold text-slate-900">{video.title}</p>
+                                  <p className="text-xs text-slate-500">{video.videoId}</p>
+                                </div>
+                              </div>
+                            </td>
+                            <td className="px-3 py-2 text-xs text-slate-700">{formatDate(video.publishedAt)}</td>
+                            <td className="px-3 py-2 text-xs text-slate-700">{formatCount(video.viewCount)}</td>
+                            <td className="px-3 py-2">
+                              <Badge variant={video.alreadyInProject ? "warning" : "success"}>
+                                {video.alreadyInProject ? "Ya en proyecto" : "Nuevo"}
+                              </Badge>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               ) : null}
             </div>
           ) : null}
@@ -1595,6 +2112,75 @@ export default function ProjectDetail() {
                   ))}
                 </ul>
               </div>
+            ) : null}
+          </section>
+        </div>
+      ) : null}
+
+      {extendJobState.open ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" role="dialog" aria-modal="true" aria-label="Extend project">
+          <section className="w-full max-w-2xl rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl">
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <div>
+                <h3 className="text-base font-semibold text-slate-900">Extend project</h3>
+                <p className="text-xs text-slate-500">
+                  Append incremental con refresh global de métricas y recalculo de performance/model del canal.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn-ghost !rounded-lg !px-3 !py-1.5 !text-xs"
+                onClick={closeExtendJobModal}
+                disabled={extendJobState.running}
+              >
+                Cerrar
+              </button>
+            </div>
+
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
+              <p>
+                Progreso: <strong>{extendJobState.completed}</strong>/{extendJobState.total} · processed <strong>{extendJobState.processed}</strong> · failed{" "}
+                <strong>{extendJobState.failed}</strong>
+              </p>
+              <p className="mt-1">
+                added <strong>{extendJobState.addedCount}</strong> · refreshed <strong>{extendJobState.refreshedCount}</strong> · reprocessed{" "}
+                <strong>{extendJobState.reprocessedCount}</strong>
+              </p>
+              {extendJobState.jobId ? <p className="mt-1 text-slate-500">jobId: {extendJobState.jobId}</p> : null}
+            </div>
+
+            {extendJobState.error ? (
+              <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{extendJobState.error}</p>
+            ) : null}
+
+            {extendJobState.videoErrors.length > 0 ? (
+              <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 p-3">
+                <p className="text-xs font-semibold text-rose-800">Errores por video</p>
+                <ul className="mt-2 max-h-32 list-disc space-y-1 overflow-y-auto pl-5 text-xs text-rose-700">
+                  {extendJobState.videoErrors.map((item, index) => (
+                    <li key={`${item.videoId}-${index}`}>
+                      {item.videoId}: {item.message}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
+            {extendJobState.warnings.length > 0 ? (
+              <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
+                <p className="text-xs font-semibold text-amber-800">Warnings</p>
+                <ul className="mt-2 max-h-32 list-disc space-y-1 overflow-y-auto pl-5 text-xs text-amber-700">
+                  {extendJobState.warnings.map((warning, index) => (
+                    <li key={`${warning}-${index}`}>{warning}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
+            {extendJobState.done && !extendJobState.error ? (
+              <p className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+                Extend completado. El snapshot del proyecto ya fue refrescado.
+              </p>
             ) : null}
           </section>
         </div>

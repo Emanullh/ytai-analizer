@@ -633,4 +633,214 @@ describe("Projects pages", () => {
       scope: "all"
     });
   });
+
+  it("starts extend job from Extend tab and confirms reprocess for existing videos", async () => {
+    const detailPayload = {
+      projectId: "Canal_Demo",
+      channel: {
+        channelId: "UC123",
+        channelName: "Canal Demo",
+        sourceInput: "https://www.youtube.com/@demo",
+        timeframe: "6m",
+        exportedAt: "2026-03-01T12:00:00.000Z",
+        timeframeResolved: null
+      },
+      manifest: {
+        counts: {
+          totalVideosSelected: 1,
+          transcriptsOk: 1,
+          transcriptsMissing: 0,
+          transcriptsError: 0,
+          thumbnailsOk: 1,
+          thumbnailsFailed: 0
+        },
+        warnings: []
+      },
+      latestJob: null,
+      jobs: [],
+      artifacts: {
+        playbook: null,
+        templates: null,
+        channelModels: null
+      },
+      warnings: []
+    };
+
+    const videosPayload = [
+      {
+        videoId: "video1",
+        title: "Video Uno",
+        publishedAt: "2026-02-20T00:00:00.000Z",
+        thumbnailPath: "thumbnails/video1.jpg",
+        transcriptStatus: "ok",
+        transcriptSource: "captions",
+        performance: {
+          viewsPerDay: 12,
+          engagementRate: 0.1,
+          residual: 0.2,
+          percentile: 70
+        },
+        hasLLM: {
+          title: true,
+          description: true,
+          transcript: true,
+          thumbnail: true
+        },
+        cacheHit: "full"
+      }
+    ];
+
+    const candidatesPayload = {
+      projectId: "Canal_Demo",
+      projectTimeframe: "6m",
+      timeframe: "6m",
+      channelId: "UC123",
+      channelName: "Canal Demo",
+      videos: [
+        {
+          videoId: "video1",
+          title: "Video Uno",
+          publishedAt: "2026-02-20T00:00:00.000Z",
+          viewCount: 1200,
+          thumbnailUrl: "https://img.youtube.com/video1.jpg",
+          alreadyInProject: true
+        },
+        {
+          videoId: "video2",
+          title: "Video Dos",
+          publishedAt: "2026-01-20T00:00:00.000Z",
+          viewCount: 900,
+          thumbnailUrl: "https://img.youtube.com/video2.jpg",
+          alreadyInProject: false
+        }
+      ]
+    };
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/projects/Canal_Demo" && !init) {
+        return {
+          ok: true,
+          json: async () => detailPayload
+        };
+      }
+      if (url === "/api/projects/Canal_Demo/videos" && !init) {
+        return {
+          ok: true,
+          json: async () => videosPayload
+        };
+      }
+      if (url === "/api/projects/Canal_Demo/extend/candidates?timeframe=6m") {
+        return {
+          ok: true,
+          json: async () => candidatesPayload
+        };
+      }
+      if (url === "/api/projects/Canal_Demo/extend/jobs") {
+        return {
+          ok: true,
+          json: async () => ({
+            jobId: "job-extend-1"
+          })
+        };
+      }
+      throw new Error(`Unhandled fetch ${url}`);
+    });
+
+    class MockEventSource {
+      static lastInstance: MockEventSource | null = null;
+      onerror: ((this: EventSource, ev: Event) => unknown) | null = null;
+      private listeners = new Map<string, Array<(event: MessageEvent<string>) => void>>();
+
+      constructor(public url: string) {
+        MockEventSource.lastInstance = this;
+      }
+
+      addEventListener(type: string, listener: (event: MessageEvent<string>) => void) {
+        const current = this.listeners.get(type) ?? [];
+        current.push(listener);
+        this.listeners.set(type, current);
+      }
+
+      emit(type: string, data: Record<string, unknown>) {
+        const current = this.listeners.get(type) ?? [];
+        const event = { data: JSON.stringify(data) } as MessageEvent<string>;
+        for (const listener of current) {
+          listener(event);
+        }
+      }
+
+      close() {}
+    }
+
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("EventSource", MockEventSource as unknown as typeof EventSource);
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+    render(
+      <MemoryRouter initialEntries={["/projects/Canal_Demo"]}>
+        <Routes>
+          <Route path="/projects/:projectId" element={<ProjectDetail />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getAllByText("Video Uno").length).toBeGreaterThan(0);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Extend" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Video Dos")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByLabelText("Seleccionar Video Uno"));
+    fireEvent.click(screen.getByLabelText("Seleccionar Video Dos"));
+    fireEvent.click(screen.getByRole("button", { name: "Run Extend" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/projects/Canal_Demo/extend/jobs",
+        expect.objectContaining({
+          method: "POST",
+          headers: { "Content-Type": "application/json" }
+        })
+      );
+    });
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1);
+    const extendCall = fetchMock.mock.calls.find(([url]) => url === "/api/projects/Canal_Demo/extend/jobs");
+    expect(JSON.parse(String((extendCall?.[1] as { body?: string } | undefined)?.body))).toMatchObject({
+      timeframe: "6m",
+      selectedVideoIds: ["video1", "video2"],
+      reprocessVideoIds: ["video1"]
+    });
+
+    const eventSource = MockEventSource.lastInstance;
+    expect(eventSource?.url).toBe("/api/projects/Canal_Demo/extend/jobs/job-extend-1/events");
+
+    eventSource?.emit("job_started", {
+      jobId: "job-extend-1",
+      projectId: "Canal_Demo",
+      total: 2
+    });
+    eventSource?.emit("job_progress", {
+      completed: 2,
+      total: 2,
+      processed: 2,
+      failed: 0
+    });
+    eventSource?.emit("job_done", {
+      jobId: "job-extend-1",
+      projectId: "Canal_Demo",
+      addedCount: 1,
+      refreshedCount: 2,
+      reprocessedCount: 1
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Extend completado. El snapshot del proyecto ya fue refrescado.")).toBeInTheDocument();
+    });
+  });
 });

@@ -6,7 +6,7 @@ import { sanitizeFolderName } from "../utils/sanitize.js";
 import { runOrchestrator, type RunOrchestratorResult } from "../analysis/orchestratorService.js";
 import { projectOperationLockService } from "./projectOperationLockService.js";
 
-const VALID_TIMEFRAMES = new Set<string>(["1m", "6m", "1y"]);
+const VALID_TIMEFRAMES = new Set<string>(["1m", "6m", "1y", "2y", "5y"]);
 const EXPORTS_ROOT = path.resolve(process.cwd(), "exports");
 
 interface ChannelJsonMeta {

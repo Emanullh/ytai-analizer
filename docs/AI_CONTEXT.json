@@ -7,7 +7,11 @@
       "node": ">=20",
       "pnpm": "10.x",
       "python": "3.10+",
-      "ffmpeg": "required in PATH for ASR"
+      "ffmpeg": "required in PATH"
+    },
+    "effectiveExportsRoot": {
+      "path": "apps/api/exports",
+      "rule": "The API resolves exports from path.resolve(process.cwd(), 'exports'). With pnpm dev or pnpm -C apps/api dev, cwd is apps/api."
     },
     "apps": [
       {
@@ -25,14 +29,22 @@
       }
     ],
     "scripts": {
-      "asrSetup": [
+      "setup": [
         "scripts/setup_asr.mjs",
         "scripts/setup_asr.sh",
         "scripts/setup_asr.ps1"
       ],
-      "asrCheck": "scripts/check_asr.mjs",
-      "asrWorker": "apps/api/scripts/asr_worker.py",
-      "asrRequirements": "apps/api/scripts/requirements-asr.txt"
+      "check": "scripts/check_asr.mjs",
+      "workers": [
+        "apps/api/scripts/asr_worker.py",
+        "apps/api/scripts/ocr_worker.py",
+        "apps/api/scripts/autogen_worker.py"
+      ],
+      "requirements": [
+        "apps/api/scripts/requirements-asr.txt",
+        "apps/api/scripts/requirements-ocr.txt",
+        "apps/api/scripts/requirements-autogen.txt"
+      ]
     }
   },
   "flows": [
@@ -60,20 +72,20 @@
       "steps": [
         "POST /export/jobs",
         "GET /export/jobs/:jobId/events",
-        "reduce SSE events in exportJobState",
-        "write exports/<channelFolder>/channel.json + manifest.json"
+        "reduce SSE events in apps/web/src/exportJobState.ts",
+        "write apps/api/exports/<channelFolder>/channel.json and manifest.json"
       ]
     },
     {
-      "name": "transcript-fallback",
+      "name": "transcript-pipeline-current",
       "backend": [
         "apps/api/src/services/transcriptPipeline.ts",
-        "apps/api/src/services/transcriptService.ts",
         "apps/api/src/services/localAsrService.ts",
         "apps/api/src/services/asrRuntime.ts",
+        "apps/api/src/services/transcriptArtifactService.ts",
         "apps/api/scripts/asr_worker.py"
       ],
-      "policy": "captions first, then local ASR, then warning without failing full export"
+      "policy": "Local ASR is the effective export path. On failure, export continues with warning and empty transcript."
     },
     {
       "name": "projects-and-bundle",
@@ -86,7 +98,27 @@
         "apps/api/src/services/exportBundleService.ts",
         "apps/api/src/services/rerunOrchestratorService.ts"
       ],
-      "source": "exports/*"
+      "notes": [
+        "Projects read from apps/api/exports/*",
+        "Bundle requires analysis/orchestrator_input.json",
+        "Main export skips orchestrator; run rerun-orchestrator first"
+      ]
+    },
+    {
+      "name": "rerun-operations",
+      "frontend": [
+        "apps/web/src/pages/ProjectDetail.tsx",
+        "apps/web/src/components/project/VideoFeaturePanels.tsx"
+      ],
+      "backend": [
+        "apps/api/src/services/videoFeatureRerunService.ts",
+        "apps/api/src/services/rerunProjectFeaturesService.ts",
+        "apps/api/src/services/rerunThumbnailsService.ts"
+      ],
+      "notes": [
+        "UI uses individual rerun per video/feature and batch rerun per feature",
+        "Thumbnail batch rerun endpoints exist in API but are not wired in the main UI flow"
+      ]
     }
   ],
   "endpoints": [
@@ -101,6 +133,13 @@
     { "method": "GET", "path": "/projects/:projectId" },
     { "method": "GET", "path": "/projects/:projectId/videos" },
     { "method": "GET", "path": "/projects/:projectId/videos/:videoId" },
+    { "method": "POST", "path": "/projects/:projectId/videos/:videoId/rerun/:feature" },
+    { "method": "POST", "path": "/projects/:projectId/rerun/features" },
+    { "method": "GET", "path": "/projects/:projectId/rerun/features/jobs/:jobId" },
+    { "method": "GET", "path": "/projects/:projectId/rerun/features/jobs/:jobId/events", "kind": "SSE" },
+    { "method": "POST", "path": "/projects/:projectId/rerun/thumbnails" },
+    { "method": "GET", "path": "/projects/:projectId/rerun/thumbnails/jobs/:jobId" },
+    { "method": "GET", "path": "/projects/:projectId/rerun/thumbnails/jobs/:jobId/events", "kind": "SSE" },
     { "method": "GET", "path": "/projects/:projectId/bundle/meta" },
     { "method": "GET", "path": "/projects/:projectId/bundle" },
     { "method": "GET", "path": "/projects/:projectId/exports/:exportJobId/bundle" },
@@ -116,25 +155,41 @@
       "source": "apps/api/src/services/exportService.ts"
     },
     "channelJson": {
-      "path": "exports/<channelFolder>/channel.json",
+      "path": "apps/api/exports/<channelFolder>/channel.json",
       "sourceType": "apps/api/src/types.ts::ExportPayload"
     },
     "manifest": {
-      "path": "exports/<channelFolder>/manifest.json",
+      "path": "apps/api/exports/<channelFolder>/manifest.json",
       "sourceType": "apps/api/src/services/exportService.ts::ExportManifestV1"
     },
     "rawTranscriptJsonl": {
-      "path": "exports/<channelFolder>/raw/transcripts/<videoId>.jsonl",
-      "records": ["type=meta", "type=segment"]
+      "path": "apps/api/exports/<channelFolder>/raw/transcripts/<videoId>.jsonl",
+      "records": [
+        "type=meta",
+        "type=segment"
+      ]
     },
     "derived": {
       "videoFeatures": {
-        "path": "exports/<channelFolder>/derived/video_features/<videoId>.json",
+        "path": "apps/api/exports/<channelFolder>/derived/video_features/<videoId>.json",
         "schemaVersion": "derived.video_features.v1"
       },
       "channelModels": {
-        "path": "exports/<channelFolder>/derived/channel_models.json",
+        "path": "apps/api/exports/<channelFolder>/derived/channel_models.json",
         "schemaVersion": "derived.channel_models.v1"
+      },
+      "templates": {
+        "path": "apps/api/exports/<channelFolder>/derived/templates.json",
+        "schemaVersion": "derived.templates.v1"
+      }
+    },
+    "analysis": {
+      "playbook": {
+        "path": "apps/api/exports/<channelFolder>/analysis/playbook.json",
+        "schemaVersion": "analysis.playbook.v1"
+      },
+      "orchestratorInput": {
+        "path": "apps/api/exports/<channelFolder>/analysis/orchestrator_input.json"
       }
     },
     "bundle": {
@@ -148,12 +203,20 @@
       "install": "pnpm install",
       "dev": "pnpm dev",
       "test": "pnpm test",
+      "apiDev": "pnpm -C apps/api dev",
+      "webDev": "pnpm -C apps/web dev",
       "asrSetup": "pnpm asr:setup",
       "asrCheck": "pnpm asr:check"
     },
     "env": {
-      "required": ["YOUTUBE_API_KEY"],
-      "optionalCore": ["PORT", "TRANSCRIPT_LANG", "OPENAI_API_KEY"],
+      "required": [
+        "YOUTUBE_API_KEY"
+      ],
+      "optionalCore": [
+        "PORT",
+        "TRANSCRIPT_LANG",
+        "OPENAI_API_KEY"
+      ],
       "optionalAsr": [
         "LOCAL_ASR_ENABLED",
         "LOCAL_ASR_MODEL",
@@ -164,19 +227,40 @@
         "LOCAL_ASR_TIMEOUT_SEC",
         "YOUTUBE_AUDIO_DOWNLOAD_TIMEOUT_SEC",
         "ASR_PYTHON_PATH"
+      ],
+      "optionalOcr": [
+        "THUMB_OCR_ENABLED",
+        "THUMB_OCR_ENGINE",
+        "THUMB_OCR_LANGS",
+        "THUMB_VISION_DOWNSCALE_WIDTH",
+        "OCR_PYTHON_PATH"
+      ],
+      "optionalAutogen": [
+        "AUTO_GEN_ENABLED",
+        "AUTO_GEN_MODEL_TITLE",
+        "AUTO_GEN_MODEL_DESCRIPTION",
+        "AUTO_GEN_MODEL_THUMBNAIL",
+        "AUTO_GEN_MODEL_ORCHESTRATOR",
+        "AUTO_GEN_REASONING_EFFORT",
+        "AUTO_GEN_REASONING_EFFORT_ORCHESTRATOR",
+        "AUTO_GEN_TIMEOUT_SEC",
+        "AUTO_GEN_TIMEOUT_ORCHESTRATOR_SEC"
       ]
     },
     "windows": {
       "venvPython": ".venv-asr\\Scripts\\python.exe",
       "activate": ".\\.venv-asr\\Scripts\\Activate.ps1",
+      "asrPythonEnv": "ASR_PYTHON_PATH=C:\\path\\to\\.venv-asr\\Scripts\\python.exe",
+      "ocrPythonEnv": "OCR_PYTHON_PATH=C:\\path\\to\\.venv-asr\\Scripts\\python.exe",
       "ffmpeg": "ffmpeg.exe in PATH"
     },
     "troubleshooting": [
-      "Missing YOUTUBE_API_KEY -> configure apps/api/.env",
-      "ffmpeg not found -> install ffmpeg and verify PATH",
+      "Missing YOUTUBE_API_KEY -> configure apps/api/.env and restart API",
       "ASR imports fail -> run pnpm asr:setup && pnpm asr:check",
-      "SSE progress disconnected -> verify /health and Vite proxy",
-      "rerun orchestrator 409 -> ensure channel.json, raw/videos.jsonl, derived/video_features/*.json exist"
+      "ffmpeg not found -> install ffmpeg and verify PATH",
+      "SSE progress disconnected -> verify /health and apps/web/vite.config.ts proxy",
+      "Bundle endpoints return 409 -> generate analysis/orchestrator_input.json via rerun orchestrator first",
+      "Changing API cwd changes the export root"
     ]
   }
 }

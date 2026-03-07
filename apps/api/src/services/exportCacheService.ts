@@ -8,7 +8,7 @@ import { hashFileSha1, hashStringSha1 } from "../utils/hash.js";
 
 const CACHE_INDEX_SCHEMA_VERSION = "cache.index.v1";
 const TITLE_EMBEDDING_MODEL = "text-embedding-3-small";
-const SUPPORTED_TIMEFRAMES: Timeframe[] = ["1m", "6m", "1y"];
+const SUPPORTED_TIMEFRAMES: Timeframe[] = ["1m", "6m", "1y", "2y", "5y"];
 
 type TranscriptSource = "captions" | "asr" | "none";
 type TranscriptStatus = "ok" | "missing" | "error";
@@ -169,7 +169,9 @@ function createEmptyTimeframes(): Record<Timeframe, { videos: Record<string, Cac
   return {
     "1m": { videos: {} },
     "6m": { videos: {} },
-    "1y": { videos: {} }
+    "1y": { videos: {} },
+    "2y": { videos: {} },
+    "5y": { videos: {} }
   };
 }
 

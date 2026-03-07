@@ -45,6 +45,7 @@ export interface RerunVideoFeatureResult {
 
 interface RerunVideoFeatureOptions {
   bypassProjectLock?: boolean;
+  reusePreparedAssets?: boolean;
 }
 
 function resolveDerivedArtifactRelativePath(videoId: string): string {
@@ -153,7 +154,8 @@ export async function rerunVideoFeature(
       context,
       video,
       feature: request.feature,
-      mode
+      mode,
+      reuseExistingTranscriptArtifact: options.reusePreparedAssets
     });
 
     const featureResult =

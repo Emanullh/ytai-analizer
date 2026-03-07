@@ -137,7 +137,7 @@ function normalizeRelativePath(value: string | null, fallback: string): string {
 }
 
 function normalizeTimeframe(value: unknown): Timeframe {
-  if (value === "1m" || value === "6m" || value === "1y") {
+  if (value === "1m" || value === "6m" || value === "1y" || value === "2y" || value === "5y") {
     return value;
   }
   throw new HttpError(409, "Project timeframe is missing or invalid");
@@ -730,6 +730,7 @@ export async function prepareVideoFeatureInputs(input: {
   feature: VideoFeatureKind;
   mode: VideoFeatureRerunMode;
   createdAt?: string;
+  reuseExistingTranscriptArtifact?: boolean;
   dependencies?: VideoFeaturePreparationDependencies;
   onLocalAsrStage?: (stage: LocalAsrStage) => void;
   onLocalAsrWorkerRequestId?: (workerRequestId: string) => void;
@@ -740,6 +741,7 @@ export async function prepareVideoFeatureInputs(input: {
   );
   const transcriptAbsolutePath = path.resolve(input.context.projectRoot, transcriptRelativePath);
   ensureInsideRoot(input.context.projectRoot, transcriptAbsolutePath);
+  const transcriptArtifactExists = await fileExists(transcriptAbsolutePath);
 
   const audio = await resolveAudioPaths(input.context.projectRoot, input.video);
   const thumbnail =
@@ -760,20 +762,25 @@ export async function prepareVideoFeatureInputs(input: {
       audio.relativePath = collectedAudio.relativePath;
       stepsExecuted.push("collect_audio_asset");
     } else {
-      const transcriptRefresh = await refreshTranscriptArtifact({
-        projectRoot: input.context.projectRoot,
-        video: input.video,
-        transcriptAbsolutePath,
-        transcriptRelativePath,
-        audioAbsolutePath: audio.absolutePath,
-        audioRelativePath: audio.relativePath,
-        createdAt: input.createdAt,
-        onLocalAsrStage: input.onLocalAsrStage,
-        onLocalAsrWorkerRequestId: input.onLocalAsrWorkerRequestId,
-        dependencies: input.dependencies
-      });
-      warnings.push(...transcriptRefresh.warnings);
-      stepsExecuted.push(...transcriptRefresh.stepsExecuted);
+      const shouldReuseTranscript = input.reuseExistingTranscriptArtifact === true && transcriptArtifactExists;
+      if (shouldReuseTranscript) {
+        stepsExecuted.push("reuse_transcript_asset");
+      } else {
+        const transcriptRefresh = await refreshTranscriptArtifact({
+          projectRoot: input.context.projectRoot,
+          video: input.video,
+          transcriptAbsolutePath,
+          transcriptRelativePath,
+          audioAbsolutePath: audio.absolutePath,
+          audioRelativePath: audio.relativePath,
+          createdAt: input.createdAt,
+          onLocalAsrStage: input.onLocalAsrStage,
+          onLocalAsrWorkerRequestId: input.onLocalAsrWorkerRequestId,
+          dependencies: input.dependencies
+        });
+        warnings.push(...transcriptRefresh.warnings);
+        stepsExecuted.push(...transcriptRefresh.stepsExecuted);
+      }
     }
   }
 

@@ -1,4 +1,4 @@
-export type Timeframe = "1m" | "6m" | "1y";
+export type Timeframe = "1m" | "6m" | "1y" | "2y" | "5y";
 
 export interface VideoItem {
   videoId: string;
@@ -149,3 +149,79 @@ export interface ProjectVideoDetail {
   transcriptJsonl: Array<Record<string, unknown>> | null;
   rawVideo: Record<string, unknown> | null;
 }
+
+export interface ProjectExtendCandidate {
+  videoId: string;
+  title: string;
+  publishedAt: string;
+  viewCount: number;
+  thumbnailUrl: string;
+  alreadyInProject: boolean;
+}
+
+export interface ProjectExtendCandidatesResponse {
+  projectId: string;
+  projectTimeframe: Timeframe;
+  timeframe: Timeframe;
+  channelId: string;
+  channelName: string;
+  videos: ProjectExtendCandidate[];
+}
+
+export interface ProjectExtendJobCreateResponse {
+  jobId: string;
+}
+
+export interface ProjectExtendJobStatusResponse {
+  jobId: string;
+  projectId: string;
+  status: "queued" | "running" | "done" | "failed";
+  total: number;
+  completed: number;
+  processed: number;
+  failed: number;
+  warnings: string[];
+  error?: string;
+  addedCount?: number;
+  refreshedCount?: number;
+  reprocessedCount?: number;
+}
+
+export type ProjectExtendSseEvent =
+  | {
+      event: "job_started";
+      data: {
+        jobId: string;
+        projectId: string;
+        total: number;
+      };
+    }
+  | {
+      event: "video_progress";
+      data: {
+        videoId: string;
+        status: "processing" | "done" | "failed";
+        message?: string;
+      };
+    }
+  | {
+      event: "job_progress";
+      data: {
+        completed: number;
+        total: number;
+        processed: number;
+        failed: number;
+      };
+    }
+  | { event: "warning"; data: { videoId?: string; message: string } }
+  | {
+      event: "job_done";
+      data: {
+        projectId: string;
+        jobId: string;
+        addedCount: number;
+        refreshedCount: number;
+        reprocessedCount: number;
+      };
+    }
+  | { event: "job_failed"; data: { message: string } };

@@ -29,8 +29,14 @@ import {
   type ProjectFeatureRerunEvent
 } from "./services/rerunProjectFeaturesService.js";
 import { rerunVideoFeature } from "./services/videoFeatureRerunService.js";
+import {
+  isProjectExtendLockError,
+  projectExtendJobService,
+  type ProjectExtendJobEvent
+} from "./services/projectExtendJobService.js";
+import { getProjectExtendCandidates as getProjectExtendCandidatesService } from "./services/projectExtendService.js";
 
-const timeframeSchema = z.enum(["1m", "6m", "1y"]);
+const timeframeSchema = z.enum(["1m", "6m", "1y", "2y", "5y"]);
 
 const analyzeSchema = z.object({
   sourceInput: z.string().min(1),
@@ -119,6 +125,16 @@ const projectVideoDetailQuerySchema = z.object({
 
 const projectBundleQuerySchema = z.object({
   export: z.string().min(1).optional()
+});
+
+const projectExtendCandidatesQuerySchema = z.object({
+  timeframe: timeframeSchema
+});
+
+const projectExtendCreateSchema = z.object({
+  timeframe: timeframeSchema,
+  selectedVideoIds: z.array(z.string().min(1)).min(1),
+  reprocessVideoIds: z.array(z.string().min(1)).optional()
 });
 
 const projectExportBundleParamsSchema = z.object({
@@ -301,6 +317,117 @@ export async function buildServer() {
 
     const detail = await getProjectVideoDetail(params.data.projectId, params.data.videoId, query.data);
     return reply.send(detail);
+  });
+
+  app.get("/projects/:projectId/extend/candidates", async (request, reply) => {
+    const params = projectParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: params.error.issues[0]?.message ?? "Invalid params" });
+    }
+
+    const query = projectExtendCandidatesQuerySchema.safeParse(request.query);
+    if (!query.success) {
+      return reply.status(400).send({ error: query.error.issues[0]?.message ?? "Invalid query params" });
+    }
+
+    const result = await getProjectExtendCandidatesService(params.data.projectId, query.data.timeframe);
+    return reply.send(result);
+  });
+
+  app.post("/projects/:projectId/extend/jobs", async (request, reply) => {
+    const params = projectParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: params.error.issues[0]?.message ?? "Invalid params" });
+    }
+
+    const payload = projectExtendCreateSchema.safeParse(request.body);
+    if (!payload.success) {
+      return reply.status(400).send({ error: payload.error.issues[0]?.message ?? "Invalid request body" });
+    }
+
+    try {
+      const result = projectExtendJobService.createJob({
+        projectId: params.data.projectId,
+        ...payload.data
+      });
+      return reply.send(result);
+    } catch (error) {
+      if (isProjectExtendLockError(error)) {
+        return reply.status(409).send({ error: error.message });
+      }
+      throw error;
+    }
+  });
+
+  app.get("/projects/:projectId/extend/jobs/:jobId", async (request, reply) => {
+    const params = projectRerunJobParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: params.error.issues[0]?.message ?? "Invalid params" });
+    }
+
+    const job = projectExtendJobService.getJob(params.data.jobId);
+    if (!job || job.projectId !== params.data.projectId) {
+      return reply.status(404).send({ error: "Job not found" });
+    }
+
+    return reply.send(job);
+  });
+
+  app.get("/projects/:projectId/extend/jobs/:jobId/events", async (request, reply) => {
+    const params = projectRerunJobParamsSchema.safeParse(request.params);
+    if (!params.success) {
+      return reply.status(400).send({ error: params.error.issues[0]?.message ?? "Invalid params" });
+    }
+
+    const jobId = params.data.jobId;
+    const job = projectExtendJobService.getJob(jobId);
+    if (!job || job.projectId !== params.data.projectId) {
+      return reply.status(404).send({ error: "Job not found" });
+    }
+
+    reply.hijack();
+    reply.raw.statusCode = 200;
+    reply.raw.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    reply.raw.setHeader("Cache-Control", "no-cache, no-transform");
+    reply.raw.setHeader("Connection", "keep-alive");
+    reply.raw.flushHeaders?.();
+
+    const sendEvent = (event: ProjectExtendJobEvent) => {
+      reply.raw.write(`event: ${event.event}\n`);
+      reply.raw.write(`data: ${JSON.stringify(event.data)}\n\n`);
+    };
+
+    const unsubscribe = projectExtendJobService.subscribe(jobId, (event) => {
+      sendEvent(event);
+      if (event.event === "job_done" || event.event === "job_failed") {
+        closeStream();
+      }
+    });
+
+    const history = projectExtendJobService.getJobEvents(jobId);
+    for (const event of history) {
+      sendEvent(event);
+    }
+    const postSubscribeEvents = projectExtendJobService.getJobEvents(jobId).slice(history.length);
+    for (const event of postSubscribeEvents) {
+      sendEvent(event);
+    }
+
+    const closeStream = () => {
+      unsubscribe();
+      if (!reply.raw.writableEnded) {
+        reply.raw.end();
+      }
+    };
+
+    request.raw.on("close", () => {
+      unsubscribe();
+    });
+
+    const latestJob = projectExtendJobService.getJob(jobId);
+    if (latestJob?.status === "done" || latestJob?.status === "failed") {
+      closeStream();
+    }
   });
 
   app.post("/projects/:projectId/videos/:videoId/rerun/:feature", async (request, reply) => {
