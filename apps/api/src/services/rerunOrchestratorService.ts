@@ -3,11 +3,19 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Timeframe } from "../types.js";
 import { sanitizeFolderName } from "../utils/sanitize.js";
-import { runOrchestrator, type RunOrchestratorResult } from "../analysis/orchestratorService.js";
+import {
+  generateOrchestratorInput,
+  runOrchestrator,
+  type GenerateOrchestratorInputResult,
+  type RunOrchestratorResult
+} from "../analysis/orchestratorService.js";
 import { projectOperationLockService } from "./projectOperationLockService.js";
 
 const VALID_TIMEFRAMES = new Set<string>(["1m", "6m", "1y", "2y", "5y"]);
-const EXPORTS_ROOT = path.resolve(process.cwd(), "exports");
+
+function getExportsRoot(): string {
+  return path.resolve(process.cwd(), "exports");
+}
 
 interface ChannelJsonMeta {
   channelId: string;
@@ -31,6 +39,13 @@ export interface RerunOrchestratorResponse {
   exportPath: string;
   warnings: string[];
   usedLlm: boolean;
+  artifactPaths: string[];
+}
+
+export interface GenerateOrchestratorInputResponse {
+  ok: boolean;
+  exportPath: string;
+  warnings: string[];
   artifactPaths: string[];
 }
 
@@ -90,7 +105,8 @@ export async function rerunOrchestrator(
   });
 
   try {
-    const exportPath = path.resolve(EXPORTS_ROOT, folderName);
+    const exportsRoot = getExportsRoot();
+    const exportPath = path.resolve(exportsRoot, folderName);
 
     const checks: PrerequisiteCheck[] = [];
 
@@ -141,7 +157,7 @@ export async function rerunOrchestrator(
     const channelMeta = await readChannelJson(channelJsonPath);
 
     const result: RunOrchestratorResult = await runOrchestrator({
-      exportRoot: EXPORTS_ROOT,
+      exportRoot: exportsRoot,
       channelId: channelMeta.channelId,
       channelName: channelMeta.channelName,
       timeframe: channelMeta.timeframe,
@@ -153,6 +169,91 @@ export async function rerunOrchestrator(
       exportPath,
       warnings: result.warnings,
       usedLlm: result.usedLlm,
+      artifactPaths: result.artifactPaths
+    };
+  } finally {
+    projectOperationLockService.release({
+      projectId: folderName,
+      ownerId: lockOwnerId
+    });
+  }
+}
+
+export async function generateOrchestratorInputOnly(
+  request: RerunOrchestratorRequest
+): Promise<GenerateOrchestratorInputResponse> {
+  const folderName = sanitizeFolderName(request.channelName);
+  const lockOwnerId = randomUUID();
+  projectOperationLockService.acquireOrThrow({
+    projectId: folderName,
+    operation: "generate_orchestrator_input",
+    ownerId: lockOwnerId
+  });
+
+  try {
+    const exportsRoot = getExportsRoot();
+    const exportPath = path.resolve(exportsRoot, folderName);
+
+    const checks: PrerequisiteCheck[] = [];
+
+    const exportDirExists = await fileExists(exportPath);
+    checks.push({
+      artifact: "export folder",
+      path: exportPath,
+      exists: exportDirExists
+    });
+
+    if (!exportDirExists) {
+      throw new PrerequisiteError(
+        `Export folder not found: "${folderName}". Run a full export first.`,
+        checks
+      );
+    }
+
+    const channelJsonPath = path.resolve(exportPath, "channel.json");
+    const videosJsonlPath = path.resolve(exportPath, "raw", "videos.jsonl");
+    const videoFeaturesDir = path.resolve(exportPath, "derived", "video_features");
+
+    const [channelJsonExists, videosJsonlExists, videoFeaturesCount] = await Promise.all([
+      fileExists(channelJsonPath),
+      fileExists(videosJsonlPath),
+      countJsonFiles(videoFeaturesDir)
+    ]);
+
+    checks.push(
+      { artifact: "channel.json", path: channelJsonPath, exists: channelJsonExists },
+      { artifact: "raw/videos.jsonl", path: videosJsonlPath, exists: videosJsonlExists },
+      {
+        artifact: "derived/video_features/*.json",
+        path: videoFeaturesDir,
+        exists: videoFeaturesCount > 0,
+        detail: `${videoFeaturesCount} file(s) found`
+      }
+    );
+
+    const missing = checks.filter((check) => !check.exists);
+    if (missing.length > 0) {
+      const missingNames = missing.map((m) => m.artifact).join(", ");
+      throw new PrerequisiteError(
+        `Cannot generate orchestrator input: missing prerequisites: ${missingNames}. Run a full export first.`,
+        checks
+      );
+    }
+
+    const channelMeta = await readChannelJson(channelJsonPath);
+
+    const result: GenerateOrchestratorInputResult = await generateOrchestratorInput({
+      exportRoot: exportsRoot,
+      channelId: channelMeta.channelId,
+      channelName: channelMeta.channelName,
+      timeframe: channelMeta.timeframe,
+      jobId: randomUUID()
+    });
+
+    return {
+      ok: true,
+      exportPath,
+      warnings: result.warnings,
       artifactPaths: result.artifactPaths
     };
   } finally {

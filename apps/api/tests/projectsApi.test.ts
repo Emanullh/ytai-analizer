@@ -451,6 +451,32 @@ describe("projects API", () => {
     expect(missingPaths).toContain("derived/video_features/videoA3.json");
   });
 
+  it("generates orchestrator input without creating playbook/templates", async () => {
+    await fs.rm(path.resolve(tempDir, "exports", "Canal_Demo", "analysis", "orchestrator_input.json"), { force: true });
+    await fs.rm(path.resolve(tempDir, "exports", "Canal_Demo", "analysis", "playbook.json"), { force: true });
+    await fs.rm(path.resolve(tempDir, "exports", "Canal_Demo", "derived", "templates.json"), { force: true });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/export/generate-orchestrator-input",
+      payload: {
+        channelName: "Canal Demo"
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    const payload = response.json() as Record<string, unknown>;
+    expect(payload.ok).toBe(true);
+    expect(Array.isArray(payload.artifactPaths)).toBe(true);
+    expect((payload.artifactPaths as string[])[0]).toContain(path.join("analysis", "orchestrator_input.json"));
+
+    await expect(
+      fs.access(path.resolve(tempDir, "exports", "Canal_Demo", "analysis", "orchestrator_input.json"))
+    ).resolves.toBeUndefined();
+    await expect(fs.access(path.resolve(tempDir, "exports", "Canal_Demo", "analysis", "playbook.json"))).rejects.toThrow();
+    await expect(fs.access(path.resolve(tempDir, "exports", "Canal_Demo", "derived", "templates.json"))).rejects.toThrow();
+  });
+
   it("runs manual thumbnail rerun and updates derived thumbnailFeatures", async () => {
     const createResponse = await app.inject({
       method: "POST",

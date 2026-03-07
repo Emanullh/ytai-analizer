@@ -89,6 +89,13 @@ interface ExtendJobModalState {
   error: string | null;
 }
 
+interface OrchestratorActionState {
+  running: boolean;
+  error: string | null;
+  checks: Array<{ artifact: string; exists: boolean; detail?: string }> | null;
+  result: { ok: boolean; warnings: string[]; usedLlm?: boolean } | null;
+}
+
 const INITIAL_ARTIFACT_STATE: ArtifactState = {
   data: null,
   loading: false,
@@ -164,6 +171,14 @@ function parseVideoIdsInput(value: string): string[] {
         .filter(Boolean)
     )
   );
+}
+
+function getApiError(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object" || !("error" in payload)) {
+    return null;
+  }
+  const maybeError = (payload as { error?: unknown }).error;
+  return typeof maybeError === "string" ? maybeError : null;
 }
 
 function formatDate(value: string | null): string {
@@ -358,6 +373,12 @@ export default function ProjectDetail() {
     checks: Array<{ artifact: string; exists: boolean; detail?: string }> | null;
     result: { ok: boolean; warnings: string[]; usedLlm: boolean } | null;
   }>({ running: false, error: null, checks: null, result: null });
+  const [generateInputState, setGenerateInputState] = useState<OrchestratorActionState>({
+    running: false,
+    error: null,
+    checks: null,
+    result: null
+  });
 
   const featureBatchEventSourceRef = useRef<EventSource | null>(null);
   const [featureBatchRerunState, setFeatureBatchRerunState] = useState<FeatureBatchRerunModalState>(
@@ -388,6 +409,7 @@ export default function ProjectDetail() {
       setExtendCandidatesState(createInitialExtendCandidatesState());
       setExtendSelectedVideoIds([]);
       setExtendJobState(createInitialExtendJobState());
+      setGenerateInputState({ running: false, error: null, checks: null, result: null });
       setEvidencePanel({ open: false, fieldPath: "", supportedBy: [] });
       setPlaybookState(INITIAL_ARTIFACT_STATE);
       setTemplatesState(INITIAL_ARTIFACT_STATE);
@@ -567,26 +589,22 @@ export default function ProjectDetail() {
         const encodedId = encodeURIComponent(projectId);
         const response = await fetch(`/api/projects/${encodedId}/extend/candidates?timeframe=${timeframe}`);
         const payload = (await response.json().catch(() => null)) as ProjectExtendCandidatesResponse | { error?: string } | null;
+        const apiError = getApiError(payload);
+        const candidateVideos = payload && "videos" in payload && Array.isArray(payload.videos) ? payload.videos : [];
 
         if (!response.ok) {
-          throw new Error(("error" in (payload ?? {}) ? payload?.error : null) ?? "No fue posible listar candidatos.");
+          throw new Error(apiError ?? "No fue posible listar candidatos.");
         }
 
         setExtendCandidatesState({
           timeframe,
-          videos: Array.isArray((payload as ProjectExtendCandidatesResponse).videos)
-            ? (payload as ProjectExtendCandidatesResponse).videos
-            : [],
+          videos: candidateVideos,
           loading: false,
           error: null,
           loaded: true
         });
         setExtendSelectedVideoIds((prev) => {
-          const allowed = new Set(
-            Array.isArray((payload as ProjectExtendCandidatesResponse).videos)
-              ? (payload as ProjectExtendCandidatesResponse).videos.map((video) => video.videoId)
-              : []
-          );
+          const allowed = new Set(candidateVideos.map((video) => video.videoId));
           return prev.filter((videoId) => allowed.has(videoId));
         });
       } catch (requestError) {
@@ -754,6 +772,63 @@ export default function ProjectDetail() {
       });
     }
   }, [detail, loadArtifact]);
+
+  const handleGenerateOrchestratorInput = useCallback(async () => {
+    const channelName = detail?.channel.channelName;
+    if (!channelName) return;
+
+    setGenerateInputState({ running: true, error: null, checks: null, result: null });
+
+    try {
+      const response = await fetch("/api/export/generate-orchestrator-input", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channelName })
+      });
+
+      const payload = await response.json() as Record<string, unknown>;
+
+      if (response.status === 409) {
+        const checks = Array.isArray(payload.checks)
+          ? (payload.checks as Array<{ artifact: string; exists: boolean; detail?: string }>)
+          : null;
+        setGenerateInputState({
+          running: false,
+          error: (payload.error as string) ?? "Prerequisitos faltantes",
+          checks,
+          result: null
+        });
+        return;
+      }
+
+      if (!response.ok) {
+        setGenerateInputState({
+          running: false,
+          error: (payload.error as string) ?? `Error ${response.status}`,
+          checks: null,
+          result: null
+        });
+        return;
+      }
+
+      setGenerateInputState({
+        running: false,
+        error: null,
+        checks: null,
+        result: {
+          ok: true,
+          warnings: Array.isArray(payload.warnings) ? (payload.warnings as string[]) : []
+        }
+      });
+    } catch (requestError) {
+      setGenerateInputState({
+        running: false,
+        error: requestError instanceof Error ? requestError.message : "Error inesperado",
+        checks: null,
+        result: null
+      });
+    }
+  }, [detail]);
 
   const refreshProjectData = useCallback(
     async (options?: { reopenVideoId?: string | null }) => {
@@ -1064,7 +1139,7 @@ export default function ProjectDetail() {
     }
 
     if (extendSelectedVideoIds.length === 0) {
-      setExtendJobState((prev) => ({
+      setExtendJobState(() => ({
         ...createInitialExtendJobState(),
         open: true,
         error: "Selecciona al menos un video para extender el proyecto."
@@ -1104,12 +1179,13 @@ export default function ProjectDetail() {
         })
       });
       const payload = (await response.json().catch(() => null)) as ProjectExtendJobCreateResponse | { error?: string } | null;
+      const apiError = getApiError(payload);
 
       if (!response.ok || !payload || !("jobId" in payload) || typeof payload.jobId !== "string") {
         setExtendJobState((prev) => ({
           ...prev,
           running: false,
-          error: ("error" in (payload ?? {}) ? payload?.error : null) ?? `No fue posible iniciar extend (${response.status}).`
+          error: apiError ?? `No fue posible iniciar extend (${response.status}).`
         }));
         return;
       }
@@ -1546,6 +1622,24 @@ export default function ProjectDetail() {
                     </button>
                     <button
                       type="button"
+                      disabled={generateInputState.running || !detail.channel.channelName}
+                      onClick={() => void handleGenerateOrchestratorInput()}
+                      className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {generateInputState.running ? (
+                        <>
+                          <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                          </svg>
+                          Generando input...
+                        </>
+                      ) : (
+                        <>Generar input JSON</>
+                      )}
+                    </button>
+                    <button
+                      type="button"
                       disabled={rerunState.running || !detail.channel.channelName}
                       onClick={() => void handleRerunOrchestrator()}
                       className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
@@ -1569,6 +1663,40 @@ export default function ProjectDetail() {
                     </button>
                   </div>
                 </div>
+
+                {generateInputState.error ? (
+                  <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 p-3">
+                    <p className="text-sm font-medium text-rose-800">{generateInputState.error}</p>
+                    {generateInputState.checks ? (
+                      <ul className="mt-2 space-y-1">
+                        {generateInputState.checks.map((check) => (
+                          <li key={check.artifact} className="flex items-center gap-2 text-xs">
+                            <span className={check.exists ? "text-emerald-600" : "text-rose-600"}>
+                              {check.exists ? "OK" : "FALTA"}
+                            </span>
+                            <span className="font-mono text-slate-700">{check.artifact}</span>
+                            {check.detail ? <span className="text-slate-500">({check.detail})</span> : null}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {generateInputState.result ? (
+                  <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+                    <p className="text-sm font-medium text-emerald-800">
+                      Orchestrator input generado. Ya puedes exportarlo desde el bundle.
+                    </p>
+                    {generateInputState.result.warnings.length > 0 ? (
+                      <ul className="mt-1 list-disc space-y-0.5 pl-5 text-xs text-amber-700">
+                        {generateInputState.result.warnings.map((w, i) => (
+                          <li key={i}>{w}</li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </div>
+                ) : null}
 
                 {rerunState.error ? (
                   <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 p-3">

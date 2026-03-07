@@ -18,7 +18,11 @@ import {
 import { getProjectBundleMeta, prepareProjectBundleDownload } from "./services/exportBundleService.js";
 import { analyzeChannel } from "./services/youtubeService.js";
 import { HttpError } from "./utils/errors.js";
-import { rerunOrchestrator, PrerequisiteError } from "./services/rerunOrchestratorService.js";
+import {
+  generateOrchestratorInputOnly,
+  rerunOrchestrator,
+  PrerequisiteError
+} from "./services/rerunOrchestratorService.js";
 import {
   rerunThumbnailsJobService,
   toRerunLockHttpError,
@@ -259,6 +263,34 @@ export async function buildServer() {
 
     try {
       const result = await rerunOrchestrator(payload.data);
+      return reply.send(result);
+    } catch (error) {
+      const lockError = toRerunLockHttpError(error);
+      if (lockError) {
+        return reply.status(lockError.statusCode).send({ error: lockError.message });
+      }
+      if (error instanceof PrerequisiteError) {
+        return reply.status(409).send({
+          error: error.message,
+          checks: error.checks.map((c) => ({
+            artifact: c.artifact,
+            exists: c.exists,
+            detail: c.detail
+          }))
+        });
+      }
+      throw error;
+    }
+  });
+
+  app.post("/export/generate-orchestrator-input", async (request, reply) => {
+    const payload = rerunOrchestratorSchema.safeParse(request.body);
+    if (!payload.success) {
+      return reply.status(400).send({ error: payload.error.issues[0]?.message ?? "Invalid request body" });
+    }
+
+    try {
+      const result = await generateOrchestratorInputOnly(payload.data);
       return reply.send(result);
     } catch (error) {
       const lockError = toRerunLockHttpError(error);

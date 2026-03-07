@@ -90,6 +90,11 @@ export interface RunOrchestratorResult {
   artifactPaths: string[];
 }
 
+export interface GenerateOrchestratorInputResult {
+  warnings: string[];
+  artifactPaths: string[];
+}
+
 function ensureInsideRoot(rootPath: string, targetPath: string): void {
   const normalizedRoot = path.resolve(rootPath);
   const normalizedTarget = path.resolve(targetPath);
@@ -450,5 +455,41 @@ export async function runOrchestrator(args: RunOrchestratorArgs): Promise<RunOrc
     warnings,
     usedLlm: Boolean(llmOutput.playbook && llmOutput.templates),
     artifactPaths: [orchestratorInputPath, playbookPath, templatesPath]
+  };
+}
+
+export async function generateOrchestratorInput(args: RunOrchestratorArgs): Promise<GenerateOrchestratorInputResult> {
+  const warnings: string[] = [];
+  const exportPath = path.resolve(args.exportRoot, sanitizeFolderName(args.channelName));
+  const analysisPath = path.resolve(exportPath, "analysis");
+  const orchestratorInputPath = path.resolve(analysisPath, "orchestrator_input.json");
+
+  ensureInsideRoot(args.exportRoot, exportPath);
+  ensureInsideRoot(args.exportRoot, analysisPath);
+  ensureInsideRoot(args.exportRoot, orchestratorInputPath);
+
+  await fs.mkdir(analysisPath, { recursive: true });
+
+  const deterministic = await buildDeterministicOrchestratorInput({
+    exportPath,
+    channelMeta: {
+      channelId: args.channelId,
+      channelName: args.channelName,
+      timeframe: args.timeframe,
+      jobId: args.jobId
+    }
+  });
+
+  warnings.push(...deterministic.warnings);
+  await writeJsonAtomic(orchestratorInputPath, deterministic.orchestratorInput);
+  await updateManifestArtifactsIfExists({
+    exportPath,
+    artifactAbsolutePaths: [orchestratorInputPath],
+    warnings
+  });
+
+  return {
+    warnings,
+    artifactPaths: [orchestratorInputPath]
   };
 }

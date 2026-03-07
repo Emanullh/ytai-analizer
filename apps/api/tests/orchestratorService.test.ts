@@ -166,6 +166,27 @@ describe("orchestratorService", () => {
     expect(templates.warnings.some((warning) => warning.includes("LLM skipped"))).toBe(true);
   });
 
+  it("generates only orchestrator_input.json without invoking the LLM", async () => {
+    process.env.AUTO_GEN_ENABLED = "true";
+    process.env.OPENAI_API_KEY = "test-key";
+
+    const { generateOrchestratorInput } = await import("../src/analysis/orchestratorService.js");
+    const result = await generateOrchestratorInput({
+      exportRoot,
+      channelId: "UC1234567890123456789012",
+      channelName: "My Channel",
+      timeframe: "6m",
+      jobId: "job-input-only"
+    });
+
+    await expect(fs.access(path.join(exportPath, "analysis", "orchestrator_input.json"))).resolves.toBeUndefined();
+    await expect(fs.access(path.join(exportPath, "analysis", "playbook.json"))).rejects.toThrow();
+    await expect(fs.access(path.join(exportPath, "derived", "templates.json"))).rejects.toThrow();
+    expect(requestAutoGenTaskMock).not.toHaveBeenCalled();
+    expect(result.artifactPaths).toHaveLength(1);
+    expect(result.artifactPaths[0]).toContain(path.join("analysis", "orchestrator_input.json"));
+  });
+
   it("persists LLM output when supported_by/evidence_fields are valid", async () => {
     process.env.AUTO_GEN_ENABLED = "true";
     process.env.OPENAI_API_KEY = "test-key";

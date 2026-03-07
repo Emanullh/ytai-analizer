@@ -264,6 +264,119 @@ describe("Projects pages", () => {
     });
   });
 
+  it("generates orchestrator input without launching the full rerun", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          projectId: "Canal_Demo",
+          channel: {
+            channelId: "UC123",
+            channelName: "Canal Demo",
+            sourceInput: "https://www.youtube.com/@demo",
+            timeframe: "6m",
+            exportedAt: "2026-03-01T12:00:00.000Z",
+            timeframeResolved: null
+          },
+          manifest: {
+            counts: {
+              totalVideosSelected: 1,
+              transcriptsOk: 1,
+              transcriptsMissing: 0,
+              transcriptsError: 0,
+              thumbnailsOk: 1,
+              thumbnailsFailed: 0
+            },
+            warnings: []
+          },
+          latestJob: {
+            jobId: "job-a1",
+            status: "done",
+            startedAt: "2026-03-01T11:59:00.000Z",
+            finishedAt: "2026-03-01T12:00:00.000Z",
+            durationMs: 60000,
+            warningsCount: 0,
+            errorsCount: 0
+          },
+          jobs: [],
+          artifacts: {
+            playbook: null,
+            templates: null,
+            channelModels: null
+          },
+          warnings: []
+        })
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            videoId: "video1",
+            title: "Video Uno",
+            publishedAt: "2026-02-20T00:00:00.000Z",
+            thumbnailPath: "thumbnails/video1.jpg",
+            transcriptStatus: "ok",
+            transcriptSource: "captions",
+            performance: {
+              viewsPerDay: 12,
+              engagementRate: 0.1,
+              residual: 0.2,
+              percentile: 70
+            },
+            hasLLM: {
+              title: true,
+              description: true,
+              transcript: false,
+              thumbnail: true
+            },
+            cacheHit: "full"
+          }
+        ]
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          ok: true,
+          warnings: [],
+          artifactPaths: ["C:/tmp/exports/Canal_Demo/analysis/orchestrator_input.json"]
+        })
+      });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter initialEntries={["/projects/Canal_Demo"]}>
+        <Routes>
+          <Route path="/projects/:projectId" element={<ProjectDetail />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getAllByText("Video Uno").length).toBeGreaterThan(0);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Playbook" }));
+    fireEvent.click(screen.getByRole("button", { name: "Generar input JSON" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/export/generate-orchestrator-input",
+        expect.objectContaining({
+          method: "POST",
+          headers: { "Content-Type": "application/json" }
+        })
+      );
+    });
+
+    const generateCall = fetchMock.mock.calls.find(([url]) => url === "/api/export/generate-orchestrator-input");
+    expect(JSON.parse(String((generateCall?.[1] as { body?: string } | undefined)?.body))).toMatchObject({
+      channelName: "Canal Demo"
+    });
+    expect(screen.getByText("Orchestrator input generado. Ya puedes exportarlo desde el bundle.")).toBeInTheDocument();
+  });
+
   it("renders feature analysis cards and reruns a single feature from video detail", async () => {
     const detailPayload = {
       videoId: "video1",
