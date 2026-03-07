@@ -33,6 +33,15 @@ const stageHintByKey: Record<ExportVideoStage, string> = {
   failed: "Video no pudo exportarse."
 };
 
+type VideoSortOrder = "newest" | "oldest" | "views_desc" | "views_asc";
+
+const videoSortOptions: Array<{ label: string; value: VideoSortOrder }> = [
+  { label: "Fecha: más reciente", value: "newest" },
+  { label: "Fecha: más antigua", value: "oldest" },
+  { label: "Vistas: mayor a menor", value: "views_desc" },
+  { label: "Vistas: menor a mayor", value: "views_asc" }
+];
+
 function formatViews(views: number): string {
   return new Intl.NumberFormat("es-ES").format(views);
 }
@@ -56,6 +65,9 @@ function stageBadgeClasses(stage: ExportVideoStage): string {
 export default function AnalyzePage() {
   const [sourceInput, setSourceInput] = useState("");
   const [timeframe, setTimeframe] = useState<Timeframe>("6m");
+  const [searchTerm, setSearchTerm] = useState("");
+  const [sortOrder, setSortOrder] = useState<VideoSortOrder>("newest");
+  const [showOnlySelected, setShowOnlySelected] = useState(false);
   const [result, setResult] = useState<AnalyzeResponse | null>(null);
   const [selectedVideoIds, setSelectedVideoIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
@@ -63,22 +75,50 @@ export default function AnalyzePage() {
   const [exportModalState, dispatchExportModal] = useReducer(reduceExportModalState, undefined, createInitialExportModalState);
   const eventSourceRef = useRef<EventSource | null>(null);
 
+  const allVideos = result?.videos ?? [];
   const hasSelection = selectedVideoIds.size > 0;
-  const sortedVideos: VideoItem[] = useMemo(
-    () =>
-      result?.videos.slice().sort((a, b) => {
+  const visibleVideos: VideoItem[] = useMemo(() => {
+    const normalizedSearchTerm = searchTerm.trim().toLocaleLowerCase("es-ES");
+    const filtered = normalizedSearchTerm
+      ? allVideos.filter((video) => {
+          const haystack = `${video.title} ${video.videoId}`.toLocaleLowerCase("es-ES");
+          return haystack.includes(normalizedSearchTerm);
+        })
+      : allVideos;
+
+    const sorted = filtered.slice().sort((a, b) => {
+      if (sortOrder === "newest") {
         return new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime();
-      }) ?? [],
-    [result]
+      }
+      if (sortOrder === "oldest") {
+        return new Date(a.publishedAt).getTime() - new Date(b.publishedAt).getTime();
+      }
+      if (sortOrder === "views_desc") {
+        return b.viewCount - a.viewCount;
+      }
+      return a.viewCount - b.viewCount;
+    });
+
+    if (!showOnlySelected) {
+      return sorted;
+    }
+    return sorted.filter((video) => selectedVideoIds.has(video.videoId));
+  }, [allVideos, searchTerm, selectedVideoIds, showOnlySelected, sortOrder]);
+
+  const visibleVideoIds = useMemo(() => visibleVideos.map((video) => video.videoId), [visibleVideos]);
+  const visibleSelectedCount = useMemo(
+    () => visibleVideos.filter((video) => selectedVideoIds.has(video.videoId)).length,
+    [visibleVideos, selectedVideoIds]
   );
+  const hasVisibleVideos = visibleVideos.length > 0;
 
   const videoTitleById = useMemo(() => {
     const map = new Map<string, string>();
-    for (const video of sortedVideos) {
+    for (const video of allVideos) {
       map.set(video.videoId, video.title);
     }
     return map;
-  }, [sortedVideos]);
+  }, [allVideos]);
 
   const exportProgressPercent =
     exportModalState.total > 0 ? Math.round((exportModalState.completed / exportModalState.total) * 100) : 0;
@@ -90,6 +130,40 @@ export default function AnalyzePage() {
         next.delete(videoId);
       } else {
         next.add(videoId);
+      }
+      return next;
+    });
+  };
+
+  const selectVisibleVideos = () => {
+    setSelectedVideoIds((prev) => {
+      const next = new Set(prev);
+      for (const videoId of visibleVideoIds) {
+        next.add(videoId);
+      }
+      return next;
+    });
+  };
+
+  const deselectVisibleVideos = () => {
+    setSelectedVideoIds((prev) => {
+      const next = new Set(prev);
+      for (const videoId of visibleVideoIds) {
+        next.delete(videoId);
+      }
+      return next;
+    });
+  };
+
+  const invertVisibleVideos = () => {
+    setSelectedVideoIds((prev) => {
+      const next = new Set(prev);
+      for (const videoId of visibleVideoIds) {
+        if (next.has(videoId)) {
+          next.delete(videoId);
+        } else {
+          next.add(videoId);
+        }
       }
       return next;
     });
@@ -123,6 +197,9 @@ export default function AnalyzePage() {
       const payload = (await response.json()) as AnalyzeResponse;
       setResult(payload);
       setSelectedVideoIds(new Set());
+      setSearchTerm("");
+      setSortOrder("newest");
+      setShowOnlySelected(false);
     } catch (requestError) {
       setResult(null);
       setSelectedVideoIds(new Set());
@@ -303,49 +380,131 @@ export default function AnalyzePage() {
 
       {result ? (
         <section className="panel p-5">
-          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-            <h2 className="text-lg font-semibold text-slate-900">Videos</h2>
-            <button
-              disabled={!hasSelection || status !== "idle"}
-              onClick={handleExport}
-              className="btn-secondary"
-            >
-              {status === "exporting" ? "Exportando..." : "Exportar seleccionados"}
-            </button>
+          <div className="mb-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-900">Videos</h2>
+                <p className="text-xs text-slate-600">
+                  Seleccionados:{" "}
+                  <span className="font-semibold text-slate-900">{selectedVideoIds.size}</span> de {allVideos.length} videos
+                </p>
+              </div>
+              <button
+                disabled={!hasSelection || status !== "idle"}
+                onClick={handleExport}
+                className="btn-secondary"
+              >
+                {status === "exporting" ? "Exportando..." : `Exportar seleccionados (${selectedVideoIds.size})`}
+              </button>
+            </div>
+
+            <div className="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 lg:grid-cols-[1fr_260px_auto]">
+              <label className="text-sm font-medium text-slate-700">
+                Buscar
+                <input
+                  type="text"
+                  value={searchTerm}
+                  onChange={(event) => setSearchTerm(event.target.value)}
+                  placeholder="Filtrar por título o videoId"
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+                />
+              </label>
+
+              <label className="text-sm font-medium text-slate-700">
+                Orden
+                <select
+                  value={sortOrder}
+                  onChange={(event) => setSortOrder(event.target.value as VideoSortOrder)}
+                  className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
+                >
+                  {videoSortOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="inline-flex cursor-pointer items-center gap-2 self-end rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700">
+                <input
+                  type="checkbox"
+                  checked={showOnlySelected}
+                  onChange={(event) => setShowOnlySelected(event.target.checked)}
+                  className="h-4 w-4 rounded border-slate-300 text-teal-600 focus:ring-teal-500"
+                />
+                Mostrar solo seleccionados
+              </label>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white p-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <button type="button" onClick={selectVisibleVideos} disabled={!hasVisibleVideos} className="btn-ghost !px-3 !py-1.5 !text-xs">
+                  Seleccionar mostrados
+                </button>
+                <button
+                  type="button"
+                  onClick={deselectVisibleVideos}
+                  disabled={!hasVisibleVideos || visibleSelectedCount === 0}
+                  className="btn-ghost !px-3 !py-1.5 !text-xs"
+                >
+                  Deseleccionar mostrados
+                </button>
+                <button type="button" onClick={invertVisibleVideos} disabled={!hasVisibleVideos} className="btn-ghost !px-3 !py-1.5 !text-xs">
+                  Invertir mostrados
+                </button>
+              </div>
+              <p className="text-xs text-slate-600">
+                Mostrados: <span className="font-semibold text-slate-900">{visibleVideos.length}</span> | Seleccionados mostrados:{" "}
+                <span className="font-semibold text-slate-900">{visibleSelectedCount}</span>
+              </p>
+            </div>
           </div>
 
-          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            {sortedVideos.map((video) => {
-              const selected = selectedVideoIds.has(video.videoId);
-              return (
-                <article
-                  key={video.videoId}
-                  className={`overflow-hidden rounded-2xl border bg-white transition ${
-                    selected
-                      ? "border-teal-400 ring-2 ring-teal-100"
-                      : "border-slate-200 hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md"
-                  }`}
-                  onClick={() => toggleVideo(video.videoId)}
-                >
-                  <img src={video.thumbnailUrl} alt={video.title} loading="lazy" className="aspect-video w-full object-cover" />
-                  <div className="space-y-2 p-3">
-                    <label className="inline-flex cursor-pointer items-center gap-2 text-xs text-slate-600" onClick={(event) => event.stopPropagation()}>
-                      <input
-                        type="checkbox"
-                        checked={selected}
-                        onChange={() => toggleVideo(video.videoId)}
-                        className="h-4 w-4 rounded border-slate-300 text-teal-600 focus:ring-teal-500"
-                      />
-                      Seleccionar
-                    </label>
-                    <h3 className="line-clamp-2 text-sm font-semibold text-slate-900">{video.title}</h3>
-                    <p className="text-sm text-slate-600">{formatViews(video.viewCount)} vistas</p>
-                    <p className="text-xs text-slate-500">{new Date(video.publishedAt).toLocaleDateString("es-ES")}</p>
-                  </div>
-                </article>
-              );
-            })}
-          </div>
+          {!hasVisibleVideos ? (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-600">
+              {allVideos.length === 0
+                ? "No hay videos para mostrar en este timeframe."
+                : showOnlySelected
+                  ? "No hay videos seleccionados con el filtro actual."
+                  : "No hay videos que coincidan con la búsqueda."}
+            </div>
+          ) : (
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+              {visibleVideos.map((video) => {
+                const selected = selectedVideoIds.has(video.videoId);
+                return (
+                  <article
+                    key={video.videoId}
+                    className={`overflow-hidden rounded-2xl border bg-white transition ${
+                      selected
+                        ? "border-teal-400 ring-2 ring-teal-100"
+                        : "border-slate-200 hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md"
+                    }`}
+                    onClick={() => toggleVideo(video.videoId)}
+                  >
+                    <img src={video.thumbnailUrl} alt={video.title} loading="lazy" className="aspect-video w-full object-cover" />
+                    <div className="space-y-2 p-3">
+                      <label
+                        className="inline-flex cursor-pointer items-center gap-2 text-xs text-slate-600"
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={() => toggleVideo(video.videoId)}
+                          className="h-4 w-4 rounded border-slate-300 text-teal-600 focus:ring-teal-500"
+                        />
+                        Seleccionar
+                      </label>
+                      <h3 className="line-clamp-2 text-sm font-semibold text-slate-900">{video.title}</h3>
+                      <p className="text-sm text-slate-600">{formatViews(video.viewCount)} vistas</p>
+                      <p className="text-xs text-slate-500">{new Date(video.publishedAt).toLocaleDateString("es-ES")}</p>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
         </section>
       ) : null}
 

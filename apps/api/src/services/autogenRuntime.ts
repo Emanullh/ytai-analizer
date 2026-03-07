@@ -101,7 +101,7 @@ interface AutoGenInFlightTask {
   request: AutoGenTaskRequest;
   resolve: (result: unknown) => void;
   reject: (error: unknown) => void;
-  timeout: NodeJS.Timeout;
+  timeout: NodeJS.Timeout | null;
 }
 
 interface AutoGenWorkerResponse {
@@ -263,16 +263,7 @@ class AutoGenWorkerClient {
     return new Promise<unknown>((resolve, reject) => {
       const id = randomUUID();
       options.onWorkerRequestId?.(id);
-      const timeoutSec = request.task === "channel_orchestrator_v1"
-        ? env.autoGenTimeoutOrchestratorSec
-        : env.autoGenTimeoutSec;
-      const timeoutMs = timeoutSec * 1_000;
-      const timeout = setTimeout(() => {
-        this.rejectTask(id, new Error(`AutoGen worker timeout after ${timeoutSec}s`));
-        this.terminateWorker();
-      }, timeoutMs);
-
-      this.queue.push({ id, request, resolve, reject, timeout });
+      this.queue.push({ id, request, resolve, reject, timeout: null });
       void this.pumpQueue();
     });
   }
@@ -290,7 +281,9 @@ class AutoGenWorkerClient {
         if (!queuedTask) {
           continue;
         }
-        clearTimeout(queuedTask.timeout);
+        if (queuedTask.timeout) {
+          clearTimeout(queuedTask.timeout);
+        }
         queuedTask.reject(error);
       }
       return;
@@ -302,6 +295,14 @@ class AutoGenWorkerClient {
     }
 
     this.inFlight.set(task.id, task);
+    const timeoutSec = task.request.task === "channel_orchestrator_v1"
+      ? env.autoGenTimeoutOrchestratorSec
+      : env.autoGenTimeoutSec;
+    const timeoutMs = timeoutSec * 1_000;
+    task.timeout = setTimeout(() => {
+      this.rejectTask(task.id, new Error(`AutoGen worker timeout after ${timeoutSec}s`));
+      this.terminateWorker();
+    }, timeoutMs);
     const requestPayload = {
       id: task.id,
       task: task.request.task,
@@ -410,7 +411,9 @@ class AutoGenWorkerClient {
       return;
     }
 
-    clearTimeout(task.timeout);
+    if (task.timeout) {
+      clearTimeout(task.timeout);
+    }
     this.inFlight.delete(taskId);
     task.resolve(result);
     void this.pumpQueue();
@@ -422,7 +425,9 @@ class AutoGenWorkerClient {
       return;
     }
 
-    clearTimeout(task.timeout);
+    if (task.timeout) {
+      clearTimeout(task.timeout);
+    }
     this.inFlight.delete(taskId);
     task.reject(error);
     void this.pumpQueue();
@@ -430,7 +435,9 @@ class AutoGenWorkerClient {
 
   private rejectAllInFlight(error: unknown): void {
     for (const task of this.inFlight.values()) {
-      clearTimeout(task.timeout);
+      if (task.timeout) {
+        clearTimeout(task.timeout);
+      }
       task.reject(error);
     }
     this.inFlight.clear();
